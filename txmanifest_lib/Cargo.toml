@@ -1,0 +1,42 @@
+[package]
+name = "tx-manifest-lib"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Declarative transaction-manifest engine and SimplicityHL covenant runtime for Liquid/Elements."
+repository = "https://github.com/stringhandler/manifest-wallet"
+keywords = ["liquid", "elements", "simplicity", "covenant", "bitcoin"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+dialoguer = "0.11"
+console = "0.15"
+lwk_wollet = "0.9"
+lwk_signer = "0.9"
+bip39 = "2"
+elements-miniscript = "0.4"
+lwk_common = "0.9"
+dirs-next = "2.0.0"
+evalexpr = "11"
+rand = "0.8"
+ureq = "2"
+base64 = "0.22"
+# Covenant dry-runs, address derivation and witness building only use upstream
+# (master) APIs. The `feat/compile-function-only` fork is a superset of master that
+# additionally provides the standalone compile_function / expression-eval APIs used
+# by the `simplicity_eval` feature, so this one ref satisfies both build configs.
+# simplicityhl = { git = "https://github.com/stringhandler/SimplicityHL", branch = "feat/compile-function-only", features = [
+#     "serde",
+# ] }
+simplicityhl = { git = "https://github.com/BlockstreamResearch/SimplicityHL", features = [
+    "serde",
+] }
+
+[features]
+default = []
+# Enables code paths that rely on the custom SimplicityHL additions NOT in master:
+# `TemplateProgram::compile_function` / `CompiledFunction` and `eval_expression`.
+# With this off, the crate builds against simplicityhl master.
+simplicity_eval = []

@@ -1,0 +1,12 @@
+/target/
+
+/.vscode/
+/.claude/
+
+# Wallet & runtime artifacts — never commit keys or local state.
+# (Example manifests are named txmanifest.json / params.json and stay tracked.)
+wallet*.json
+oracle.json
+*_wallet.json
+*.state.json
+*.instance.json
