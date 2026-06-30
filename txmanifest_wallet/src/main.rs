@@ -97,7 +97,7 @@ enum Commands {
         /// Wallet file to load (default: wallet.json)
         #[arg(long, default_value = "wallet.json")]
         wallet: PathBuf,
-        /// Esplora HTTP URL (defaults to config default_esplora)
+        /// Esplora HTTP URL (overrides the active backend URL; default from config)
         #[arg(long)]
         esplora: Option<String>,
         /// Directory to persist wallet state (default: platform data dir / tx-manifest-wallet)
@@ -115,7 +115,7 @@ enum Commands {
         /// Wallet file (default: wallet.json)
         #[arg(long, default_value = "wallet.json")]
         wallet: PathBuf,
-        /// Esplora URL for broadcasting (defaults to config default_esplora)
+        /// Esplora URL for broadcasting (overrides the active backend URL; default from config)
         #[arg(long)]
         esplora: Option<String>,
         /// Directory where wallet state is persisted
@@ -151,7 +151,7 @@ enum Commands {
         /// Wallet file (default: wallet.json)
         #[arg(long, default_value = "wallet.json")]
         wallet: PathBuf,
-        /// Esplora URL for broadcasting (defaults to config default_esplora)
+        /// Esplora URL for broadcasting (overrides the active backend URL; default from config)
         #[arg(long)]
         esplora: Option<String>,
         /// Directory where wallet state is persisted
@@ -163,7 +163,8 @@ enum Commands {
     ///
     /// With no arguments: prints current config.
     /// With KEY VALUE: sets that config key.
-    /// Valid keys: default_network (testnet|mainnet), default_esplora
+    /// Valid keys: default_network (testnet|mainnet), default_backend (esplora|electrum),
+    /// default_esplora (HTTP URL), default_electrum (e.g. ssl://host:50002)
     Config {
         /// Config key to set
         key: Option<String>,
@@ -181,7 +182,8 @@ fn cmd_prepare(
     split_amount: u64,
 ) -> Result<()> {
     let cfg = config::load();
-    let esplora = esplora.unwrap_or_else(|| cfg.esplora_url());
+    let backend_kind = cfg.backend_kind();
+    let server_url = esplora.unwrap_or_else(|| cfg.backend_url());
     use console::style;
     let raw = std::fs::read_to_string(manifest_path)
         .with_context(|| format!("Cannot read manifest file: {}", manifest_path.display()))?;
@@ -201,7 +203,8 @@ fn cmd_prepare(
         manifest: &manifest,
         action_name,
         data_dir: &data_dir,
-        esplora_url: esplora,
+        backend_kind,
+        server_url,
         split_amount,
     })
 }
@@ -218,10 +221,18 @@ fn cmd_config(key: Option<&str>, value: Option<&str>) -> Result<()> {
             println!("  File            : {}", style(path.display()).dim());
             println!("  default_network : {}", style(&cfg.default_network).yellow());
             println!(
+                "  default_backend : {}",
+                style(cfg.default_backend.as_deref().unwrap_or("esplora")).yellow()
+            );
+            println!(
                 "  default_esplora : {}",
                 style(cfg.default_esplora.as_deref().unwrap_or("(auto)")).yellow()
             );
-            println!("  esplora URL     : {}", style(cfg.esplora_url()).dim());
+            println!(
+                "  default_electrum: {}",
+                style(cfg.default_electrum.as_deref().unwrap_or("(auto)")).yellow()
+            );
+            println!("  active backend  : {} {}", style(cfg.backend_kind().as_str()).cyan(), style(cfg.backend_url()).dim());
         }
         (Some("default_network"), Some(v)) => {
             if v != "testnet" && v != "mainnet" {
@@ -231,6 +242,14 @@ fn cmd_config(key: Option<&str>, value: Option<&str>) -> Result<()> {
             config::save(&cfg)?;
             println!("  default_network → {}", style(v).yellow());
         }
+        (Some("default_backend"), Some(v)) => {
+            if v != "esplora" && v != "electrum" {
+                anyhow::bail!("default_backend must be 'esplora' or 'electrum'");
+            }
+            cfg.default_backend = if v.is_empty() { None } else { Some(v.to_string()) };
+            config::save(&cfg)?;
+            println!("  default_backend → {}", style(v).yellow());
+        }
         (Some("default_esplora"), Some(v)) => {
             cfg.default_esplora = if v.is_empty() { None } else { Some(v.to_string()) };
             config::save(&cfg)?;
@@ -239,7 +258,15 @@ fn cmd_config(key: Option<&str>, value: Option<&str>) -> Result<()> {
                 style(cfg.default_esplora.as_deref().unwrap_or("(auto)")).yellow()
             );
         }
-        (Some(k), _) => anyhow::bail!("Unknown config key '{k}'. Valid keys: default_network, default_esplora"),
+        (Some("default_electrum"), Some(v)) => {
+            cfg.default_electrum = if v.is_empty() { None } else { Some(v.to_string()) };
+            config::save(&cfg)?;
+            println!(
+                "  default_electrum → {}",
+                style(cfg.default_electrum.as_deref().unwrap_or("(auto)")).yellow()
+            );
+        }
+        (Some(k), _) => anyhow::bail!("Unknown config key '{k}'. Valid keys: default_network, default_backend, default_esplora, default_electrum"),
     }
     Ok(())
 }
@@ -289,7 +316,8 @@ fn cmd_info(wallet_path: &Path) -> Result<()> {
 
 fn cmd_sync(wallet_path: &Path, esplora: Option<&str>, data_dir: Option<&std::path::Path>) -> Result<()> {
     let cfg = config::load();
-    let esplora = esplora.unwrap_or_else(|| cfg.esplora_url());
+    let backend_kind = cfg.backend_kind();
+    let server_url = esplora.unwrap_or_else(|| cfg.backend_url());
     use console::style;
     let w = wallet::load_wallet(wallet_path)?;
     let data_dir = data_dir.map(|p| p.to_path_buf()).unwrap_or_else(wallet::default_data_dir);
@@ -297,11 +325,11 @@ fn cmd_sync(wallet_path: &Path, esplora: Option<&str>, data_dir: Option<&std::pa
     println!();
     println!("{}", style("Syncing wallet…").bold().cyan());
     println!("  Network  : {}", style(&w.network).cyan());
-    println!("  Esplora  : {}", style(esplora).dim());
+    println!("  Backend  : {} {}", style(backend_kind.as_str()).cyan(), style(server_url).dim());
     println!("  Data dir : {}", style(data_dir.display()).dim());
     println!();
 
-    let result = wallet::sync(&w, esplora, &data_dir)?;
+    let result = wallet::sync(&w, backend_kind, server_url, &data_dir)?;
 
     println!("{}", style("Sync complete.").bold().green());
     println!("  Tip block: {}", style(result.tip).cyan());
@@ -375,7 +403,7 @@ fn cmd_split(
 ) -> Result<()> {
     use console::style;
     use lwk_common::Signer;
-    use lwk_wollet::{blocking, FsPersister};
+    use lwk_wollet::FsPersister;
     use std::str::FromStr;
 
     if count == 0 {
@@ -383,7 +411,8 @@ fn cmd_split(
     }
 
     let cfg = config::load();
-    let esplora = esplora.unwrap_or_else(|| cfg.esplora_url());
+    let backend_kind = cfg.backend_kind();
+    let server_url = esplora.unwrap_or_else(|| cfg.backend_url());
     let w = wallet::load_wallet(wallet_path)?;
     let network = wallet::elements_network(&w);
     let desc = wallet::descriptor(&w)?;
@@ -518,10 +547,8 @@ fn cmd_split(
     let tx = wollet.finalize(&mut pset)
         .map_err(|e| anyhow::anyhow!("Failed to finalize: {e}"))?;
 
-    let client = blocking::EsploraClient::new(esplora, network)
-        .map_err(|e| anyhow::anyhow!("Cannot connect to Esplora: {e}"))?;
-    let txid = blocking::BlockchainBackend::broadcast(&client, &tx)
-        .map_err(|e| anyhow::anyhow!("Broadcast failed: {e}"))?;
+    let client = tx_manifest_lib::backend::Backend::connect(backend_kind, server_url, network)?;
+    let txid = client.broadcast(&tx)?;
 
     println!("{} txid: {}", style("Broadcast").green().bold(), txid);
     println!("Run `sync` after confirmation to update wallet state.");

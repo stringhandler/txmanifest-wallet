@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use elements_miniscript::bitcoin::bip32::{DerivationPath, Xpriv};
 use lwk_common::{singlesig_desc, DescriptorBlindingKey, Signer, Singlesig};
 use lwk_signer::SwSigner;
-use lwk_wollet::{blocking, ElementsNetwork, NoPersist, WolletDescriptor};
+use lwk_wollet::{ElementsNetwork, NoPersist, WolletDescriptor};
 use serde::{Deserialize, Serialize};
 
 // BIP86 (taproot) derivation paths — m/86h/<coin_type>h/<account>h/0/0
@@ -135,12 +135,20 @@ pub fn descriptor(wallet: &WalletFile) -> Result<WolletDescriptor> {
         .map_err(|e| anyhow::anyhow!("Descriptor parse failed: {e}"))
 }
 
-/// Sync the wallet against the given Esplora URL, persisting state to `data_dir`.
+/// Sync the wallet against the given chain backend, persisting state to `data_dir`.
 /// Returns the block height after sync.
-pub fn sync(wallet: &WalletFile, esplora_url: &str, data_dir: &Path) -> Result<SyncResult> {
+pub fn sync(
+    wallet: &WalletFile,
+    backend_kind: crate::backend::BackendKind,
+    server_url: &str,
+    data_dir: &Path,
+) -> Result<SyncResult> {
     let network = elements_network(wallet);
     let desc = descriptor(wallet)?;
-    println!("Syncing wallet with Esplora at '{esplora_url}'...");
+    println!(
+        "Syncing wallet with {} at '{server_url}'...",
+        backend_kind.as_str()
+    );
     println!(" desc: {desc}");
 
     std::fs::create_dir_all(data_dir)
@@ -149,11 +157,9 @@ pub fn sync(wallet: &WalletFile, esplora_url: &str, data_dir: &Path) -> Result<S
     let mut wollet = lwk_wollet::Wollet::with_fs_persist(network, desc, data_dir)
         .map_err(|e| anyhow::anyhow!("Failed to open wallet: {e}"))?;
 
-    let mut client = blocking::EsploraClient::new(esplora_url, network)
-        .map_err(|e| anyhow::anyhow!("Failed to connect to Esplora at '{esplora_url}': {e}"))?;
+    let mut client = crate::backend::Backend::connect(backend_kind, server_url, network)?;
 
-    let update = blocking::BlockchainBackend::full_scan(&mut client, &wollet)
-        .map_err(|e| anyhow::anyhow!("Sync failed: {e}"))?;
+    let update = client.full_scan(&wollet)?;
 
     let tip = if let Some(update) = update {
         let tip = update.tip.height;

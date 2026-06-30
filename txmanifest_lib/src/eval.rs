@@ -61,6 +61,43 @@ pub fn eval_destination_str(dest: &str, ctx: &ExecutionContext) -> Option<String
     resolve_ref(dest, ctx)
 }
 
+/// Evaluate an inequality (`!=`) validation expression by comparing both operands
+/// as strings.  String comparison (rather than the integer evaluator) lets this
+/// work on 64-char asset-id hex values, e.g.
+/// `params.COLLATERAL_ASSET_ID != params.PRINCIPAL_ASSET_ID`.
+///
+/// Returns:
+///   - `Some(true)`  — the operands differ (validation passes)
+///   - `Some(false)` — the operands are equal (validation is violated)
+///   - `None`        — the expression is not a `!=` comparison, or an operand
+///                     could not be resolved; the caller treats this as
+///                     informational (not enforced).
+///
+/// Only `!=` is handled here. Equality/relational operators are intentionally
+/// left unenforced so existing `==` / `>=` validations keep their current
+/// (informational) behaviour.
+pub fn eval_inequality_validation(expr: &str, ctx: &ExecutionContext) -> Option<bool> {
+    // `split_once("!=")` only matches `!=`, never `==`, `>=`, or `<=`.
+    let (lhs, rhs) = expr.split_once("!=")?;
+    let lv = resolve_operand(lhs.trim(), ctx)?;
+    let rv = resolve_operand(rhs.trim(), ctx)?;
+    Some(lv != rv)
+}
+
+/// Resolve a single comparison operand: a context reference (`params.X`,
+/// `compile_params.X`, `input.field`, …) or a bare/quoted literal.
+fn resolve_operand(s: &str, ctx: &ExecutionContext) -> Option<String> {
+    if let Some(v) = resolve_ref(s, ctx) {
+        return Some(v);
+    }
+    let lit = s.trim_matches(['"', '\'']);
+    if lit.is_empty() {
+        None
+    } else {
+        Some(lit.to_string())
+    }
+}
+
 /// Resolve a per-site covenant `compile_params` value.
 ///
 /// The value may be a reference into the execution context — `params.X`,

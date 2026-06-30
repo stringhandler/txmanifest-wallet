@@ -1201,7 +1201,7 @@ mod tests {
             &mut explicit_hints,
             "PRINCIPAL_INTEREST_RATE",
             "1000",
-            "liquid.u16",
+            "u16",
         );
 
         // Asset IDs (display-backward hex — build_args_json reverses them)
@@ -1408,7 +1408,7 @@ mod tests {
             &mut hints,
             "PRINCIPAL_INTEREST_RATE",
             "1000",
-            "liquid.u16",
+            "u16",
         );
 
         add(

@@ -1,4 +1,5 @@
 pub mod manifest;
+pub mod backend;
 pub mod config;
 pub mod describe;
 pub mod context;

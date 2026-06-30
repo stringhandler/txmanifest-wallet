@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use lwk_common::Signer;
-use lwk_wollet::{blocking, ElementsNetwork, FsPersister};
+use lwk_wollet::{ElementsNetwork, FsPersister};
 
 use console::style;
 use dialoguer::Confirm;
@@ -19,7 +19,8 @@ pub struct PrepareOpts<'a> {
     pub manifest: &'a Manifest,
     pub action_name: &'a str,
     pub data_dir: &'a Path,
-    pub esplora_url: &'a str,
+    pub backend_kind: crate::backend::BackendKind,
+    pub server_url: &'a str,
     pub split_amount: u64,
 }
 
@@ -172,11 +173,9 @@ pub fn prepare(opts: PrepareOpts<'_>) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to finalize PSET: {e}"))?;
 
         // Broadcast
-        let client = blocking::EsploraClient::new(opts.esplora_url, network)
-            .map_err(|e| anyhow::anyhow!("Cannot connect to Esplora: {e}"))?;
+        let client = crate::backend::Backend::connect(opts.backend_kind, opts.server_url, network)?;
 
-        let txid = blocking::BlockchainBackend::broadcast(&client, &tx)
-            .map_err(|e| anyhow::anyhow!("Broadcast failed: {e}"))?;
+        let txid = client.broadcast(&tx)?;
 
         println!("  {} txid: {}", style("Broadcast").green().bold(), txid);
         println!("  Run `sync` after confirmation to update wallet state.");

@@ -2454,7 +2454,7 @@ pub fn run(
     // ------------------------------------------------------------------
     // Build combined type hints: compile params + action params, so tapleaf
     // computes inside create_instance can infer types for things like
-    // BORROWER_PUB_KEY (pubkey), PRINCIPAL_INTEREST_RATE (liquid.u16), etc.
+    // BORROWER_PUB_KEY (pubkey), PRINCIPAL_INTEREST_RATE (u16), etc.
     let create_instance_hints: std::collections::HashMap<String, String> = {
         let mut hints = compile_param_type_hints.clone();
         if let Some(params) = &action.params {
@@ -2694,20 +2694,8 @@ pub fn run(
                         );
                     }
                     let cfg = config::load();
-                    let url = format!("{}/tx", cfg.esplora_url().trim_end_matches('/'));
-                    println!("  {} POST {}", style("→").cyan(), style(&url).underlined());
-                    println!("  {} body: {} chars of hex", style("→").cyan(), tx_hex.len());
-                    match ureq::post(&url)
-                        .set("Content-Type", "text/plain")
-                        .send_string(&tx_hex)
-                    {
-                        Ok(resp) => {
-                            let status = resp.status();
-                            let body = resp.into_string().unwrap_or_default();
-                            println!("  {} HTTP {status}", style("←").green(), );
-                            println!("  {} body: {}", style("←").green(), body.trim());
-                            if status == 200 {
-                                let txid = body.trim().to_string();
+                    match broadcast_finalized_tx(&cfg, &tx, &tx_hex, net_for_hash) {
+                        Ok(txid) => {
                                 broadcast_txid = Some(txid.clone());
                                 println!(
                                     "  {} txid: {}",
@@ -2820,19 +2808,9 @@ pub fn run(
                                         style("[warn]").yellow()
                                     ),
                                 }
-                            } else {
-                                println!("  {} Broadcast rejected (HTTP {status})", style("[error]").red());
-                            }
                         }
-                        Err(ureq::Error::Status(status, resp)) => {
-                            let body = resp.into_string().unwrap_or_default();
-                            println!("  {} HTTP {status}", style("←").red());
-                            println!("  {} body: {}", style("←").red(), body.trim());
-                            println!("  {} Broadcast failed (HTTP {status})", style("[error]").red());
-                        }
-                        Err(e) => {
-                            println!("  {} Transport error: {e}", style("[error]").red());
-                            println!("    debug: {e:?}");
+                        Err(msg) => {
+                            println!("  {} Broadcast failed: {msg}", style("[error]").red());
                         }
                     }
                 }
@@ -3241,14 +3219,35 @@ fn run_validation(
     match validation.rule.type_.as_str() {
         "arithmetic" => {
             let expr = validation.rule.expr.as_deref().unwrap_or("[missing expr]");
-            println!(
-                "  {} Validation '{}': {}",
-                style("[TODO]").yellow(),
-                style(&validation.id).bold(),
-                expr
-            );
-            if !desc.is_empty() {
-                println!("    {}", style(desc).dim());
+            // `!=` comparisons are enforced (e.g. asserting two asset IDs differ).
+            // Other operators remain informational — see eval::eval_inequality_validation.
+            match eval::eval_inequality_validation(expr, ctx) {
+                Some(true) => {
+                    println!(
+                        "  {} Validation '{}': {} {}",
+                        style("✓").green(),
+                        style(&validation.id).bold(),
+                        expr,
+                        style("(ok)").dim(),
+                    );
+                }
+                Some(false) => {
+                    let msg = validation_error_message(validation).unwrap_or_else(|| {
+                        format!("Validation '{}' failed: {}", validation.id, expr)
+                    });
+                    anyhow::bail!("{msg}");
+                }
+                None => {
+                    println!(
+                        "  {} Validation '{}': {}",
+                        style("[TODO]").yellow(),
+                        style(&validation.id).bold(),
+                        expr
+                    );
+                    if !desc.is_empty() {
+                        println!("    {}", style(desc).dim());
+                    }
+                }
             }
         }
         "simplicity_hl" | "simplicityhl" => {
@@ -3280,8 +3279,75 @@ fn run_validation(
         }
     }
 
-    let _ = (manifest, ctx);
+    let _ = manifest;
     Ok(())
+}
+
+/// Broadcast a finalized transaction through the configured backend, returning the
+/// txid on success. Esplora uses a direct HTTP `POST /tx`; Electrum goes through the
+/// `Backend` client. Errors are returned as display strings so the caller can print
+/// them without aborting the surrounding run bookkeeping.
+fn broadcast_finalized_tx(
+    cfg: &crate::config::Config,
+    tx: &lwk_wollet::elements::Transaction,
+    tx_hex: &str,
+    network: lwk_wollet::ElementsNetwork,
+) -> std::result::Result<String, String> {
+    use crate::backend::{Backend, BackendKind};
+    match cfg.backend_kind() {
+        BackendKind::Esplora => {
+            let url = format!("{}/tx", cfg.esplora_url().trim_end_matches('/'));
+            println!("  {} POST {}", style("→").cyan(), style(&url).underlined());
+            println!("  {} body: {} chars of hex", style("→").cyan(), tx_hex.len());
+            match ureq::post(&url)
+                .set("Content-Type", "text/plain")
+                .send_string(tx_hex)
+            {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.into_string().unwrap_or_default();
+                    println!("  {} HTTP {status}", style("←").green());
+                    println!("  {} body: {}", style("←").green(), body.trim());
+                    if status == 200 {
+                        Ok(body.trim().to_string())
+                    } else {
+                        Err(format!("Esplora rejected (HTTP {status}): {}", body.trim()))
+                    }
+                }
+                Err(ureq::Error::Status(status, resp)) => {
+                    let body = resp.into_string().unwrap_or_default();
+                    Err(format!("HTTP {status}: {}", body.trim()))
+                }
+                Err(e) => Err(format!("Transport error: {e}")),
+            }
+        }
+        BackendKind::Electrum => {
+            let url = cfg.electrum_url();
+            println!(
+                "  {} Electrum broadcast via {}",
+                style("→").cyan(),
+                style(url).underlined()
+            );
+            let backend = Backend::connect(BackendKind::Electrum, url, network)
+                .map_err(|e| e.to_string())?;
+            backend
+                .broadcast(tx)
+                .map(|txid| txid.to_string())
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Extract a human-readable message from a validation's `error` field, which may be
+/// a bare string or a `{"code": ..., "message": ...}` object.
+fn validation_error_message(validation: &Validation) -> Option<String> {
+    match validation.error.as_ref()? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Object(m) => {
+            m.get("message").and_then(|v| v.as_str()).map(String::from)
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -113,17 +113,18 @@ pub struct ParamDef {
     /// Optional source for auto-populating the value (e.g. from the wallet).
     pub source: Option<ParamSource>,
     /// Auto-compute expression for derived params not loaded from an instance file.
+    #[serde(default, deserialize_with = "de_param_compute_opt")]
     pub compute: Option<ParamCompute>,
 }
 
 /// Auto-computation spec for a derived compile param or action param.
 ///
-/// Dispatched by `lang`:
+/// Dispatched by `compute` (the legacy key `lang` is still accepted as an alias):
 /// - `"expr"`: arithmetic expression over other compile params (`pow(base, exp)` supported)
 /// - `"tapleaf"`: compile a `.simf` file and return its Simplicity tapleaf hash (32 bytes hex)
 /// - `"simf_fn"`: call a named function in a `.simf` file and use its return value
 #[derive(Debug, Deserialize)]
-#[serde(tag = "lang", rename_all = "snake_case")]
+#[serde(tag = "compute", rename_all = "snake_case")]
 pub enum ParamCompute {
     Expr { expr: String },
     Tapleaf {
@@ -156,6 +157,42 @@ pub enum ParamCompute {
         /// Omit for zero-argument functions.
         input: Option<String>,
     },
+}
+
+/// Normalize a compute spec object so the legacy discriminator key `lang` is
+/// accepted as an alias for `compute`. (serde's internal `tag` does not support
+/// `#[serde(alias)]`, so we rewrite the key before delegating to the derived impl.)
+fn normalize_compute_value<E: serde::de::Error>(
+    mut value: serde_json::Value,
+) -> Result<ParamCompute, E> {
+    if let Some(obj) = value.as_object_mut() {
+        if !obj.contains_key("compute") {
+            if let Some(lang) = obj.remove("lang") {
+                obj.insert("compute".to_string(), lang);
+            }
+        }
+    }
+    ParamCompute::deserialize(value).map_err(E::custom)
+}
+
+/// `deserialize_with` shim for a bare `ParamCompute`, accepting `lang` as an alias for `compute`.
+fn de_param_compute<'de, D>(deserializer: D) -> Result<ParamCompute, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    normalize_compute_value(value)
+}
+
+/// `deserialize_with` shim for an optional `ParamCompute`, accepting `lang` as an alias for `compute`.
+fn de_param_compute_opt<'de, D>(deserializer: D) -> Result<Option<ParamCompute>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(value) => normalize_compute_value(value).map(Some),
+    }
 }
 
 /// A single entry in a `ParamCompute::Tapleaf` params map.
@@ -401,7 +438,7 @@ pub struct InstanceCreate {
     pub class: String,
     /// Maps field names to their initial values.
     /// Each value is either a string expression (`"$params.FOO"`)
-    /// or a compute spec (`{ "lang": "tapleaf", ... }`).
+    /// or a compute spec (`{ "compute": "tapleaf", ... }`).
     pub fields: BTreeMap<String, FieldValue>,
 }
 
@@ -413,7 +450,7 @@ pub enum FieldValue {
     /// Simple expression: `"$params.COLLATERAL_ASSET_ID"`, `"$inputs.foo.asset"`, etc.
     Expr(String),
     /// Structured compute (e.g. tapleaf hash).
-    Compute(ParamCompute),
+    Compute(#[serde(deserialize_with = "de_param_compute")] ParamCompute),
 }
 
 // ---------------------------------------------------------------------------
@@ -527,5 +564,33 @@ impl Manifest {
             .as_ref()
             .and_then(|m| m.get(name))
             .ok_or_else(|| anyhow::anyhow!("utxo_type '{}' not found in manifest file", name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_field_value(json: &str) -> FieldValue {
+        serde_json::from_str(json).expect("FieldValue should deserialize")
+    }
+
+    #[test]
+    fn compute_key_dispatches_tapleaf() {
+        let fv = parse_field_value(r#"{ "compute": "tapleaf", "simf": "./a.simf" }"#);
+        assert!(matches!(fv, FieldValue::Compute(ParamCompute::Tapleaf { .. })));
+    }
+
+    #[test]
+    fn legacy_lang_key_is_accepted_as_alias() {
+        let fv = parse_field_value(r#"{ "lang": "tapleaf", "simf": "./a.simf" }"#);
+        assert!(matches!(fv, FieldValue::Compute(ParamCompute::Tapleaf { .. })));
+    }
+
+    #[test]
+    fn compute_wins_when_both_keys_present() {
+        // `compute` is canonical; a stray `lang` must not override it.
+        let fv = parse_field_value(r#"{ "compute": "expr", "lang": "tapleaf", "expr": "1 + 1" }"#);
+        assert!(matches!(fv, FieldValue::Compute(ParamCompute::Expr { .. })));
     }
 }
