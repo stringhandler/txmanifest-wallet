@@ -1,6 +1,6 @@
 [package]
 name = "tx-manifest-wallet"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Wallet CLI for executing transaction manifests on Liquid/Elements with SimplicityHL covenants."
