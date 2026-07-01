@@ -1456,12 +1456,6 @@
         },
         "ClaimPrincipalWithInterest": {
           "description": "Lender withdraws principal+interest from the lender_principal_vault by co-spending and burning the Lender NFT.",
-          "params": {
-            "lender_destination": {
-              "type": "address",
-              "description": "Lender's address to receive the principal+interest."
-            }
-          },
           "inputs": [
             {
               "id": "vault_in",
@@ -1471,14 +1465,14 @@
               },
               "witnesses": {
                 "INPUT_ASSET_INDEX": {
-                  "type": "formula",
-                  "expr": "index_of(lender_nft_in)",
-                  "description": "Index of lender_nft_in."
+                  "type": "simplicityhl",
+                  "simplicity_type": "u32",
+                  "value": "1"
                 },
                 "OUTPUT_ASSET_INDEX": {
-                  "type": "formula",
-                  "expr": "index_of(lender_nft_burned)",
-                  "description": "Index of lender_nft_burned output."
+                  "type": "simplicityhl",
+                  "simplicity_type": "u32",
+                  "value": "1"
                 },
                 "SPEND_PATH": {
                   "type": "taproot_leaf",
@@ -1494,7 +1488,8 @@
               "description": "Lender NFT (amount=1).",
               "utxo_source": "wallet",
               "asset": "compile_params.LENDER_NFT_ASSET_ID",
-              "amount_sat": 1
+              "amount_sat": 1,
+              "required_index": 1
             },
             {
               "id": "fee_input",
@@ -1507,7 +1502,7 @@
             {
               "id": "principal_interest_out",
               "description": "Principal+interest delivered to lender.",
-              "destination": "params.lender_destination",
+              "destination": "wallet",
               "asset": "compile_params.PRINCIPAL_ASSET_ID",
               "amount_sat": "vault_in.amount_sat"
             },
@@ -1518,7 +1513,8 @@
                 "type": "op_return"
               },
               "asset": "compile_params.LENDER_NFT_ASSET_ID",
-              "amount_sat": 1
+              "amount_sat": 1,
+              "required_index": 1
             },
             {
               "id": "fee_change",

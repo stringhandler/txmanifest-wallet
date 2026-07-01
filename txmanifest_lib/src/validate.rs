@@ -177,6 +177,9 @@ fn check_action(
     loc: &str,
     action: &Action,
 ) {
+    // --- Action-level witnesses -----------------------------------------
+    check_witnesses(report, &format!("{loc}.witnesses"), &action.witnesses);
+
     // --- Inputs ----------------------------------------------------------
     if let Some(inputs) = &action.inputs {
         let mut input_ids: BTreeSet<&str> = BTreeSet::new();
@@ -192,15 +195,16 @@ fn check_action(
                         Some(name) => {
                             referenced.insert(name.to_string());
                             if !utxo_types.contains(name) {
-                                report.error(iloc, format!("references unknown utxo_type '{name}'"));
+                                report.error(&iloc, format!("references unknown utxo_type '{name}'"));
                             }
                         }
-                        None => report.error(iloc, "utxo_source.utxo_type is not a string"),
+                        None => report.error(&iloc, "utxo_source.utxo_type is not a string"),
                     }
                 }
                 Value::Object(m) if m.contains_key("if") => {} // conditional — not checked
-                other => report.warn(iloc, format!("unrecognized utxo_source: {other}")),
+                other => report.warn(&iloc, format!("unrecognized utxo_source: {other}")),
             }
+            check_witnesses(report, &format!("{iloc}.witnesses"), &input.witnesses);
         }
     }
 
@@ -262,6 +266,74 @@ fn check_action(
     }
 }
 
+/// Witness `type` values the runtime knows how to consume. Anything else is
+/// silently ignored by covenant satisfaction, so flag it here.
+///
+/// - `simplicityhl` — a concrete witness value (`build_witness_values_from_types`)
+/// - `Signature`    — a computed BIP340 signature (`inject_computed_signatures`)
+/// - `taproot_leaf` — selects the spend leaf (e.g. `SPEND_PATH`)
+const KNOWN_WITNESS_TYPES: &[&str] = &["simplicityhl", "Signature", "taproot_leaf"];
+
+/// Validate an input's (or action's) `witnesses` map.
+///
+/// The runtime only feeds a witness to the BitMachine when its definition is an
+/// object carrying a recognized `type`. A bare scalar (e.g. `"FOO": 1`) or an
+/// object missing/with an unknown `type` is silently dropped and zero-filled,
+/// which produces a covenant that fails at `run` time with no hint as to why —
+/// exactly the failure this check exists to surface statically.
+fn check_witnesses(report: &mut Report, loc: &str, witnesses: &Option<Value>) {
+    let Some(witnesses) = witnesses else { return };
+    let Some(map) = witnesses.as_object() else {
+        report.error(loc.to_string(), "witnesses must be an object (name → definition)");
+        return;
+    };
+    for (name, def) in map {
+        let wloc = format!("{loc}.{name}");
+        let Some(obj) = def.as_object() else {
+            report.error(
+                wloc,
+                format!(
+                    "witness '{name}' must be an object like \
+                     {{\"type\": \"simplicityhl\", \"simplicity_type\": \"u32\", \"value\": \"1\"}}; \
+                     a bare value is silently ignored and zero-filled at run time"
+                ),
+            );
+            continue;
+        };
+        match obj.get("type").and_then(Value::as_str) {
+            None => report.error(
+                wloc,
+                format!("witness '{name}' is missing a string \"type\" and will be ignored at run time"),
+            ),
+            Some("simplicityhl") => {
+                let value_ok = obj.get("value").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty());
+                if !value_ok {
+                    report.error(
+                        wloc,
+                        format!("simplicityhl witness '{name}' is missing a non-empty string \"value\""),
+                    );
+                }
+            }
+            Some("Signature") => {
+                if obj.get("sig_type").and_then(Value::as_str).is_none() {
+                    report.error(
+                        wloc,
+                        format!("Signature witness '{name}' is missing a string \"sig_type\""),
+                    );
+                }
+            }
+            Some("taproot_leaf") => {}
+            Some(other) => report.warn(
+                wloc,
+                format!(
+                    "witness '{name}' has unrecognized type '{other}' (expected one of: {})",
+                    KNOWN_WITNESS_TYPES.join(", ")
+                ),
+            ),
+        }
+    }
+}
+
 /// Validate an output `destination` and return whether it requires an explicit
 /// `amount_sat` (covenant, wallet, address, and script_hash destinations do;
 /// change, op_return/burn, fee, and conditional destinations do not).
@@ -304,5 +376,85 @@ fn check_destination(
             report.error(oloc.to_string(), format!("destination must be a string or object, got {other}"));
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::Manifest;
+
+    /// Build a manifest with a single action whose one wallet input carries the
+    /// given `witnesses` JSON, then validate it.
+    fn validate_with_input_witnesses(witnesses: Value) -> Report {
+        let manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": "1",
+            "protocol": "test",
+            "actions": {
+                "A": {
+                    "inputs": [
+                        { "id": "in0", "utxo_source": "wallet", "witnesses": witnesses }
+                    ]
+                }
+            }
+        }))
+        .expect("test manifest should deserialize");
+        validate(&manifest)
+    }
+
+    fn has_error_at(report: &Report, loc: &str) -> bool {
+        report
+            .issues
+            .iter()
+            .any(|i| i.severity == Severity::Error && i.location == loc)
+    }
+
+    #[test]
+    fn bare_integer_witness_is_flagged() {
+        // Regression: `"INPUT_ASSET_INDEX": 1` used to be silently zero-filled at
+        // run time, producing a covenant failure with no static warning.
+        let report = validate_with_input_witnesses(serde_json::json!({
+            "INPUT_ASSET_INDEX": 1
+        }));
+        assert!(
+            has_error_at(&report, "actions.A.inputs.in0.witnesses.INPUT_ASSET_INDEX"),
+            "expected an error for the bare-integer witness, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn well_formed_witnesses_pass() {
+        let report = validate_with_input_witnesses(serde_json::json!({
+            "INPUT_ASSET_INDEX": { "type": "simplicityhl", "simplicity_type": "u32", "value": "1" },
+            "SIGNATURE": { "type": "Signature", "sig_type": "sig_hash_all" },
+            "SPEND_PATH": { "type": "taproot_leaf", "source": { "type": "formula", "expr": "leaf" } }
+        }));
+        assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn simplicityhl_without_value_is_flagged() {
+        let report = validate_with_input_witnesses(serde_json::json!({
+            "FOO": { "type": "simplicityhl", "simplicity_type": "u32" }
+        }));
+        assert!(has_error_at(&report, "actions.A.inputs.in0.witnesses.FOO"));
+    }
+
+    #[test]
+    fn missing_type_is_flagged() {
+        let report = validate_with_input_witnesses(serde_json::json!({
+            "FOO": { "value": "1" }
+        }));
+        assert!(has_error_at(&report, "actions.A.inputs.in0.witnesses.FOO"));
+    }
+
+    #[test]
+    fn unknown_type_is_a_warning_not_error() {
+        let report = validate_with_input_witnesses(serde_json::json!({
+            "FOO": { "type": "mystery" }
+        }));
+        assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+        assert!(report.warnings() >= 1);
     }
 }

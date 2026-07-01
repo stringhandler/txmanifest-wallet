@@ -891,7 +891,10 @@ fn infer_simf_type_from_value(value: &str) -> Option<&'static str> {
     None
 }
 
-/// Returns true for compile_param names that represent asset IDs (display-backward format).
+/// Fallback heuristic: returns true for compile_param names that *look* like asset IDs
+/// (display-backward format), used only when no `liquid.asset_id` manifest type is declared.
+/// Prefer declaring `"type": "liquid.asset_id"` in the manifest — the name check is a
+/// best-effort fallback and misses unconventional names such as a bare `ASSET_ID`.
 fn is_asset_id_param(name: &str) -> bool {
     let upper = name.to_uppercase();
     upper.ends_with("_ASSET")
@@ -905,17 +908,25 @@ fn is_asset_id_param(name: &str) -> bool {
 /// Types are resolved first from `type_hints` (manifest-declared types), then by naming convention.
 /// Params that cannot be typed are skipped with a warning.
 ///
-/// Asset-ID params are byte-reversed from Elements display-backward to natural (MSB-first) order
-/// as required by SimplicityHL jets. Public-key params are passed without reversal.
+/// Params declared with the manifest type `liquid.asset_id` are byte-reversed from Elements
+/// display-backward to natural (MSB-first) order as required by SimplicityHL jets. Other u256
+/// params (`bytes32` hashes, `pubkey`) are passed without reversal. For untyped params the
+/// reversal decision falls back to the [`is_asset_id_param`] name heuristic.
 fn build_args_json(
     params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
 ) -> Result<String> {
     let mut entries = Vec::new();
     for (name, value) in params {
-        let ty = if let Some(manifest_type) = type_hints.get(name) {
+        // Resolve the SimplicityHL type AND whether this value is a display-order
+        // asset ID that must be byte-reversed. The declared manifest type
+        // (`liquid.asset_id`) is the authoritative signal for reversal; the param
+        // name is only consulted as a fallback when no type was declared.
+        let (ty, is_asset_id): (&'static str, bool) = if let Some(manifest_type) =
+            type_hints.get(name)
+        {
             match manifest_to_simf_type(manifest_type) {
-                Some(t) => t,
+                Some(t) => (t, manifest_type == "liquid.asset_id"),
                 None => {
                     eprintln!("[covenant] Unknown manifest type '{manifest_type}' for '{name}' — skipping");
                     continue;
@@ -923,7 +934,7 @@ fn build_args_json(
             }
         } else {
             match infer_simf_type(name).or_else(|| infer_simf_type_from_value(value)) {
-                Some(t) => t,
+                Some(t) => (t, is_asset_id_param(name)),
                 None => {
                     eprintln!("[covenant] Cannot infer SimplicityHL type for '{name}' (value={value:?}) — skipping");
                     continue;
@@ -933,7 +944,7 @@ fn build_args_json(
         let formatted_value = if matches!(ty, "u8" | "u16" | "u32" | "u64" | "bool") {
             // decimal integer or boolean literal — pass as-is
             value.clone()
-        } else if is_asset_id_param(name) {
+        } else if is_asset_id {
             // Asset ID in display-backward format → reverse to natural byte order for SimplicityHL.
             let hex = value.trim_start_matches("0x").trim_start_matches("0X");
             let padded = format!("{:0>64}", hex);
@@ -1058,6 +1069,41 @@ mod tests {
         assert!(
             json.contains(r#""type": "u64""#),
             "u64 type must appear in output"
+        );
+    }
+
+    /// The `liquid.asset_id` manifest type — not the param name — must drive byte-reversal.
+    /// Regression for `ASSET_ID`: a bare name the `is_asset_id_param` heuristic misses, yet
+    /// declared `liquid.asset_id`, so it must still be reversed. A `bytes32` hash and a
+    /// `pubkey` of the same width must NOT be reversed.
+    #[test]
+    fn asset_id_reversal_is_driven_by_declared_type_not_name() {
+        let asset = "857e17708b6ec9ad0e2cc50a8faa8140b7ad253029443513850f14e4a95589b4";
+        let reversed = "b48955a9e4140f85133544293025adb74081aa8f0ac52c0eadc96e8b70177e85";
+
+        let mut params = HashMap::new();
+        params.insert("ASSET_ID".to_string(), asset.to_string()); // bare name, heuristic misses it
+        params.insert("SOME_HASH".to_string(), asset.to_string()); // bytes32 — must NOT reverse
+        params.insert("SOME_KEY".to_string(), asset.to_string()); // pubkey — must NOT reverse
+
+        let mut hints = HashMap::new();
+        hints.insert("ASSET_ID".to_string(), "liquid.asset_id".to_string());
+        hints.insert("SOME_HASH".to_string(), "bytes32".to_string());
+        hints.insert("SOME_KEY".to_string(), "pubkey".to_string());
+
+        let json = build_args_json(&params, &hints).expect("build_args_json");
+
+        assert!(
+            json.contains(&format!(r#""ASSET_ID": {{ "value": "0x{reversed}""#)),
+            "ASSET_ID (liquid.asset_id) must be byte-reversed; got:\n{json}"
+        );
+        assert!(
+            json.contains(&format!(r#""SOME_HASH": {{ "value": "0x{asset}""#)),
+            "bytes32 hash must NOT be reversed; got:\n{json}"
+        );
+        assert!(
+            json.contains(&format!(r#""SOME_KEY": {{ "value": "0x{asset}""#)),
+            "pubkey must NOT be reversed; got:\n{json}"
         );
     }
 
