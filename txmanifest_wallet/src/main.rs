@@ -6,6 +6,7 @@ use tx_manifest_lib::{manifest, config, describe, instance, lifecycle, prepare, 
 
 #[derive(Parser)]
 #[command(name = "tx-manifest-wallet")]
+#[command(version)]
 #[command(about = "tx-manifest wallet CLI — execute actions interactively")]
 struct Cli {
     #[command(subcommand)]
