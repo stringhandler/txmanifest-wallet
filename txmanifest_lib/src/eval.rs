@@ -85,7 +85,7 @@ pub fn eval_inequality_validation(expr: &str, ctx: &ExecutionContext) -> Option<
 }
 
 /// Resolve a single comparison operand: a context reference (`params.X`,
-/// `compile_params.X`, `input.field`, …) or a bare/quoted literal.
+/// `instance.X`, `input.field`, …) or a bare/quoted literal.
 fn resolve_operand(s: &str, ctx: &ExecutionContext) -> Option<String> {
     if let Some(v) = resolve_ref(s, ctx) {
         return Some(v);
@@ -101,7 +101,7 @@ fn resolve_operand(s: &str, ctx: &ExecutionContext) -> Option<String> {
 /// Resolve a per-site covenant `compile_params` value.
 ///
 /// The value may be a reference into the execution context — `params.X`,
-/// `args.X`, `compile_params.X`, a resolved `input.field`, a bare action
+/// `args.X`, `instance.X`, a resolved `input.field`, a bare action
 /// param/arg name, or a bare compile-param name — in which case its current
 /// value is returned. Anything that matches no reference is returned verbatim
 /// as a literal (e.g. `"1"`, `"true"`, a raw hex value).
@@ -159,7 +159,11 @@ fn resolve_ref(name: &str, ctx: &ExecutionContext) -> Option<String> {
     if name == "fee" {
         return Some(ctx.fee().to_string());
     }
-    if let Some(k) = name.strip_prefix("compile_params.") {
+    if let Some(k) = name
+        .strip_prefix("instance.")
+        // Deprecated alias for `instance.` — remove after the transition release.
+        .or_else(|| name.strip_prefix("compile_params."))
+    {
         return ctx.get_compile_param(k).map(str::to_string);
     }
     if let Some(k) = name.strip_prefix("params.") {
@@ -287,7 +291,8 @@ pub fn eval_simplicityhl_hook(
 /// Evaluate a `compute.expr` for a derived compile param.
 ///
 /// Variable references: bare identifiers matching a compile param name are substituted,
-/// as are `compile_params.KEY` prefixed forms.  `pow(base, exp)` computes integer power
+/// as are `instance.KEY` prefixed forms (and the deprecated `compile_params.KEY` alias).
+/// `pow(base, exp)` computes integer power
 /// (e.g. `pow(10, COLLATERAL_DECIMALS_MANTISSA)`).  Result is a u64 string.
 pub fn eval_param_compute_expr(expr: &str, ctx: &ExecutionContext) -> Result<u64> {
     let pre = resolve_pow(expr, ctx);
@@ -304,7 +309,7 @@ pub fn eval_param_compute_expr(expr: &str, ctx: &ExecutionContext) -> Result<u64
     Ok(val as u64)
 }
 
-/// Substitute bare compile param names (and `compile_params.KEY`) with their values.
+/// Substitute bare compile param names (and `instance.KEY` / legacy `compile_params.KEY`) with their values.
 fn substitute_compile_param_vars(expr: &str, ctx: &ExecutionContext) -> String {
     let bytes = expr.as_bytes();
     let mut result = String::with_capacity(expr.len() + 16);
@@ -318,7 +323,8 @@ fn substitute_compile_param_vars(expr: &str, ctx: &ExecutionContext) -> String {
             }
             let token = &expr[id_start..i];
 
-            if token == "compile_params"
+            // `instance` is the spec namespace; `compile_params` is the deprecated alias.
+            if (token == "instance" || token == "compile_params")
                 && i < bytes.len()
                 && bytes[i] == b'.'
                 && i + 1 < bytes.len()
@@ -333,7 +339,8 @@ fn substitute_compile_param_vars(expr: &str, ctx: &ExecutionContext) -> String {
                 match ctx.get_compile_param(key) {
                     Some(v) => result.push_str(v),
                     None => {
-                        result.push_str("compile_params.");
+                        result.push_str(token);
+                        result.push('.');
                         result.push_str(key);
                     }
                 }
@@ -412,7 +419,8 @@ fn substitute_vars(expr: &str, ctx: &ExecutionContext) -> String {
                 let key = &expr[key_start..i];
 
                 let resolved = match namespace {
-                    "compile_params" => ctx.get_compile_param(key).map(str::to_string),
+                    // `compile_params` is the deprecated alias for `instance`.
+                    "instance" | "compile_params" => ctx.get_compile_param(key).map(str::to_string),
                     "params" => ctx.get_param(key).map(str::to_string),
                     "args" => ctx.get_arg(key).map(str::to_string),
                     input_id => {
@@ -438,7 +446,7 @@ fn substitute_vars(expr: &str, ctx: &ExecutionContext) -> String {
                 result.push_str(&ctx.fee().to_string());
             } else {
                 // No dot: bare identifier. Try resolving as a param or arg (allows formulas
-                // like "pairs * 2 * compile_params.COLLATERAL_PER_TOKEN" where "pairs" is an
+                // like "pairs * 2 * instance.COLLATERAL_PER_TOKEN" where "pairs" is an
                 // action param).
                 if let Some(v) = ctx.get_param(namespace).or_else(|| ctx.get_arg(namespace)) {
                     result.push_str(v);

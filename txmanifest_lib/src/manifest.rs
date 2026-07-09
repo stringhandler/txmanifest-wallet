@@ -278,7 +278,7 @@ pub struct Input {
 /// Inline hook on an input — evaluated in the standard expression language
 /// (not SimplicityHL) once the input is resolved.
 ///
-/// `set` maps target paths (e.g. `"compile_params.BORROWER_NFT_ASSET_ID"`) to
+/// `set` maps target paths (e.g. `"instance.BORROWER_NFT_ASSET_ID"`) to
 /// expressions.  Within an input's own `on_resolved`, the bare keyword `"asset"`
 /// resolves to the input's computed issuance asset ID (or its UTXO asset for
 /// non-issuance inputs), and `"reissuance_token"` resolves to the computed

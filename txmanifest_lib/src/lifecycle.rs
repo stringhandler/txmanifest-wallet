@@ -26,7 +26,7 @@ const SEQUENCE_LOCKTIME_MASK: u32 = 0x0000_ffff;
 /// Accepts `{"relative_blocks": <expr>}` (block-based BIP68 relative lock),
 /// `{"relative_seconds": <expr>}` (time-based, rounded up to 512-second units),
 /// or a bare integer / expression (used verbatim as the raw nSequence). Expressions
-/// are evaluated in the standard language, so `compile_params.INHERIT_BLOCKS` etc. work.
+/// are evaluated in the standard language, so `instance.INHERIT_BLOCKS` etc. work.
 fn encode_sequence(spec: &serde_json::Value, ctx: &ExecutionContext) -> Result<u32> {
     match spec {
         serde_json::Value::Object(map) => {
@@ -562,7 +562,10 @@ pub fn run(
                     let candidates = s.utxos_for_type(&type_name);
                     // If the input specifies an asset, filter by it; otherwise take the first.
                     let asset_filter = input.asset.as_ref().and_then(|v| v.as_str()).map(|a| {
-                        if let Some(k) = a.strip_prefix("compile_params.") {
+                        if let Some(k) = a
+                            .strip_prefix("instance.")
+                            .or_else(|| a.strip_prefix("compile_params."))
+                        {
                             ctx.get_compile_param(k).unwrap_or(a).to_string()
                         } else {
                             a.to_string()
@@ -651,7 +654,10 @@ pub fn run(
                 match eval::eval_simplicityhl_hook(expr, input_id, &ctx) {
                     Ok(value) => {
                         // Store the result under the appropriate context namespace
-                        if let Some(name) = param_path.strip_prefix("compile_params.") {
+                        if let Some(name) = param_path
+                            .strip_prefix("instance.")
+                            .or_else(|| param_path.strip_prefix("compile_params."))
+                        {
                             ctx.set_compile_param(name, &value);
                         } else if let Some(name) = param_path.strip_prefix("params.") {
                             ctx.set_param(name, &value);
@@ -750,7 +756,10 @@ pub fn run(
                     style("[warn]").yellow(), target, formula
                 ),
                 Some(v) => {
-                    if let Some(name) = target.strip_prefix("compile_params.") {
+                    if let Some(name) = target
+                        .strip_prefix("instance.")
+                        .or_else(|| target.strip_prefix("compile_params."))
+                    {
                         ctx.set_compile_param(name, &v);
                     } else if let Some(name) = target.strip_prefix("params.") {
                         ctx.set_param(name, &v);
@@ -1491,7 +1500,10 @@ pub fn run(
                         style("[warn]").yellow(), target, formula
                     ),
                     Some(v) => {
-                        if let Some(name) = target.strip_prefix("compile_params.") {
+                        if let Some(name) = target
+                            .strip_prefix("instance.")
+                            .or_else(|| target.strip_prefix("compile_params."))
+                        {
                             ctx.set_compile_param(name, &v);
                         } else if let Some(name) = target.strip_prefix("params.") {
                             ctx.set_param(name, &v);
@@ -1499,7 +1511,7 @@ pub fn run(
                             ctx.set_arg(name, &v);
                         } else {
                             println!(
-                                "  {} on_resolved set '{}' — unknown namespace (expected compile_params./params./args.).",
+                                "  {} on_resolved set '{}' — unknown namespace (expected instance./params./args.).",
                                 style("[warn]").yellow(), target
                             );
                             continue;
@@ -2919,7 +2931,10 @@ fn select_input(
         .as_ref()
         .and_then(|v| v.as_str())
         .map(|s| {
-            if let Some(k) = s.strip_prefix("compile_params.") {
+            if let Some(k) = s
+                .strip_prefix("instance.")
+                .or_else(|| s.strip_prefix("compile_params."))
+            {
                 ctx.get_compile_param(k).unwrap_or(s)
             } else if let Some(k) = s.strip_prefix("params.") {
                 ctx.get_param(k).unwrap_or(s)
@@ -2937,7 +2952,10 @@ fn select_input(
     //   - { "min_amount": <expr> }     → accept any UTXO with value >= min_amount
     // Surplus non-LBTC value is returned as change by the pset_builder.
     let resolve_amount_str = |s: &str| -> Option<u64> {
-        let resolved = if let Some(k) = s.strip_prefix("compile_params.") {
+        let resolved = if let Some(k) = s
+            .strip_prefix("instance.")
+            .or_else(|| s.strip_prefix("compile_params."))
+        {
             ctx.get_compile_param(k).unwrap_or(s)
         } else if let Some(k) = s.strip_prefix("params.") {
             ctx.get_param(k).unwrap_or(s)
@@ -3019,7 +3037,10 @@ fn select_input(
     }
 
     let raw_label = input.asset.as_ref().and_then(|v| v.as_str()).unwrap_or("unknown");
-    let asset_label = if let Some(k) = raw_label.strip_prefix("compile_params.") {
+    let asset_label = if let Some(k) = raw_label
+        .strip_prefix("instance.")
+        .or_else(|| raw_label.strip_prefix("compile_params."))
+    {
         ctx.get_compile_param(k).unwrap_or(raw_label)
     } else if let Some(k) = raw_label.strip_prefix("params.") {
         ctx.get_param(k).unwrap_or(raw_label)
@@ -3132,9 +3153,10 @@ fn amount_uses_fee_keyword(v: &serde_json::Value) -> bool {
 /// Resolve a witness `source.key` reference to a concrete pubkey hex for signing.
 ///
 /// Supports `params.NAME` (an action param — used when a covenant is keyed by a
-/// runtime value), plus the `$params.NAME` / `compile_params.NAME` forms that
-/// resolve against compile params / class fields. Anything else is returned
-/// verbatim and treated as a literal pubkey hex.
+/// runtime value), plus the `$params.NAME` / `instance.NAME` forms (and the
+/// deprecated `compile_params.NAME` alias) that resolve against compile params /
+/// class fields. Anything else is returned verbatim and treated as a literal
+/// pubkey hex.
 fn resolve_witness_signing_key<'a>(
     key_ref: &'a str,
     action_params: &'a std::collections::HashMap<String, String>,
@@ -3147,6 +3169,7 @@ fn resolve_witness_signing_key<'a>(
     }
     if let Some(name) = key_ref
         .strip_prefix("$params.")
+        .or_else(|| key_ref.strip_prefix("instance."))
         .or_else(|| key_ref.strip_prefix("compile_params."))
     {
         if let Some(v) = compile_params.get(name) {
@@ -3191,7 +3214,10 @@ fn apply_site_compile_param_overrides(
             param_type(&action.params, k)
         } else if let Some(k) = raw.strip_prefix("args.") {
             param_type(&action.args, k)
-        } else if let Some(k) = raw.strip_prefix("compile_params.") {
+        } else if let Some(k) = raw
+            .strip_prefix("instance.")
+            .or_else(|| raw.strip_prefix("compile_params."))
+        {
             base_hints.get(k).cloned()
         } else if !raw.contains('.') {
             base_hints
@@ -3356,9 +3382,9 @@ fn validation_error_message(validation: &Validation) -> Option<String> {
 
 /// Execute a `HookBlock` (on_pre_broadcast / on_post_broadcast) against the
 /// current execution context.  Setter targets use dot-path notation:
-///   `"params.FOO"`          → ctx.set_param
-///   `"compile_params.FOO"`  → ctx.set_compile_param
-///   `"args.FOO"`            → ctx.set_arg
+///   `"params.FOO"`    → ctx.set_param
+///   `"instance.FOO"`  → ctx.set_compile_param (deprecated alias: `"compile_params.FOO"`)
+///   `"args.FOO"`      → ctx.set_arg
 fn run_hook_block(
     hook: &crate::manifest::HookBlock,
     ctx: &mut ExecutionContext,
@@ -3375,7 +3401,10 @@ fn run_hook_block(
                 continue;
             }
         };
-        if let Some(name) = target.strip_prefix("compile_params.") {
+        if let Some(name) = target
+            .strip_prefix("instance.")
+            .or_else(|| target.strip_prefix("compile_params."))
+        {
             ctx.set_compile_param(name, &value);
         } else if let Some(name) = target.strip_prefix("params.") {
             ctx.set_param(name, &value);
@@ -3403,7 +3432,7 @@ fn run_hook_block(
 /// `HashMap<String, String>` to be written as `instance.fields`.
 ///
 /// Each field value is either:
-///   - A string expression (`"$params.FOO"`, `"$compile_params.X"`, etc.)
+///   - A string expression (`"$params.FOO"`, `"$instance.X"`, etc.)
 ///   - A `ParamCompute::Tapleaf` spec (same as used in Step 3b)
 ///
 /// Multi-pass: fields that depend on other fields computed in the same block
@@ -3438,9 +3467,10 @@ fn eval_create_instance_fields(
 
             let value: Option<String> = match field_value {
                 FieldValue::Expr(expr) => {
-                    // $params.X / $compile_params.X → direct lookup; other → eval_expr_str
+                    // $params.X / $instance.X → direct lookup; other → eval_expr_str
                     expr
                         .strip_prefix("$params.")
+                        .or_else(|| expr.strip_prefix("$instance."))
                         .or_else(|| expr.strip_prefix("$compile_params."))
                         .and_then(|name| {
                             ctx.get_param(name)
@@ -3831,7 +3861,8 @@ mod tests {
     }
 
     /// A witness `source.key` may reference an action `param` (covenant keyed by a runtime
-    /// value), the legacy `$params.`/`compile_params.` compile-param forms, or a literal hex.
+    /// value), the `instance.` form, the legacy `$params.`/`compile_params.` compile-param
+    /// forms, or a literal hex.
     #[test]
     fn witness_signing_key_resolves_action_param_and_compile_param() {
         use std::collections::HashMap;
@@ -3845,6 +3876,8 @@ mod tests {
         assert_eq!(resolve_witness_signing_key("params.pubkey", &action_params, &compile_params), "aa11");
         // legacy compile-param forms (as used by the lending example)
         assert_eq!(resolve_witness_signing_key("$params.BORROWER_PUB_KEY", &action_params, &compile_params), "bb22");
+        assert_eq!(resolve_witness_signing_key("instance.BORROWER_PUB_KEY", &action_params, &compile_params), "bb22");
+        // Deprecated alias still accepted during the transition.
         assert_eq!(resolve_witness_signing_key("compile_params.BORROWER_PUB_KEY", &action_params, &compile_params), "bb22");
         // unknown / literal passes through verbatim
         assert_eq!(resolve_witness_signing_key("cc33ddee", &action_params, &compile_params), "cc33ddee");
