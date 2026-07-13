@@ -24,6 +24,13 @@ pub struct Manifest {
     /// File-level default for output confidentiality (blinding). When absent, the chain
     /// default applies: false for "bitcoin", true for "elements". Overridden per output.
     pub confidential_outputs: Option<bool>,
+    /// Whether covenant `.simf` programs are compiled with SimplicityHL debug symbols
+    /// included. This changes the program's CMR (and therefore every covenant address),
+    /// because `assert!`/`panic!` embed source info into `fail`-node commitments. Set it
+    /// to match the toolchain of any protocol this manifest must interoperate with — e.g.
+    /// `true` for simplicity-lending / `smplx-sdk`, which compiles with debug symbols on.
+    /// Defaults to `false` (production; debug symbols are a transitional feature).
+    pub compile_debug_symbols: Option<bool>,
     /// Flat compile-parameter map per spec §5.  Derived params carry `derived: true`.
     /// Kept for backward compatibility; prefer class `fields` in new files.
     pub params: Option<BTreeMap<String, ParamDef>>,
@@ -258,6 +265,11 @@ pub struct Input {
     /// "wallet" or {"utxo_type": "..."} or conditional object
     pub utxo_source: serde_json::Value,
     pub asset: Option<serde_json::Value>,
+    /// For `utxo_source: "wallet"` inputs: constrain coin selection to UTXOs whose
+    /// scriptPubKey equals this address's. A reference (`instance.X` / `params.X`) or a
+    /// literal address string. Use this to pin an input to a committed address — e.g. so a
+    /// covenant's collateral is spent from the exact address whose hash it commits to.
+    pub from_address: Option<String>,
     pub amount_sat: Option<serde_json::Value>,
     pub issuance: Option<serde_json::Value>,
     /// Per-input `nSequence`. Drives BIP68 relative timelocks (the `check_lock_distance`
@@ -563,6 +575,12 @@ impl UtxoType {
 }
 
 impl Manifest {
+    /// Whether covenants should be compiled with SimplicityHL debug symbols included.
+    /// Defaults to `false`; see [`Manifest::compile_debug_symbols`].
+    pub fn include_debug_symbols(&self) -> bool {
+        self.compile_debug_symbols.unwrap_or(false)
+    }
+
     /// Look up a named `utxo_type` entry.
     pub fn utxo_type(&self, name: &str) -> anyhow::Result<&UtxoType> {
         self.utxo_types

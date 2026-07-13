@@ -142,6 +142,10 @@ pub fn run(
     let manifest: Manifest = serde_json::from_str(&raw).with_context(|| {
         format!("Failed to parse manifest file: {}", manifest_file.display())
     })?;
+    // Whether covenants compile with SimplicityHL debug symbols (affects every CMR/address).
+    // Sourced from the manifest so interop targets (e.g. simplicity-lending) can be matched
+    // without hardcoding; defaults to false.
+    let include_debug_symbols = manifest.include_debug_symbols();
     // INPUT paths (instance load, state load) are never auto-discovered: passing them
     // explicitly is what keeps a stale on-disk instance from silently overriding
     // `--params`. OUTPUT paths auto-derive from the manifest stem when not given, so
@@ -886,7 +890,7 @@ pub fn run(
                     .unwrap_or(std::path::Path::new("."))
                     .join(simf);
 
-                match covenant::compute_covenant_script_hash(&simf_path, &simf_params, &simf_type_hints, net_for_hash) {
+                match covenant::compute_covenant_script_hash(&simf_path, &simf_params, &simf_type_hints, net_for_hash, include_debug_symbols) {
                     Ok(hash_bytes) => {
                         let hex: String = hash_bytes.iter().map(|b| format!("{b:02x}")).collect();
                         ctx.set_compile_param(*name, &hex);
@@ -1039,7 +1043,7 @@ pub fn run(
                                 .unwrap_or(std::path::Path::new("."))
                                 .join(simf.as_str());
 
-                            match covenant::compute_covenant_script_hash(&simf_path, &simf_params, &simf_type_hints, net_for_hash) {
+                            match covenant::compute_covenant_script_hash(&simf_path, &simf_params, &simf_type_hints, net_for_hash, include_debug_symbols) {
                                 Ok(hash_bytes) => {
                                     let hex: String = hash_bytes.iter().map(|b| format!("{b:02x}")).collect();
                                     let old = ctx.get_compile_param(stuck_name).map(str::to_string).unwrap_or_default();
@@ -1150,7 +1154,7 @@ pub fn run(
                                 .unwrap_or(std::path::Path::new("."))
                                 .join(simf.as_str());
 
-                            match covenant::compute_covenant_script_hash(&simf_path, &simf_params, &simf_type_hints, net_for_hash) {
+                            match covenant::compute_covenant_script_hash(&simf_path, &simf_params, &simf_type_hints, net_for_hash, include_debug_symbols) {
                                 Ok(hash_bytes) => {
                                     let hex: String = hash_bytes.iter().map(|b| format!("{b:02x}")).collect();
                                     ctx.set_compile_param(*name, &hex);
@@ -1417,7 +1421,7 @@ pub fn run(
                 hints
             };
             let pre_fields = eval_create_instance_fields(
-                ci, &ctx, manifest_file, &pre_hints, net_for_hash, false,
+                ci, &ctx, manifest_file, &pre_hints, net_for_hash, false, include_debug_symbols,
             );
             for (name, val) in pre_fields {
                 ctx.set_compile_param(&name, val);
@@ -1681,7 +1685,7 @@ pub fn run(
                     inp_params, inp_hints, inp.utxo_source.get("compile_params"),
                     action, &compile_param_type_hints, &ctx,
                 );
-                let script_pubkey = match pset_builder::covenant_script_pubkey(&inp_simf_path, &inp_params, &inp_hints, &leaf_payloads, net) {
+                let script_pubkey = match pset_builder::covenant_script_pubkey(&inp_simf_path, &inp_params, &inp_hints, &leaf_payloads, net, include_debug_symbols) {
                     Ok(s) => s,
                     Err(e) => {
                         println!("  {} Covenant address failed (input '{}'):", style("[error]").red(), inp.id);
@@ -1870,7 +1874,7 @@ pub fn run(
                             out_params, out_hints, m.get("compile_params"),
                             action, &compile_param_type_hints, &ctx,
                         );
-                        let script_pubkey = match pset_builder::covenant_script_pubkey(&out_simf_path, &out_params, &out_hints, &leaf_payloads, net) {
+                        let script_pubkey = match pset_builder::covenant_script_pubkey(&out_simf_path, &out_params, &out_hints, &leaf_payloads, net, include_debug_symbols) {
                             Ok(s) => s,
                             Err(e) => {
                                 println!("  {} Covenant address failed (output '{}'):", style("[error]").red(), output.id);
@@ -2175,7 +2179,7 @@ pub fn run(
                 );
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
-                match covenant::check_compile(&check_simf_path, &check_params, &check_hints) {
+                match covenant::check_compile(&check_simf_path, &check_params, &check_hints, include_debug_symbols) {
                     Ok(()) => println!("{}", style("OK").green()),
                     Err(e) => {
                         println!("{}", style("FAILED").red());
@@ -2290,6 +2294,7 @@ pub fn run(
                                         pset_idx as u32,
                                         genesis_hash,
                                         debug_jets,
+                                        include_debug_symbols,
                                     ) {
                                         Ok(()) => println!("{}", style("OK").green()),
                                         Err(e) => {
@@ -2455,6 +2460,7 @@ pub fn run(
                                     pset_idx as u32,
                                     genesis_hash,
                                     &mut pset.inputs_mut()[pset_idx],
+                                    include_debug_symbols,
                                 ) {
                                     Ok(()) => println!("{}", style("OK").green()),
                                     Err(e) => {
@@ -2511,7 +2517,7 @@ pub fn run(
         println!("{}", step_header("Step 9b: Creating Instance"));
         if let Some(ci) = &action.create_instance {
             let fields = eval_create_instance_fields(
-                ci, &ctx, manifest_file, &create_instance_hints, net_for_hash, true,
+                ci, &ctx, manifest_file, &create_instance_hints, net_for_hash, true, include_debug_symbols,
             );
             let inst = crate::instance::InstanceFile {
                 instance: Some(crate::instance::InstanceData {
@@ -3027,12 +3033,28 @@ fn select_input(
         }
     };
 
+    // Optional address pin: restrict selection to UTXOs at this exact scriptPubKey.
+    // Resolves a reference (instance./params.) or a literal address string.
+    let from_spk: Option<lwk_wollet::elements::Script> = input.from_address.as_ref().and_then(|s| {
+        let resolved = eval::eval_destination_str(s, ctx).unwrap_or_else(|| s.clone());
+        match resolved.trim().parse::<lwk_wollet::elements::Address>() {
+            Ok(a) => Some(a.script_pubkey()),
+            Err(e) => {
+                println!("  {} Input '{}' from_address '{}' is not a valid address: {e}", style("[warn]").yellow(), input.id, resolved);
+                None
+            }
+        }
+    });
+    let spk_matches_wt = |u: &lwk_wollet::WalletTxOut| from_spk.as_ref().map_or(true, |spk| &u.script_pubkey == spk);
+    let spk_matches_ext = |u: &lwk_wollet::ExternalUtxo| from_spk.as_ref().map_or(true, |spk| &u.txout.script_pubkey == spk);
+
     // Check confidential UTXOs first.
     if let Some(asset_id) = required_asset {
         if let Some(utxo) = available.iter().find(|u| {
             u.unblinded.asset == asset_id
                 && !claimed.contains(&outpoint_key(u))
                 && utxo_matches(u.unblinded.value)
+                && spk_matches_wt(u)
         }) {
             let key = outpoint_key(utxo);
             claimed.insert(key);
@@ -3051,6 +3073,7 @@ fn select_input(
             u.unblinded.asset == asset_id
                 && !claimed.contains(&outpoint_key_ext(u))
                 && utxo_matches(u.unblinded.value)
+                && spk_matches_ext(u)
         }) {
             let key = outpoint_key_ext(utxo);
             claimed.insert(key);
@@ -3473,6 +3496,7 @@ fn eval_create_instance_fields(
     type_hints: &std::collections::HashMap<String, String>,
     network: lwk_wollet::ElementsNetwork,
     verbose: bool,
+    include_debug_symbols: bool,
 ) -> std::collections::HashMap<String, String> {
     use crate::manifest::FieldValue;
 
@@ -3586,7 +3610,7 @@ fn eval_create_instance_fields(
                                         .unwrap_or(std::path::Path::new("."))
                                         .join(simf.as_str());
 
-                                    match covenant::compute_covenant_script_hash(&simf_path, &p, &hints, network) {
+                                    match covenant::compute_covenant_script_hash(&simf_path, &p, &hints, network, include_debug_symbols) {
                                         Ok(hash_bytes) => {
                                             Some(hash_bytes.iter().map(|b| format!("{b:02x}")).collect())
                                         }
@@ -3956,6 +3980,7 @@ mod tests {
             std::path::Path::new("/nonexistent"),
             &std::collections::HashMap::new(),
             lwk_wollet::ElementsNetwork::LiquidTestnet,
+            false,
             false,
         );
 

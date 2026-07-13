@@ -3,6 +3,7 @@
   "protocol": "simplicity-lending",
   "description": "P2P collateralised lending on Liquid, wire-compatible with the simplicity-lending reference implementation (github BlockstreamResearch/simplicity-lending, `smplx-sdk` covenants). This 'v2' manifest reproduces that protocol's exact on-chain transaction layout so offers created with tx-manifest-wallet are discoverable and settleable by simplicity-lending's own CLI / indexer / web app, and vice-versa. Key differences from the standalone 'lending' example: (1) the principal payout AND the borrower NFT both go to the borrower's plain wallet address (an explicit v0 P2WPKH), committed into the covenant as sha256(scriptPubKey) — there is no p2pk covenant and no separate claim step; (2) the borrower NFT is held in the borrower's wallet during the active loan and spent with an ordinary signature on repayment; (3) NFT ordering is first-params, second-params, borrower, lender; (4) the creation OP_RETURN carries borrower_pubkey || principal_asset_id (64 bytes, internal asset order) for indexer discovery; (5) a single AMOUNTS_DECIMALS drives the bit-packed parameter NFTs, matching the reference wallet.",
   "simplicity_hl_version": "0.6.0",
+  "compile_debug_symbols": true,
   "utxo_types": {
     "pre_lock": {
       "description": "Collateral held in the PreLockCovenant while the borrower's offer is open. PATH::LEFT (create_lending_path) lets a lender activate the loan; PATH::RIGHT (cancel_pre_lock_path) lets the borrower cancel with a Schnorr signature, burning all Utility NFTs. Address is byte-identical to simplicity-lending's pre_lock covenant for the same parameters.",
@@ -91,6 +92,12 @@
         },
         {
           "id": "split_utxo4",
+          "destination": "wallet",
+          "amount_sat": 1,
+          "asset": "lbtc"
+        },
+        {
+          "id": "split_utxo5",
           "destination": "change",
           "asset": "lbtc"
         }
@@ -226,8 +233,8 @@
             },
             "AMOUNTS_DECIMALS": {
               "type": "u8",
-              "default": "1",
-              "description": "Single decimal mantissa applied to BOTH collateral and principal when bit-packing the Parameter NFTs (matches simplicity-lending's hard-coded amounts_decimals = 1). COLLATERAL_AMOUNT and PRINCIPAL_AMOUNT must be exact multiples of 10^AMOUNTS_DECIMALS, and each base amount must fit in 25 bits."
+              "default": "0",
+              "description": "Single decimal mantissa applied to BOTH collateral and principal when bit-packing the Parameter NFTs. The bit-packed amount is `amount / 10^AMOUNTS_DECIMALS` and must round-trip exactly, so COLLATERAL_AMOUNT and PRINCIPAL_AMOUNT must each be exact multiples of 10^AMOUNTS_DECIMALS, and each `amount / 10^AMOUNTS_DECIMALS` must fit in 25 bits (< 33,554,432). Default 0 is lossless for any amount below 33,554,432 (use this unless your amounts are larger). Raise it (e.g. to 1, matching simplicity-lending's demo) only with amounts that are exact multiples of 10^AMOUNTS_DECIMALS — a non-divisible amount is silently truncated in the NFT, which makes the offer both unindexable and unspendable."
             },
             "COLLATERAL_ASSET_ID": {
               "type": "liquid.asset_id",
@@ -440,6 +447,15 @@
           },
           "inputs": [
             {
+              "id": "collateral_prefund_in",
+              "description": "Wallet UTXO holding at least COLLATERAL_AMOUNT of the collateral asset. Consumed to mint a dedicated, exact-amount collateral UTXO at BORROWER_ADDRESS (see collateral_at_borrower output) so LockCollateral can spend it from the committed address. Declared first so it claims a large-enough UTXO before the 1-sat issuance inputs.",
+              "utxo_source": "wallet",
+              "asset": "instance.COLLATERAL_ASSET_ID",
+              "amount_sat": {
+                "min_amount": "instance.COLLATERAL_AMOUNT"
+              }
+            },
+            {
               "id": "first_params_issuance_input",
               "description": "Wallet UTXO whose outpoint determines FIRST_PARAMETERS_NFT_ASSET_ID (issued at output 0).",
               "utxo_source": "wallet",
@@ -538,6 +554,21 @@
               "confidential": false
             },
             {
+              "id": "collateral_at_borrower",
+              "description": "Dedicated collateral UTXO of exactly COLLATERAL_AMOUNT at the borrower's committed address (explicit). LockCollateral spends this (pinned via from_address), guaranteeing its input 0 is funded from the address whose hash the covenant commits to — which is what makes the offer indexable.",
+              "destination": "instance.BORROWER_ADDRESS",
+              "asset": "instance.COLLATERAL_ASSET_ID",
+              "amount_sat": "instance.COLLATERAL_AMOUNT",
+              "confidential": false
+            },
+            {
+              "id": "collateral_change",
+              "description": "Collateral-asset change back to borrower (surplus over COLLATERAL_AMOUNT).",
+              "destination": "change",
+              "asset": "instance.COLLATERAL_ASSET_ID",
+              "optional": true
+            },
+            {
               "id": "fee_change",
               "description": "L-BTC change back to borrower.",
               "destination": "change",
@@ -565,12 +596,11 @@
           "inputs": [
             {
               "id": "collateral_in",
-              "description": "Borrower's collateral UTXO (should be funded at BORROWER_ADDRESS for third-party interop).",
+              "description": "Borrower's collateral UTXO — pinned to BORROWER_ADDRESS so it is spent from the exact address whose hash the covenant commits to. This is the UTXO staged by IssueUtilityNFTs, and it is what the indexer reconstructs borrower_output_script_hash from (input 0's prevout).",
               "utxo_source": "wallet",
               "asset": "instance.COLLATERAL_ASSET_ID",
-              "amount_sat": {
-                "min_amount": "instance.COLLATERAL_AMOUNT"
-              }
+              "from_address": "instance.BORROWER_ADDRESS",
+              "amount_sat": "instance.COLLATERAL_AMOUNT"
             },
             {
               "id": "first_params_in",

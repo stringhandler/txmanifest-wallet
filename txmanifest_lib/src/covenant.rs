@@ -39,6 +39,7 @@ pub fn compute_tapleaf_hash(
     simf_path: &Path,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
+    include_debug_symbols: bool,
 ) -> Result<[u8; 32]> {
     let source = std::fs::read_to_string(simf_path)
         .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
@@ -46,7 +47,7 @@ pub fn compute_tapleaf_hash(
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
     let compiled =
-        CompiledProgram::new(source, arguments, false, Box::new(ElementsJetHinter::new()))
+        CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
             .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
     let commit = compiled.commit();
     let cmr = commit.cmr();
@@ -66,8 +67,9 @@ pub fn compute_covenant_script_hash(
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     network: lwk_wollet::ElementsNetwork,
+    include_debug_symbols: bool,
 ) -> Result<[u8; 32]> {
-    let addr = compute_covenant_address(simf_path, compile_params, type_hints, &[], network)?;
+    let addr = compute_covenant_address(simf_path, compile_params, type_hints, &[], network, include_debug_symbols)?;
     let spk = addr.script_pubkey();
     Ok(sha256::Hash::hash(spk.as_bytes()).to_byte_array())
 }
@@ -79,13 +81,14 @@ pub fn check_compile(
     simf_path: &Path,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
+    include_debug_symbols: bool,
 ) -> Result<()> {
     let source = std::fs::read_to_string(simf_path)
         .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    CompiledProgram::new(source, arguments, false, Box::new(ElementsJetHinter::new()))
+    CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
         .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
     Ok(())
 }
@@ -256,6 +259,7 @@ pub fn dry_run_covenant(
     input_index: u32,
     genesis_hash: BlockHash,
     debug_jets: bool,
+    include_debug_symbols: bool,
 ) -> Result<()> {
     // Debug: all prints go to stdout so they interleave correctly with lifecycle output.
     use std::io::Write as _;
@@ -326,7 +330,7 @@ pub fn dry_run_covenant(
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
     let compiled =
-        CompiledProgram::new(source, arguments, false, Box::new(ElementsJetHinter::new()))
+        CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
             .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
     let abi_meta = compiled
         .generate_abi_meta()
@@ -561,6 +565,7 @@ pub fn finalize_covenant_input(
     input_index: u32,
     genesis_hash: BlockHash,
     pset_input: &mut lwk_wollet::elements::pset::Input,
+    include_debug_symbols: bool,
 ) -> Result<()> {
     // Compile
     let source = std::fs::read_to_string(simf_path)
@@ -569,7 +574,7 @@ pub fn finalize_covenant_input(
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
     let compiled =
-        CompiledProgram::new(source, arguments, false, Box::new(ElementsJetHinter::new()))
+        CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
             .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
     let abi_meta = compiled
         .generate_abi_meta()
@@ -668,6 +673,7 @@ pub fn compute_covenant_address(
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
     network: lwk_wollet::ElementsNetwork,
+    include_debug_symbols: bool,
 ) -> Result<Address> {
     eprintln!(
         "[covenant] compute_covenant_address: {} extra leaf(s), simf={}",
@@ -701,7 +707,7 @@ pub fn compute_covenant_address(
     eprintln!("[covenant] simf source loaded ({} bytes)", source.len());
 
     let compiled =
-        CompiledProgram::new(source, arguments, false, Box::new(ElementsJetHinter::new()))
+        CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
             .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
     eprintln!("[covenant] SimplicityHL compilation OK");
 
@@ -1027,7 +1033,7 @@ mod tests {
         hints.insert("COLD_PUB_KEY".to_string(), "pubkey".to_string());
         hints.insert("INHERIT_BLOCKS".to_string(), "u16".to_string());
 
-        check_compile(&simf_path, &params, &hints).expect("last_will.simf should compile");
+        check_compile(&simf_path, &params, &hints, false).expect("last_will.simf should compile");
     }
 
     /// `build_args_json` must include params whose type is inferred by naming convention
@@ -1147,9 +1153,9 @@ mod tests {
         let mut hints = HashMap::new();
         hints.insert("SCRIPT_HASH".to_string(), "bytes32".to_string());
 
-        // Path A — the function under test.
-        let hash_a =
-            compute_tapleaf_hash(&simf_path, &params, &hints).expect("compute_tapleaf_hash");
+        // Path A — the function under test. (Debug-symbol setting must match Path B.)
+        let hash_a = compute_tapleaf_hash(&simf_path, &params, &hints, true)
+            .expect("compute_tapleaf_hash");
 
         // Path B — compile directly, get CMR, use TapLeafHash::from_script.
         let source = std::fs::read_to_string(&simf_path).expect("read simf");
@@ -1158,7 +1164,7 @@ mod tests {
         let compiled = CompiledProgram::new(
             source,
             arguments,
-            false,
+            true,
             Box::new(simplicityhl::ast::ElementsJetHinter::new()),
         )
         .expect("compile");
@@ -1335,7 +1341,7 @@ mod tests {
 
         // Hash A: explicit params only (mirrors IssueUtilityNFTs PRE_LOCK_COV_HASH computation)
         let hash_a =
-            compute_covenant_script_hash(&simf_path, &explicit_params, &explicit_hints, network)
+            compute_covenant_script_hash(&simf_path, &explicit_params, &explicit_hints, network, false)
                 .expect("hash with explicit params");
 
         // Add the extra params that LockCollateral includes via compile_params_map
@@ -1400,7 +1406,7 @@ mod tests {
         );
 
         // Hash B: all params (mirrors how LockCollateral creates the pre_lock output)
-        let hash_b = compute_covenant_script_hash(&simf_path, &all_params, &all_hints, network)
+        let hash_b = compute_covenant_script_hash(&simf_path, &all_params, &all_hints, network, false)
             .expect("hash with all params");
 
         let hex_a: String = hash_a.iter().map(|b| format!("{b:02x}")).collect();
@@ -1536,19 +1542,14 @@ mod tests {
             "pubkey",
         );
 
-        let hash = compute_covenant_script_hash(&simf_path, &params, &hints, network)
+        let hash = compute_covenant_script_hash(&simf_path, &params, &hints, network, false)
             .expect("compute_covenant_script_hash");
         let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
 
-        // Expected: SHA256(scriptPubKey of the pre_lock covenant address) computed
-        // with the correct LENDING_COV_HASH (f4e0b5c7...) from the current instance.
-        //
-        // The old instance.json had PRE_LOCK_COV_HASH = 73d1b960... which was WRONG —
-        // it was computed by eval_create_instance_fields using a stale LENDING_COV_HASH
-        // loaded from the previously saved instance into ctx, before LENDING_COV_HASH
-        // was freshly recomputed in the same run.  After the lifecycle.rs fix (guarding
-        // ctx fallback with computed_field_names), re-running IssueUtilityNFTs will
-        // produce PRE_LOCK_COV_HASH = a323dee... which matches the actual on-chain UTXO.
+        // Expected: SHA256(scriptPubKey of the pre_lock covenant address) for the given
+        // (fixed) nested-hash inputs, compiled WITHOUT debug symbols (the default). The
+        // debug-symbol setting changes the CMR — compiling with debug symbols ON (as the
+        // lending_v2 manifest does, to match simplicity-lending) yields 4381f0b1... instead.
         assert_eq!(
             hex, "a323dee710635a3438d6d93dd4364aad580624b1a33c6d2495c803cfd92c5fbb",
             "Computed PRE_LOCK_COV_HASH does not match expected value.\nComputed: {hex}"
