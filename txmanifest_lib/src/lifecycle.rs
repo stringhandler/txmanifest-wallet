@@ -462,8 +462,9 @@ pub fn run(
                     continue;
                 }
 
-                // Priority: wallet_key source > --params override > formula auto-eval > interactive prompt.
-                let value = if def.source.as_ref().map(|s| s.type_ == "wallet_key").unwrap_or(false) {
+                // Priority: wallet_* source > --params override > formula auto-eval > interactive prompt.
+                let source_type = def.source.as_ref().map(|s| s.type_.as_str());
+                let value = if source_type == Some("wallet_key") {
                     let info = loaded_wallet.as_ref()
                         .map(wallet::wallet_info)
                         .transpose()?
@@ -476,6 +477,21 @@ pub fn run(
                         style(format!("[wallet key, path: {}]", info.wallet_key_path)).dim(),
                     );
                     info.wallet_pubkey.clone()
+                } else if source_type == Some("wallet_script_hash") || source_type == Some("wallet_address") {
+                    // Committed payout target: sha256(explicit index-0 scriptPubKey) and the
+                    // matching explicit address. Mirrors simplicity-lending's borrower payout.
+                    let w = loaded_wallet.as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Param '{name}' requires a {} source but no wallet is loaded", source_type.unwrap()))?;
+                    let (addr, hash) = wallet::committed_output(w)?;
+                    let v = if source_type == Some("wallet_script_hash") { hash } else { addr };
+                    println!(
+                        "  {} {} = {}  {}",
+                        style("✓").green(),
+                        style(name).bold().cyan(),
+                        style(&v).yellow(),
+                        style(format!("[{}]", source_type.unwrap())).dim(),
+                    );
+                    v
                 } else if let Some(ov) = overrides.get(name) {
                     println!(
                         "  {} {} = {}  {}",
@@ -1796,10 +1812,23 @@ pub fn run(
                     serde_json::Value::Object(m)
                         if matches!(m.get("type").and_then(|v| v.as_str()), Some("op_return") | Some("burn")) =>
                     {
-                        let script_pubkey = lwk_wollet::elements::Script::from(vec![0x6au8]); // OP_RETURN
+                        // Bare `OP_RETURN` by default (sufficient for NFT burns); if a `data`
+                        // expression is present, embed its bytes so indexers can discover the tx.
+                        let script_pubkey = match &output.data {
+                            None => lwk_wollet::elements::Script::from(vec![0x6au8]),
+                            Some(expr) => match eval::eval_op_return_data(expr, &ctx, &compile_param_type_hints) {
+                                Ok(bytes) => lwk_wollet::elements::Script::new_op_return(&bytes),
+                                Err(e) => {
+                                    println!("  {} Output '{}' OP_RETURN data eval failed: {e}", style("[error]").red(), output.id);
+                                    collect_outputs_ok = false;
+                                    break;
+                                }
+                            },
+                        };
+                        let data_note = if output.data.is_some() { format!(" ({} data bytes)", script_pubkey.len().saturating_sub(2)) } else { String::new() };
                         println!(
-                            "  {} Output '{}': {} sat {} → OP_RETURN",
-                            style("+").green(), output.id, style(amount).yellow(), asset_label
+                            "  {} Output '{}': {} sat {} → OP_RETURN{}",
+                            style("+").green(), output.id, style(amount).yellow(), asset_label, data_note
                         );
                         pset_outputs.push(pset_builder::PsetOutputSpec {
                             script_pubkey, amount, asset: asset_id, blinding_key: None,

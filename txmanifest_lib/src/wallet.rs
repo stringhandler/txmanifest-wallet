@@ -312,6 +312,44 @@ pub fn wallet_info(wallet: &WalletFile) -> Result<WalletInfo> {
     })
 }
 
+/// The wallet's committed payout target: the *explicit* (unblinded) index-0
+/// address and the SHA-256 of its scriptPubKey, both in natural byte order.
+///
+/// This mirrors how the `simplicity-lending` protocol commits a borrower's payout:
+/// it bakes `sha256(borrower_wallet_scriptPubKey)` into the pre-lock covenant (as
+/// both `PRINCIPAL_OUTPUT_SCRIPT_HASH` and `BORROWER_NFT_OUTPUT_SCRIPT_HASH`) and
+/// then pays the principal and the borrower NFT to that explicit address. The
+/// covenant enforces the payout with the `output_script_hash` jet, which returns
+/// `sha256(scriptPubKey)` — so this hash must match byte-for-byte.
+///
+/// Returns `(explicit_address_string, sha256_hex)`. The address is the unblinded
+/// P2WPKH form so that, when used as an output destination, the wallet builds an
+/// *explicit* (non-confidential) output — required because the covenant introspects
+/// the output's asset and amount, which are only readable on explicit outputs.
+///
+/// The index-0 address is also the wallet's advertised receive address, so
+/// collateral funded into the wallet naturally lives at the same scriptPubKey the
+/// covenant commits to — which is what lets a third-party lender (e.g. the
+/// `simplicity-lending` CLI) reconstruct and spend the offer.
+pub fn committed_output(wallet: &WalletFile) -> Result<(String, String)> {
+    use lwk_wollet::elements::hashes::{sha256, Hash};
+
+    let desc = descriptor(wallet)?;
+    let network = elements_network(wallet);
+    let wollet = lwk_wollet::Wollet::new(network, NoPersist::new(), desc)
+        .map_err(|e| anyhow::anyhow!("Failed to create wollet: {e}"))?;
+    let addr = wollet
+        .address(Some(0))
+        .map_err(|e| anyhow::anyhow!("Failed to derive address: {e}"))?
+        .address()
+        .clone();
+    let explicit = addr.to_unconfidential();
+    let spk = explicit.script_pubkey();
+    let hash = sha256::Hash::hash(spk.as_bytes());
+    let hash_hex: String = hash.to_byte_array().iter().map(|b| format!("{b:02x}")).collect();
+    Ok((explicit.to_string(), hash_hex))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -319,6 +319,11 @@ pub struct Output {
     pub asset: Option<serde_json::Value>,
     pub optional: Option<bool>,
     pub condition: Option<String>,
+    /// OP_RETURN payload expression, for `destination: {"type":"op_return"}` outputs.
+    /// A `concat(ref, …)` expression (or single reference / hex literal) evaluated to raw
+    /// bytes and embedded after the `OP_RETURN` opcode. Ignored for non-OP_RETURN outputs.
+    /// Omit for a bare data-less `OP_RETURN` (e.g. NFT burns).
+    pub data: Option<String>,
     /// When `false`, wallet outputs are built with no blinding key (explicit amount/asset).
     /// Defaults to `true` (confidential) for wallet destinations. Has no effect on
     /// covenant (`utxo_type`) outputs — those are controlled by the `utxo_type.confidential` flag.

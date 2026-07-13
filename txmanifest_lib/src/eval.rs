@@ -61,6 +61,58 @@ pub fn eval_destination_str(dest: &str, ctx: &ExecutionContext) -> Option<String
     resolve_ref(dest, ctx)
 }
 
+/// Evaluate an OP_RETURN `data` expression into a raw byte payload.
+///
+/// Supports `concat(a, b, …)` and a single reference / hex literal. Each argument is
+/// resolved against `ctx` (a `namespace.KEY` reference or a bare hex literal) and decoded
+/// from hex. Arguments whose key is typed `liquid.asset_id` (via `type_hints`, or matched
+/// by the `*_ASSET_ID` naming convention) are byte-reversed from display order to the
+/// Elements-internal order that assets are committed in on-chain — so, e.g., a
+/// `concat(BORROWER_PUB_KEY, PRINCIPAL_ASSET_ID)` payload is byte-identical to the
+/// `borrower_pubkey ‖ principal_asset_id.into_inner()` layout other tooling expects.
+pub fn eval_op_return_data(
+    expr: &str,
+    ctx: &ExecutionContext,
+    type_hints: &std::collections::HashMap<String, String>,
+) -> Result<Vec<u8>> {
+    let e = expr.trim();
+    let inner = e
+        .strip_prefix("concat(")
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or(e);
+    let mut out = Vec::new();
+    for raw in inner.split(',') {
+        let arg = raw.trim();
+        if arg.is_empty() {
+            continue;
+        }
+        // The referenced key (last dotted segment) drives the asset-id reversal decision.
+        let key = arg.rsplit('.').next().unwrap_or(arg);
+        let is_asset = match type_hints.get(key) {
+            Some(t) => t == "liquid.asset_id",
+            None => {
+                let u = key.to_uppercase();
+                u.ends_with("_ASSET_ID") || u.ends_with("_ASSET")
+            }
+        };
+        let resolved = resolve_ref(arg, ctx).unwrap_or_else(|| arg.trim_matches(['"', '\'']).to_string());
+        let hex = resolved.trim().trim_start_matches("0x").trim_start_matches("0X");
+        if hex.len() % 2 != 0 {
+            bail!("OP_RETURN data part '{arg}' resolved to odd-length hex '{hex}'");
+        }
+        let mut bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+            .collect::<Result<Vec<u8>, _>>()
+            .map_err(|_| anyhow::anyhow!("OP_RETURN data part '{arg}' is not valid hex: '{hex}'"))?;
+        if is_asset {
+            bytes.reverse();
+        }
+        out.extend_from_slice(&bytes);
+    }
+    Ok(out)
+}
+
 /// Evaluate an inequality (`!=`) validation expression by comparing both operands
 /// as strings.  String comparison (rather than the integer evaluator) lets this
 /// work on 64-char asset-id hex values, e.g.
@@ -478,5 +530,43 @@ mod fee_keyword_tests {
         assert_eq!(eval_amount(&serde_json::json!("amount - fee"), &ctx).unwrap(), 99750);
         // Bare `fee` resolves directly.
         assert_eq!(eval_amount(&serde_json::json!("fee"), &ctx).unwrap(), 250);
+    }
+}
+
+#[cfg(test)]
+mod op_return_data_tests {
+    use super::*;
+    use crate::context::ExecutionContext;
+    use std::collections::HashMap;
+
+    #[test]
+    fn concat_reverses_asset_id_and_preserves_pubkey() {
+        let mut ctx = ExecutionContext::new();
+        // 32-byte x-only pubkey (natural order) and a 32-byte asset id in display order.
+        let pubkey = "a19d31462a25b9ad26298473a967e0c188404c6f913a3bbf1da0f5402fe2d86d";
+        let asset_display = "3cc22e157739d0bab9b1015396d7cfacf67b9a66275454e049dcef7bae8ea8f8";
+        ctx.set_compile_param("BORROWER_PUB_KEY", pubkey);
+        ctx.set_compile_param("PRINCIPAL_ASSET_ID", asset_display);
+
+        let mut hints = HashMap::new();
+        hints.insert("PRINCIPAL_ASSET_ID".to_string(), "liquid.asset_id".to_string());
+        hints.insert("BORROWER_PUB_KEY".to_string(), "pubkey".to_string());
+
+        let bytes = eval_op_return_data(
+            "concat(instance.BORROWER_PUB_KEY, instance.PRINCIPAL_ASSET_ID)",
+            &ctx,
+            &hints,
+        )
+        .unwrap();
+
+        // 64 bytes total: pubkey natural-order, asset id reversed to Elements-internal order.
+        let to_hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        assert_eq!(bytes.len(), 64);
+        assert_eq!(to_hex(&bytes[..32]), pubkey);
+        let mut asset_internal: Vec<u8> = (0..32)
+            .map(|i| u8::from_str_radix(&asset_display[i * 2..i * 2 + 2], 16).unwrap())
+            .collect();
+        asset_internal.reverse();
+        assert_eq!(&bytes[32..], asset_internal.as_slice());
     }
 }
