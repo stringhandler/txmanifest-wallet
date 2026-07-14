@@ -147,6 +147,15 @@ pub enum ParamCompute {
         /// dependencies when the simf does not use every manifest-level compile param.
         #[serde(default)]
         depends_on: Option<Vec<String>>,
+        /// Optional taproot storage leaves to fold into the tap tree BEFORE hashing the
+        /// scriptPubKey. When present, the computed value is `sha256(spk WITH these leaves)`
+        /// instead of the storage-less script hash — used to key a `script_auth` covenant to
+        /// a covenant-with-storage (e.g. the pending lending offer's own script hash, offer
+        /// out[3]). Leaf payload item value-refs resolve against the in-progress
+        /// create_instance fields (then ctx), so they may reference sibling computed fields
+        /// such as `CURRENT_DEBT`.
+        #[serde(default)]
+        extra_leaves: Option<Vec<TaprootLeafSpec>>,
     },
     /// Call a named function in a `.simf` file after inputs are resolved.
     /// The function is compiled with `compile_params` as param:: constants.
@@ -510,9 +519,18 @@ pub struct UtxoType {
 }
 
 impl UtxoType {
-    /// Resolve `script.extra_leaves` to concrete byte vectors by substituting
-    /// state_var references with their `default_value` as a single u8.
-    pub fn resolve_extra_leaf_payloads(&self) -> anyhow::Result<Vec<Vec<u8>>> {
+    /// Resolve `script.extra_leaves` to concrete byte vectors.
+    ///
+    /// Each payload item is one of:
+    /// - a hex-literal string (`"0x01"`),
+    /// - `{ "state_var": "name" }` → the state var's `default_value` as a single u8, or
+    /// - a typed/computed value `{ "value": <ref>, "type": ..., "pad_to": ..., ... }`
+    ///   resolved against `ctx` (see [`crate::eval::encode_leaf_value`]) — used for
+    ///   dynamic slots such as the lending covenant's `current_debt` leaf.
+    pub fn resolve_extra_leaf_payloads(
+        &self,
+        ctx: &crate::context::ExecutionContext,
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
         let extra_leaves = match self.script.as_ref().and_then(|s| s.extra_leaves.as_ref()) {
             Some(l) => l,
             None => return Ok(vec![]),
@@ -534,6 +552,11 @@ impl UtxoType {
                             })?;
                             bytes.push(byte);
                         }
+                    }
+                    // Typed/computed value item, e.g. the dynamic `current_debt` slot:
+                    // { "value": "instance.CURRENT_DEBT", "type": "u64", "pad_to": 32, "endian": "be" }.
+                    serde_json::Value::Object(m) if m.contains_key("value") => {
+                        bytes.extend_from_slice(&crate::eval::encode_leaf_value(item, ctx)?);
                     }
                     serde_json::Value::Object(m) => {
                         let var_name = m

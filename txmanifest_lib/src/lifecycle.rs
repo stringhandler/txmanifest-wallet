@@ -821,7 +821,7 @@ pub fn run(
             any_new = false;
             for (name, def) in &derived_defs {
                 if ctx.get_compile_param(name).is_some() || failed.contains(*name) { continue; }
-                let Some(crate::manifest::ParamCompute::Tapleaf { simf, params, depends_on }) = &def.compute else { continue };
+                let Some(crate::manifest::ParamCompute::Tapleaf { simf, params, depends_on, .. }) = &def.compute else { continue };
 
                 // Resolve the params map for this simf compilation.
                 // When no explicit params override is given, auto-populate:
@@ -1666,7 +1666,7 @@ pub fn run(
                         break;
                     }
                 };
-                let leaf_payloads = match inp_ut.resolve_extra_leaf_payloads() {
+                let leaf_payloads = match inp_ut.resolve_extra_leaf_payloads(&ctx) {
                     Ok(p) => p,
                     Err(e) => {
                         println!("  {} {e}", style("[error]").red());
@@ -1855,7 +1855,7 @@ pub fn run(
                             }
                         };
                         let confidential = ut.confidential;
-                        let leaf_payloads = match ut.resolve_extra_leaf_payloads() {
+                        let leaf_payloads = match ut.resolve_extra_leaf_payloads(&ctx) {
                             Ok(p) => p,
                             Err(e) => {
                                 println!("  {} Output '{}' extra leaves error: {e}", style("[warn]").yellow(), output.id);
@@ -2236,7 +2236,7 @@ pub fn run(
                                             continue;
                                         }
                                     };
-                                    let leaf_payloads = match dry_ut.resolve_extra_leaf_payloads() {
+                                    let leaf_payloads = match dry_ut.resolve_extra_leaf_payloads(&ctx) {
                                         Ok(p) => p,
                                         Err(e) => {
                                             println!(
@@ -2392,7 +2392,7 @@ pub fn run(
                                         continue;
                                     }
                                 };
-                                let leaf_payloads = match fin_ut.resolve_extra_leaf_payloads() {
+                                let leaf_payloads = match fin_ut.resolve_extra_leaf_payloads(&ctx) {
                                     Ok(p) => p,
                                     Err(e) => {
                                         println!(
@@ -3489,6 +3489,63 @@ fn run_hook_block(
 ///
 /// Multi-pass: fields that depend on other fields computed in the same block
 /// are retried until stable (topological ordering without explicit sort).
+
+/// Resolve a `Tapleaf.extra_leaves` spec inside `create_instance` (task 11).
+/// Each leaf is the concatenation of its payload items; a typed value item's `value`
+/// resolves against the in-progress `fields` first (for sibling computed fields such as
+/// `CURRENT_DEBT`), then ctx. Returns `None` if a referenced computed field is not yet
+/// available, so the caller defers this field to a later topological pass.
+fn resolve_create_instance_leaves(
+    specs: &[crate::manifest::TaprootLeafSpec],
+    fields: &std::collections::HashMap<String, String>,
+    ctx: &ExecutionContext,
+    computed_field_names: &std::collections::HashSet<&str>,
+) -> Option<Vec<Vec<u8>>> {
+    let mut leaves = Vec::with_capacity(specs.len());
+    for leaf in specs {
+        let mut bytes: Vec<u8> = Vec::new();
+        for item in &leaf.payload {
+            match item {
+                serde_json::Value::String(s) => {
+                    match eval::encode_leaf_bytes(&serde_json::json!({ "type": "bytes", "value": s }), s) {
+                        Ok(b) => bytes.extend_from_slice(&b),
+                        Err(_) => return None,
+                    }
+                }
+                serde_json::Value::Object(m) if m.contains_key("value") => {
+                    let vref = m.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                    let key = vref
+                        .strip_prefix("instance.")
+                        .or_else(|| vref.strip_prefix("compile_params."))
+                        .or_else(|| vref.strip_prefix("params."))
+                        .unwrap_or(vref);
+                    // A sibling computed field: only use the in-progress map (never a stale ctx value);
+                    // if not ready yet, defer.
+                    let resolved: String = if computed_field_names.contains(key) {
+                        match fields.get(key) {
+                            Some(v) => v.clone(),
+                            None => return None,
+                        }
+                    } else {
+                        fields.get(key)
+                            .cloned()
+                            .or_else(|| ctx.get_compile_param(key).map(str::to_string))
+                            .or_else(|| ctx.get_param(key).map(str::to_string))
+                            .unwrap_or_else(|| vref.to_string())
+                    };
+                    match eval::encode_leaf_bytes(item, &resolved) {
+                        Ok(b) => bytes.extend_from_slice(&b),
+                        Err(_) => return None,
+                    }
+                }
+                _ => return None,
+            }
+        }
+        leaves.push(bytes);
+    }
+    Some(leaves)
+}
+
 fn eval_create_instance_fields(
     ci: &crate::manifest::InstanceCreate,
     ctx: &ExecutionContext,
@@ -3534,7 +3591,7 @@ fn eval_create_instance_fields(
                 }
                 FieldValue::Compute(compute) => {
                     match compute {
-                        crate::manifest::ParamCompute::Tapleaf { simf, params, depends_on } => {
+                        crate::manifest::ParamCompute::Tapleaf { simf, params, depends_on, extra_leaves } => {
                             // Build simf_params: if params is empty use depends_on (or all ctx params)
                             let simf_params: Option<std::collections::HashMap<String, String>> = if params.is_empty() {
                                 let gate_names: Vec<String> = match depends_on {
@@ -3610,16 +3667,28 @@ fn eval_create_instance_fields(
                                         .unwrap_or(std::path::Path::new("."))
                                         .join(simf.as_str());
 
-                                    match covenant::compute_covenant_script_hash(&simf_path, &p, &hints, network, include_debug_symbols) {
-                                        Ok(hash_bytes) => {
-                                            Some(hash_bytes.iter().map(|b| format!("{b:02x}")).collect())
-                                        }
-                                        Err(e) => {
-                                            println!(
-                                                "  {} create_instance script_hash '{}' failed: {e}",
-                                                style("[error]").red(), field_name
-                                            );
-                                            None
+                                    // Resolve optional storage leaves (task 11): each payload item is a
+                                    // hex literal or a typed value-ref that resolves against the in-progress
+                                    // create_instance `fields` (then ctx). None => storage-less hash.
+                                    let leaves_result: Option<Vec<Vec<u8>>> = match extra_leaves {
+                                        None => Some(vec![]),
+                                        Some(specs) => resolve_create_instance_leaves(specs, &fields, ctx, &computed_field_names),
+                                    };
+                                    match leaves_result {
+                                        None => None, // a leaf ref not yet computed — retry in a later pass
+                                        Some(leaves) => {
+                                            match covenant::compute_covenant_script_hash_with_leaves(&simf_path, &p, &hints, &leaves, network, include_debug_symbols) {
+                                                Ok(hash_bytes) => {
+                                                    Some(hash_bytes.iter().map(|b| format!("{b:02x}")).collect())
+                                                }
+                                                Err(e) => {
+                                                    println!(
+                                                        "  {} create_instance script_hash '{}' failed: {e}",
+                                                        style("[error]").red(), field_name
+                                                    );
+                                                    None
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -3989,5 +4058,182 @@ mod tests {
             Some("fresh"),
             "$params.KEY expressions must prefer params over compile_params",
         );
+    }
+
+    /// Task 07 — the lending_v3 manifest's `CreateOffer.create_instance` nested
+    /// AssetAuth/AssetAuthVault cov-hash chain must reproduce the on-chain lending
+    /// (collateral) covenant of a real offer. Drives the ACTUAL manifest file's
+    /// create_instance with live offer 43ab4efe's resolved values, then folds the 2
+    /// storage leaves and asserts the out[5] scriptPubKey matches byte-for-byte.
+    #[test]
+    fn lending_v3_create_offer_reproduces_live_offer_out5() {
+        use crate::manifest::Manifest;
+
+        // Locate examples/lending_v3 relative to the crate (CARGO_MANIFEST_DIR = txmanifest_lib).
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../examples/lending_v3/txmanifest.json");
+        let raw = std::fs::read_to_string(&manifest_path).expect("read lending_v3 manifest");
+        let manifest: Manifest = serde_json::from_str(&raw).expect("parse lending_v3 manifest");
+        let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
+
+        let (_class, _class_def, action) = manifest
+            .find_class_and_method("CreateOffer")
+            .expect("CreateOffer method exists");
+        let ci = action.create_instance.as_ref().expect("CreateOffer has create_instance");
+
+        // Live offer 43ab4efe parameters (same as examples/lending_recon.rs).
+        let collateral = "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49";
+        let principal = "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5";
+        let borrower_nft = "78d61185c79f855fac51a87c191b00266f02d28752f50b3d9092ccf6b978181e";
+        let lender_nft = "213462821a5cdb96f435f5ea6597e8937359d6fd5a64b6ac8ef4262bc279fcfb";
+        let protocol_fee = "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5";
+        let out5 = "51201ae9d30d7a31f1393a289196a4dacc01fac95459540895db448aeca47fbd84e1";
+
+        // Populate ctx as if inputs + action params were resolved.
+        let mut ctx = ExecutionContext::new();
+        // $params.* (offer terms + keeper + factory + zero-hash default)
+        ctx.set_param("COLLATERAL_ASSET_ID", collateral);
+        ctx.set_param("PRINCIPAL_ASSET_ID", principal);
+        ctx.set_param("PROTOCOL_FEE_KEEPER_ASSET_ID", protocol_fee);
+        ctx.set_param("COLLATERAL_AMOUNT", "21000");
+        ctx.set_param("PRINCIPAL_AMOUNT", "1000");
+        ctx.set_param("PRINCIPAL_INTEREST_RATE", "10000");
+        ctx.set_param("LOAN_EXPIRATION_TIME", "2536857");
+        ctx.set_param("ZERO_HASH", &"00".repeat(32));
+        ctx.set_param("FACTORY_ASSET_ID", "0101010101010101010101010101010101010101010101010101010101010101");
+        // $instance.* (issuance-resolved NFT asset ids)
+        ctx.set_compile_param("BORROWER_NFT_ASSET_ID", borrower_nft);
+        ctx.set_compile_param("LENDER_NFT_ASSET_ID", lender_nft);
+
+        // Type hints from the class field + method param declarations.
+        let mut hints: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        if let Some((_, class_def, _)) = manifest.find_class_and_method("CreateOffer") {
+            for (fname, fdef) in &class_def.fields {
+                hints.insert(fname.clone(), fdef.type_.clone());
+            }
+        }
+        if let Some(params) = &action.params {
+            for (pname, pdef) in params {
+                hints.entry(pname.clone()).or_insert_with(|| pdef.type_.clone());
+            }
+        }
+
+        let fields = eval_create_instance_fields(
+            ci, &ctx, &manifest_path, &hints, net, false, true,
+        );
+
+        // The 5 nested hashes must match the independently-verified recon values.
+        assert_eq!(fields.get("FINALIZED_LENDER_VAULT_COV_HASH").map(String::as_str),
+            Some("686766f422bca200851234cc787902d105ae91e7acc97977ff32b84263b286c6"), "F_lender");
+        assert_eq!(fields.get("LENDER_VAULT_COV_HASH").map(String::as_str),
+            Some("54a0e779d4324f5f5ef45e0e615b34eb0091c4b88a08bfee3ce4fe0e760cf872"), "A_lender");
+        assert_eq!(fields.get("FINALIZED_PROTOCOL_FEE_VAULT_COV_HASH").map(String::as_str),
+            Some("9c2a221b8457112075bf80b46b32878e34a023e3f67653c54d041897926a49bb"), "F_proto");
+        assert_eq!(fields.get("PROTOCOL_FEE_VAULT_COV_HASH").map(String::as_str),
+            Some("2a887b2cbd477c94f4b14c03d32216ccb0faeb087ab08fd3862e105ddcdf5e71"), "A_proto");
+        assert_eq!(fields.get("PRINCIPAL_OUTPUT_SCRIPT_HASH").map(String::as_str),
+            Some("88c5f4e880bed03eb4e59f99f8d60534cd8c3dc9b405f2af72da2b8c358c7eb6"), "principal_out");
+
+        // CURRENT_DEBT (task 10): principal + principal*bps/10000 = 1000 + 1000*10000/10000 = 2000.
+        assert_eq!(fields.get("CURRENT_DEBT").map(String::as_str), Some("2000"), "current_debt");
+
+        // Drive the ACTUAL lending_collateral utxo_type end-to-end: fold the computed create_instance
+        // fields into ctx, resolve the utxo_type's compile_params + computed storage leaves, and
+        // reproduce out[5]. This exercises the real extra_leaves wiring (task 10), not a hand copy.
+        for (k, v) in &fields {
+            ctx.set_compile_param(k, v);
+        }
+        let ut = manifest
+            .utxo_type("lending_collateral")
+            .expect("lending_collateral utxo_type exists");
+        let base_params: std::collections::HashMap<String, String> =
+            ctx.all_compile_params().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let (lending_params, lending_hints) = apply_utxo_compile_params(&base_params, &hints, ut);
+        let leaves = ut.resolve_extra_leaf_payloads(&ctx).expect("resolve storage leaves");
+        assert_eq!(leaves.len(), 2, "two storage slots");
+        assert_eq!(leaves[0], vec![0u8; 32], "slot0 = is_active zero");
+        let mut expect_slot1 = vec![0u8; 32];
+        expect_slot1[24..32].copy_from_slice(&2000u64.to_be_bytes());
+        assert_eq!(leaves[1], expect_slot1, "slot1 = current_debt u64 BE, right-aligned in 32 bytes");
+
+        let lending_simf = manifest_path.parent().unwrap().join("lending.simf");
+        let addr = crate::covenant::compute_covenant_address(
+            &lending_simf, &lending_params, &lending_hints, &leaves, net, true,
+        ).expect("compute lending covenant address");
+        assert_eq!(format!("{:x}", addr.script_pubkey()), out5,
+            "manifest utxo_type (create_instance chain + computed storage leaves) must reproduce live offer out[5]");
+
+        // Task 11: LENDING_COV_SCRIPT_HASH = sha256(out[5] spk, WITH storage), computed via a
+        // tapleaf-over-lending.simf that folds the same storage leaves.
+        assert_eq!(fields.get("LENDING_COV_SCRIPT_HASH").map(String::as_str),
+            Some("2f40d78cbd15bd847a995719d707e623520dae2e223f66d77a76599f95685b19"),
+            "LENDING_COV_SCRIPT_HASH must equal sha256(out[5] scriptPubKey)");
+        // Cross-check: it really is sha256 of the out[5] spk we just reproduced.
+        {
+            use lwk_wollet::elements::hashes::{sha256, Hash};
+            let h = sha256::Hash::hash(addr.script_pubkey().as_bytes()).to_byte_array();
+            let hh: String = h.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(fields.get("LENDING_COV_SCRIPT_HASH").map(String::as_str), Some(hh.as_str()));
+        }
+        // The lender_nft_script_auth covenant (out[3]) compiles from that script hash.
+        let sa_ut = manifest.utxo_type("lender_nft_script_auth").expect("script_auth utxo_type");
+        let (sa_params, sa_hints) = apply_utxo_compile_params(&{
+            let m: std::collections::HashMap<String, String> =
+                ctx.all_compile_params().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            m
+        }, &hints, sa_ut);
+        assert_eq!(sa_params.get("SCRIPT_HASH").map(String::as_str),
+            Some("2f40d78cbd15bd847a995719d707e623520dae2e223f66d77a76599f95685b19"),
+            "script_auth SCRIPT_HASH resolves to the with-storage lending cov hash");
+        let sa_simf = manifest_path.parent().unwrap().join("script_auth.simf");
+        crate::covenant::compute_covenant_address(&sa_simf, &sa_params, &sa_hints, &[], net, true)
+            .expect("out[3] lender_nft_script_auth covenant address compiles");
+
+        // out[4]: the wired OP_RETURN output reproduces the on-chain 50-byte lending metadata
+        // (same offer params as examples/opreturn_recon.rs → identical payload).
+        let op_out = action.outputs.as_ref().unwrap().iter()
+            .find(|o| o.id == "creation_op_return").expect("creation_op_return output");
+        let op_data = op_out.data.as_ref().expect("op_return has data");
+        let manifest_dir = manifest_path.parent().unwrap();
+        let op_bytes = eval::eval_op_return_data(op_data, &ctx, &hints, manifest_dir)
+            .expect("eval op_return");
+        let op_hex: String = op_bytes.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(op_bytes.len(), 50, "lending creation metadata is 50 bytes");
+        assert_eq!(op_hex,
+            "f80c6162a5502895799e276b4af246c821423b4ed5ec5e6b4e6df7a861606939d9a2fc38e80300000000000099b526001027",
+            "out[4] OP_RETURN must reproduce the on-chain lending metadata for offer 43ab4efe");
+
+        // out[1]: factory covenant recreated resolves to the fixed (2,0) factory address even in
+        // the offer context (ISSUING_UTXOS_COUNT/REISSUANCE_FLAGS come from lending_contract fields).
+        let fac_ut = manifest.utxo_type("issuance_factory").expect("issuance_factory utxo_type");
+        let fac_base: std::collections::HashMap<String, String> =
+            ctx.all_compile_params().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let (fac_params, fac_hints) = apply_utxo_compile_params(&fac_base, &hints, fac_ut);
+        let fac_simf = manifest_path.parent().unwrap().join("issuance_factory.simf");
+        let fac_addr = crate::covenant::compute_covenant_address(&fac_simf, &fac_params, &fac_hints, &[], net, true)
+            .expect("factory covenant address");
+        assert_eq!(format!("{:x}", fac_addr.script_pubkey()),
+            "5120456881785cc7d561caaa059e02f1a2823066bd860423996bea3e92c621bb064b",
+            "out[1] factory covenant must be the fixed (2,0) address");
+    }
+
+    /// Task 10 — a computed u64 storage leaf encodes right-aligned, big-endian, in a
+    /// 32-byte slot (the lending covenant's `current_debt` layout).
+    #[test]
+    fn encode_leaf_value_u64_be_padded_to_32() {
+        let mut ctx = ExecutionContext::new();
+        ctx.set_compile_param("CURRENT_DEBT", "2000");
+        let item = serde_json::json!({
+            "value": "instance.CURRENT_DEBT", "type": "u64", "endian": "be", "pad_to": 32, "align": "right"
+        });
+        let bytes = crate::eval::encode_leaf_value(&item, &ctx).expect("encode leaf");
+        let mut expect = vec![0u8; 32];
+        expect[24..32].copy_from_slice(&2000u64.to_be_bytes());
+        assert_eq!(bytes, expect);
+        // Left-aligned puts the value first.
+        let item_left = serde_json::json!({
+            "value": "8", "type": "u8", "pad_to": 4, "align": "left"
+        });
+        assert_eq!(crate::eval::encode_leaf_value(&item_left, &ctx).unwrap(), vec![8u8, 0, 0, 0]);
     }
 }

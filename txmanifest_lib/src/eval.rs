@@ -144,6 +144,70 @@ fn eval_op_return_part(
     }
 }
 
+/// Encode a computed/typed taproot storage-leaf payload item.
+///
+/// Item shape: `{ "value": <ref|literal>, "type": "u8"|"u16"|"u32"|"u64"|"bytes32"|"bytes",
+///                 "endian": "le"|"be"?, "pad_to": <bytes>?, "align": "left"|"right"? }`.
+///
+/// `value` is resolved via the standard ref resolver (`instance.X`, `params.X`, an input
+/// field, or a literal fallback). Integer types encode to their natural width (default
+/// little-endian, matching the OP_RETURN `parts` form); `bytes32`/`bytes` decode hex.
+/// `pad_to` zero-pads the encoded bytes to that total width, on the left when
+/// `align: "right"` (the default for a right-aligned integer, e.g. a u64 in bytes[24..32]
+/// of a 32-byte slot) or on the right when `align: "left"`.
+///
+/// Used for dynamic storage slots such as the lending covenant's `current_debt` leaf.
+pub fn encode_leaf_value(
+    item: &serde_json::Value,
+    ctx: &ExecutionContext,
+) -> Result<Vec<u8>> {
+    let value_ref = item.get("value").and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("taproot leaf value item needs 'value': {item}"))?;
+    let resolved = resolve_ref(value_ref, ctx)
+        .unwrap_or_else(|| value_ref.trim_matches(['"', '\'']).to_string());
+    encode_leaf_bytes(item, &resolved)
+}
+
+/// Encode a taproot leaf payload item given its already-resolved `value` string.
+/// Split from [`encode_leaf_value`] so callers that resolve `value` themselves (e.g.
+/// against an in-progress `create_instance` field map) can reuse the typed encoding.
+pub fn encode_leaf_bytes(item: &serde_json::Value, resolved: &str) -> Result<Vec<u8>> {
+    let ty = item.get("type").and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("taproot leaf value item needs 'type': {item}"))?;
+
+    let mut bytes = match ty {
+        "u8" | "u16" | "u32" | "u64" => {
+            let n: u64 = resolved.trim().parse()
+                .map_err(|_| anyhow::anyhow!("taproot leaf value '{resolved}' is not an integer"))?;
+            let width = match ty { "u8" => 1, "u16" => 2, "u32" => 4, _ => 8 };
+            let le = item.get("endian").and_then(|v| v.as_str()) != Some("be");
+            let full = n.to_le_bytes();
+            let mut b = full[..width].to_vec();
+            if !le { b.reverse(); }
+            b
+        }
+        "bytes32" | "bytes" | "pubkey" => hex_to_bytes(&resolved)?,
+        other => bail!("Unsupported taproot leaf value type '{other}'"),
+    };
+
+    if let Some(pad_to) = item.get("pad_to").and_then(|v| v.as_u64()).map(|n| n as usize) {
+        if bytes.len() > pad_to {
+            bail!("taproot leaf value '{resolved}' encodes to {} bytes, exceeds pad_to {pad_to}", bytes.len());
+        }
+        let pad = pad_to - bytes.len();
+        // Default align for a padded value is "right" (value occupies the trailing bytes).
+        let align_left = item.get("align").and_then(|v| v.as_str()) == Some("left");
+        if align_left {
+            bytes.resize(pad_to, 0u8); // value first, zeros trailing
+        } else {
+            let mut padded = vec![0u8; pad];
+            padded.extend_from_slice(&bytes);
+            bytes = padded;
+        }
+    }
+    Ok(bytes)
+}
+
 /// Decode a (0x-prefixed or bare) even-length hex string into bytes.
 fn hex_to_bytes(s: &str) -> Result<Vec<u8>> {
     let hex = s.trim().trim_start_matches("0x").trim_start_matches("0X");

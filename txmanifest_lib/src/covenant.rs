@@ -69,7 +69,22 @@ pub fn compute_covenant_script_hash(
     network: lwk_wollet::ElementsNetwork,
     include_debug_symbols: bool,
 ) -> Result<[u8; 32]> {
-    let addr = compute_covenant_address(simf_path, compile_params, type_hints, &[], network, include_debug_symbols)?;
+    compute_covenant_script_hash_with_leaves(simf_path, compile_params, type_hints, &[], network, include_debug_symbols)
+}
+
+/// Like [`compute_covenant_script_hash`] but folds `extra_leaf_payloads` (taproot storage
+/// slots) into the tap tree before hashing the scriptPubKey. This yields the script hash of
+/// a covenant WITH storage — e.g. the pending lending offer's own script hash, which the
+/// `script_auth` covenant (offer out[3]) commits to (`ScriptAuth::from_simplex_program`).
+pub fn compute_covenant_script_hash_with_leaves(
+    simf_path: &Path,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    network: lwk_wollet::ElementsNetwork,
+    include_debug_symbols: bool,
+) -> Result<[u8; 32]> {
+    let addr = compute_covenant_address(simf_path, compile_params, type_hints, extra_leaf_payloads, network, include_debug_symbols)?;
     let spk = addr.script_pubkey();
     Ok(sha256::Hash::hash(spk.as_bytes()).to_byte_array())
 }
