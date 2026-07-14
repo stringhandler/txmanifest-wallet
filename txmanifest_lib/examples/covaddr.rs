@@ -16,8 +16,9 @@ fn main() {
             .nth(1)
             .unwrap_or_else(|| "examples/lending_v2/script_auth.simf".into()),
     );
+    let script_hash = std::env::args().nth(2).unwrap_or_else(|| "00".repeat(32));
     let mut params = HashMap::new();
-    params.insert("SCRIPT_HASH".to_string(), "00".repeat(32));
+    params.insert("SCRIPT_HASH".to_string(), script_hash);
     let mut hints = HashMap::new();
     hints.insert("SCRIPT_HASH".to_string(), "bytes32".to_string());
 

@@ -975,7 +975,7 @@ fn build_args_json(
 
 /// Tagged SHA256 for "TapData/elements": SHA256(SHA256(tag) || SHA256(tag) || data).
 fn tapdata_hash(data: &[u8]) -> [u8; 32] {
-    let tag_hash = sha256::Hash::hash(b"TapData/elements");
+    let tag_hash = sha256::Hash::hash(b"TapData");
     let mut engine = sha256::HashEngine::default();
     engine.input(&tag_hash[..]);
     engine.input(&tag_hash[..]);
