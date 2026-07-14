@@ -1820,7 +1820,7 @@ pub fn run(
                         // expression is present, embed its bytes so indexers can discover the tx.
                         let script_pubkey = match &output.data {
                             None => lwk_wollet::elements::Script::from(vec![0x6au8]),
-                            Some(expr) => match eval::eval_op_return_data(expr, &ctx, &compile_param_type_hints) {
+                            Some(expr) => match eval::eval_op_return_data(expr, &ctx, &compile_param_type_hints, manifest_dir) {
                                 Ok(bytes) => lwk_wollet::elements::Script::new_op_return(&bytes),
                                 Err(e) => {
                                     println!("  {} Output '{}' OP_RETURN data eval failed: {e}", style("[error]").red(), output.id);

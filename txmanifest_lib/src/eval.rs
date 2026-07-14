@@ -61,16 +61,104 @@ pub fn eval_destination_str(dest: &str, ctx: &ExecutionContext) -> Option<String
     resolve_ref(dest, ctx)
 }
 
-/// Evaluate an OP_RETURN `data` expression into a raw byte payload.
+/// Evaluate an OP_RETURN `data` value into a raw byte payload.
 ///
-/// Supports `concat(a, b, …)` and a single reference / hex literal. Each argument is
-/// resolved against `ctx` (a `namespace.KEY` reference or a bare hex literal) and decoded
-/// from hex. Arguments whose key is typed `liquid.asset_id` (via `type_hints`, or matched
-/// by the `*_ASSET_ID` naming convention) are byte-reversed from display order to the
-/// Elements-internal order that assets are committed in on-chain — so, e.g., a
-/// `concat(BORROWER_PUB_KEY, PRINCIPAL_ASSET_ID)` payload is byte-identical to the
-/// `borrower_pubkey ‖ principal_asset_id.into_inner()` layout other tooling expects.
+/// Two forms are accepted:
+///
+/// 1. **String** — a `concat(a, b, …)` expression (or single reference / hex literal).
+///    Each argument is resolved against `ctx` and decoded from hex; `liquid.asset_id`
+///    arguments are byte-reversed to Elements-internal order.
+///
+/// 2. **Object** `{ "parts": [ … ] }` — an ordered list of typed fields, for exact
+///    binary layouts (e.g. protocol metadata). Each part is one of:
+///      - `{ "type": "program_id", "simf": "./x.simf" }` → `sha256(LF-normalized source)[..4]`
+///      - `{ "type": "liquid.asset_id", "value": <ref> }` → 32 bytes, internal (reversed) order
+///      - `{ "type": "u64"|"u32"|"u16"|"u8", "value": <ref>, "endian": "le"|"be" }` (default le)
+///      - `{ "type": "pubkey"|"bytes32"|"bytes", "value": <ref/hex> }` → raw bytes, natural order
 pub fn eval_op_return_data(
+    data: &serde_json::Value,
+    ctx: &ExecutionContext,
+    type_hints: &std::collections::HashMap<String, String>,
+    base_dir: &std::path::Path,
+) -> Result<Vec<u8>> {
+    match data {
+        serde_json::Value::String(expr) => eval_op_return_concat(expr, ctx, type_hints),
+        serde_json::Value::Object(m) => {
+            let parts = m
+                .get("parts")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| anyhow::anyhow!("OP_RETURN data object must have a 'parts' array"))?;
+            let mut out = Vec::new();
+            for part in parts {
+                out.extend_from_slice(&eval_op_return_part(part, ctx, base_dir)?);
+            }
+            Ok(out)
+        }
+        other => bail!("Unsupported OP_RETURN data value: {other}"),
+    }
+}
+
+/// Encode a single typed OP_RETURN `parts` entry (see [`eval_op_return_data`]).
+fn eval_op_return_part(
+    part: &serde_json::Value,
+    ctx: &ExecutionContext,
+    base_dir: &std::path::Path,
+) -> Result<Vec<u8>> {
+    let ty = part.get("type").and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("OP_RETURN part missing 'type': {part}"))?;
+    // program_id takes a simf path rather than a value.
+    if ty == "program_id" {
+        let simf = part.get("simf").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("OP_RETURN program_id part needs 'simf'"))?;
+        let path = base_dir.join(simf);
+        let source = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("Cannot read simf '{}': {e}", path.display()))?;
+        // Match the SimplicityHL compiler's program id: SHA256 of the LF-normalized source.
+        let normalized = source.replace("\r\n", "\n");
+        use lwk_wollet::elements::hashes::{sha256, Hash};
+        let h = sha256::Hash::hash(normalized.as_bytes()).to_byte_array();
+        return Ok(h[..4].to_vec());
+    }
+    let value_ref = part.get("value").and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("OP_RETURN part needs 'value': {part}"))?;
+    let resolved = resolve_ref(value_ref, ctx)
+        .unwrap_or_else(|| value_ref.trim_matches(['"', '\'']).to_string());
+    match ty {
+        "u8" | "u16" | "u32" | "u64" => {
+            let n: u64 = resolved.trim().parse()
+                .map_err(|_| anyhow::anyhow!("OP_RETURN '{value_ref}' = '{resolved}' is not an integer"))?;
+            let width = match ty { "u8" => 1, "u16" => 2, "u32" => 4, _ => 8 };
+            let le = part.get("endian").and_then(|v| v.as_str()) != Some("be");
+            let full = n.to_le_bytes();
+            let mut bytes = full[..width].to_vec();
+            if !le { bytes.reverse(); }
+            Ok(bytes)
+        }
+        "liquid.asset_id" => {
+            let mut b = hex_to_bytes(&resolved)?;
+            b.reverse(); // display → internal
+            Ok(b)
+        }
+        "pubkey" | "bytes32" | "bytes" => hex_to_bytes(&resolved),
+        other => bail!("Unsupported OP_RETURN part type '{other}'"),
+    }
+}
+
+/// Decode a (0x-prefixed or bare) even-length hex string into bytes.
+fn hex_to_bytes(s: &str) -> Result<Vec<u8>> {
+    let hex = s.trim().trim_start_matches("0x").trim_start_matches("0X");
+    if hex.len() % 2 != 0 {
+        bail!("odd-length hex '{hex}'");
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+        .collect::<Result<Vec<u8>, _>>()
+        .map_err(|_| anyhow::anyhow!("invalid hex '{hex}'"))
+}
+
+/// The `concat(a, b, …)` string form of an OP_RETURN payload (form 1 in [`eval_op_return_data`]).
+fn eval_op_return_concat(
     expr: &str,
     ctx: &ExecutionContext,
     type_hints: &std::collections::HashMap<String, String>,
@@ -553,9 +641,10 @@ mod op_return_data_tests {
         hints.insert("BORROWER_PUB_KEY".to_string(), "pubkey".to_string());
 
         let bytes = eval_op_return_data(
-            "concat(instance.BORROWER_PUB_KEY, instance.PRINCIPAL_ASSET_ID)",
+            &serde_json::json!("concat(instance.BORROWER_PUB_KEY, instance.PRINCIPAL_ASSET_ID)"),
             &ctx,
             &hints,
+            std::path::Path::new("."),
         )
         .unwrap();
 
@@ -568,5 +657,28 @@ mod op_return_data_tests {
             .collect();
         asset_internal.reverse();
         assert_eq!(&bytes[32..], asset_internal.as_slice());
+    }
+
+    #[test]
+    fn parts_form_encodes_typed_50_byte_metadata() {
+        let mut ctx = ExecutionContext::new();
+        ctx.set_compile_param("PRINCIPAL_ASSET_ID", "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5");
+        ctx.set_compile_param("PRINCIPAL_AMOUNT", "1000");
+        ctx.set_compile_param("LOAN_EXPIRATION_TIME", "2536857");
+        ctx.set_compile_param("PRINCIPAL_INTEREST_RATE", "10000");
+        let data = serde_json::json!({ "parts": [
+            { "type": "liquid.asset_id", "value": "instance.PRINCIPAL_ASSET_ID" },
+            { "type": "u64", "value": "instance.PRINCIPAL_AMOUNT" },
+            { "type": "u32", "value": "instance.LOAN_EXPIRATION_TIME" },
+            { "type": "u16", "value": "instance.PRINCIPAL_INTEREST_RATE" }
+        ]});
+        let bytes = eval_op_return_data(&data, &ctx, &std::collections::HashMap::new(), std::path::Path::new(".")).unwrap();
+        // 32 (asset) + 8 + 4 + 2 = 46 bytes (program_id omitted here).
+        assert_eq!(bytes.len(), 46);
+        assert_eq!(&bytes[32..40], &1000u64.to_le_bytes());
+        assert_eq!(&bytes[40..44], &2536857u32.to_le_bytes());
+        assert_eq!(&bytes[44..46], &10000u16.to_le_bytes());
+        // asset reversed to internal order (last internal byte = first display byte 0x38)
+        assert_eq!(bytes[31], 0x38);
     }
 }

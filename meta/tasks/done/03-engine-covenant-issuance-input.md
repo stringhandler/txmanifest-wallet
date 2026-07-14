@@ -34,3 +34,15 @@ Today: covenant inputs (`utxo_source: {utxo_type}` + `witnesses`) and issuance i
 ## Files
 - `txmanifest_lib/src/pset_builder.rs`, `txmanifest_lib/src/lifecycle.rs` (input
   resolution + issuance attrs), `txmanifest_lib/src/covenant.rs` (finalize path).
+
+
+---
+## PROGRESS (2026-07-14)
+Core change made: `pset_builder.rs` Covenant-input branch now dispatches on IssuanceKind
+(New -> apply_new_issuance, Reissue -> apply_reissuance). Lifecycle already wires
+`issuance: iso_spec` for utxo_type (covenant) inputs, so a manifest can now declare a
+covenant input that also carries a NEW issuance (factory minting the borrower NFT).
+Build clean, 29 tests pass.
+Still to validate during offer-creation assembly (task 06): the factory covenant
+`IssueAssets` witness satisfaction + dry-run, and that the issued asset id flows through
+`on_resolved.set` for covenant-input issuances.

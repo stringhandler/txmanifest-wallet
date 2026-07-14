@@ -33,3 +33,8 @@ concat expression with typed helpers. Keep the existing `concat(...)` form worki
 ## Files
 - `txmanifest_lib/src/eval.rs` (`eval_op_return_data`), `txmanifest_lib/src/manifest.rs`
   (Output.data shape if structured), `txmanifest_lib/src/lifecycle.rs` (op_return handler).
+
+
+---
+## DONE (2026-07-14)
+Structured `data: {parts:[...]}` form added to eval.rs (program_id via sha256(LF-normalized simf source)[:4], liquid.asset_id internal-reversed, u8/u16/u32/u64 LE/BE, pubkey/bytes). Verified: 50-byte lending metadata reproduces the on-chain payload byte-exactly. String `concat(...)` form still works. 30 tests pass.

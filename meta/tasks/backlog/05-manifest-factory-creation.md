@@ -14,12 +14,32 @@ matching what the deployed indexer's factory tracker expects.
   values, or offers minted from it won't be detected.
 - Covenant address: single-leaf (no storage) NUMS-p2tr over CMR of `issuance_factory.simf`.
 
+## Factory-creation tx (from cli/commands/factory/core.rs::create) — CONFIRMED
+- in[0]: wallet L-BTC UTXO, **NEW issuance** of the factory asset, amount = 2 (FACTORY_ASSET_TOTAL_AMOUNT), random entropy.
+- out[0]: factory asset (1) → **wallet p2wpkh** (the auth NFT the owner holds).
+- out[1]: factory asset (1) → **issuance_factory covenant** (via `attach_creation` → add_program_output).
+- then fee/change.
+
+Key fact: the `issuance_factory` covenant address depends ONLY on
+(ISSUING_UTXOS_COUNT, REISSUANCE_FLAGS) — NOT on the factory asset id. So for (2,0) it is a
+FIXED address = `5120456881785cc7d561caaa059e02f1a2823066bd860423996bea3e92c621bb064b`
+(VERIFIED reproduced by manifest-wallet, examples/factory_recon.rs). Different factories
+(different asset ids) share this covenant address; they differ by the asset held.
+
 ## Steps
-1. New utxo_type `issuance_factory` (simf `issuance_factory.simf`, compile params
-   ISSUING_UTXOS_COUNT=2, REISSUANCE_FLAGS=0).
-2. A `CreateFactory` action: issue the factory asset (amount 2), send 1 to the factory
-   covenant, 1 to wallet (auth NFT). Store factory asset id + covenant address in instance.
-3. Verify the factory covenant address matches what SL computes for the same params.
+1. utxo_type `issuance_factory` (simf `issuance_factory.simf`, compile_params
+   ISSUING_UTXOS_COUNT=2 (u8), REISSUANCE_FLAGS=0 (u64)). Covenant addr verified.
+2. `CreateFactory` action (constructor): issuance input (wallet lbtc, amount 2) → out[0]
+   factory asset (1) to wallet, out[1] factory asset (1) to issuance_factory covenant.
+   Store FACTORY_ASSET_ID (on_resolved) in instance.
+3. OPEN QUESTION for authoring: confirm the indexer's factory-CREATION detector
+   (registry.rs seeds `FactoryCreationsTracker::new((2,0),network)`) — what exact
+   output layout/asset it keys on to insert the factory UTXO into its cache. Read
+   `indexer/src/indexer/trackers/factories/*` creation path before finalizing the tx.
+
+## Note on reuse
+The factory is created ONCE and reused for many offers (owner holds the auth NFT). The
+offer-creation action (task 06) references the factory (spends its covenant UTXO + auth NFT).
 
 ## Depends on
 - Task 03 (covenant issuance) may or may not be needed here depending on how the factory

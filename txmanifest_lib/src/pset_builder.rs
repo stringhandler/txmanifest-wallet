@@ -266,13 +266,24 @@ fn build_inner(
                 let idx = add_covenant_input(&mut pset, &mut inp_txout_sec, *outpoint, script_pubkey.clone(), *asset, *amount)?;
                 apply_sequence(&mut pset, idx, *sequence);
                 if let Some(iso) = issuance {
-                    apply_reissuance(&mut pset, idx, iso)?;
+                    // A covenant input may carry either a NEW issuance (e.g. an issuance-factory
+                    // covenant minting a fresh NFT from its own outpoint) or a reissuance.
+                    let entropy = match iso {
+                        IssuanceKind::New { .. } => {
+                            apply_new_issuance(&mut pset, idx, iso)?;
+                            let midstate = AssetId::generate_asset_entropy(
+                                *outpoint,
+                                ContractHash::from_byte_array([0u8; 32]),
+                            );
+                            Some(midstate.to_byte_array())
+                        }
+                        IssuanceKind::Reissue { entropy, .. } => {
+                            apply_reissuance(&mut pset, idx, iso)?;
+                            Some(*entropy)
+                        }
+                    };
                     let (asset_id, token_id) = pset.inputs()[idx].issuance_ids();
-                    if let IssuanceKind::Reissue { entropy, .. } = iso {
-                        let direct = compute_asset_from_entropy(entropy).unwrap_or_default();
-                        eprintln!("[debug] reissuance idx={idx} asset_id={asset_id} token_id={token_id} direct_asset={direct} match={}", asset_id == direct);
-                    }
-                    issuances.push(IssuanceResult { input_id: input_id.clone(), asset_id, token_id, entropy: None });
+                    issuances.push(IssuanceResult { input_id: input_id.clone(), asset_id, token_id, entropy });
                 }
                 if *asset == req.policy_asset {
                     total_lbtc_in += amount;
