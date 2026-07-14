@@ -1,0 +1,34 @@
+{
+  "entries": [
+    {
+      "action": "CreateOffer",
+      "txid": "62414b8825c808dbf379be07bde915499045bea9019ab7a3641679d24822d504",
+      "utxos": [
+        {
+          "utxo_type": "issuance_factory",
+          "utxo_id": "factory_covenant_out",
+          "txid": "62414b8825c808dbf379be07bde915499045bea9019ab7a3641679d24822d504",
+          "vout": 1,
+          "amount_sat": 1,
+          "asset": "6146688bf4e2eed0d775f400542a643d8c5c457d9bc75eecb47d181b257dae93"
+        },
+        {
+          "utxo_type": "lender_nft_script_auth",
+          "utxo_id": "lender_nft_locked",
+          "txid": "62414b8825c808dbf379be07bde915499045bea9019ab7a3641679d24822d504",
+          "vout": 3,
+          "amount_sat": 1,
+          "asset": "039424752cb4566ea48abc42c016dd3f66034d26085941d0849bde611663a2bf"
+        },
+        {
+          "utxo_type": "lending_collateral",
+          "utxo_id": "lending_collateral_out",
+          "txid": "62414b8825c808dbf379be07bde915499045bea9019ab7a3641679d24822d504",
+          "vout": 5,
+          "amount_sat": 3400,
+          "asset": "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49"
+        }
+      ]
+    }
+  ]
+}

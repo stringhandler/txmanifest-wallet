@@ -1,0 +1,18 @@
+{
+  "entries": [
+    {
+      "action": "CreateFactory",
+      "txid": "cf75e4e920966a35546db6d63463008a5a5e047e36296bbb2ba10070c9ab9b66",
+      "utxos": [
+        {
+          "utxo_type": "issuance_factory",
+          "utxo_id": "factory_program_out",
+          "txid": "cf75e4e920966a35546db6d63463008a5a5e047e36296bbb2ba10070c9ab9b66",
+          "vout": 1,
+          "amount_sat": 1,
+          "asset": "6146688bf4e2eed0d775f400542a643d8c5c457d9bc75eecb47d181b257dae93"
+        }
+      ]
+    }
+  ]
+}
