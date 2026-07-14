@@ -54,6 +54,56 @@
       "asset": "COLLATERAL_ASSET_ID",
       "confidential": false
     },
+    "lending_collateral_active": {
+      "description": "The lending (collateral) covenant in the ACTIVE state (after AcceptOffer). Identical to lending_collateral except storage slot0 = is_active = 1 (value 1, byte[31]=0x01), which changes the covenant address. slot1 = CURRENT_DEBT (unchanged on a fresh accept). De-risked by examples/lending_active_recon.rs (address flips vs pending).",
+      "script": {
+        "type": "simplicity",
+        "source": "./lending.simf",
+        "compile_params": {
+          "COLLATERAL_ASSET_ID": "COLLATERAL_ASSET_ID",
+          "PRINCIPAL_ASSET_ID": "PRINCIPAL_ASSET_ID",
+          "BORROWER_NFT_ASSET_ID": "BORROWER_NFT_ASSET_ID",
+          "LENDER_NFT_ASSET_ID": "LENDER_NFT_ASSET_ID",
+          "COLLATERAL_AMOUNT": "COLLATERAL_AMOUNT",
+          "PRINCIPAL_AMOUNT": "PRINCIPAL_AMOUNT",
+          "PRINCIPAL_INTEREST_RATE": "PRINCIPAL_INTEREST_RATE",
+          "LOAN_EXPIRATION_TIME": "LOAN_EXPIRATION_TIME",
+          "LENDER_VAULT_COV_HASH": "LENDER_VAULT_COV_HASH",
+          "FINALIZED_LENDER_VAULT_COV_HASH": "FINALIZED_LENDER_VAULT_COV_HASH",
+          "PROTOCOL_FEE_VAULT_COV_HASH": "PROTOCOL_FEE_VAULT_COV_HASH",
+          "FINALIZED_PROTOCOL_FEE_VAULT_COV_HASH": "FINALIZED_PROTOCOL_FEE_VAULT_COV_HASH",
+          "PRINCIPAL_OUTPUT_SCRIPT_HASH": "PRINCIPAL_OUTPUT_SCRIPT_HASH"
+        },
+        "extra_leaves": [
+          {
+            "type": "tapdata",
+            "payload": ["0x0000000000000000000000000000000000000000000000000000000000000001"]
+          },
+          {
+            "type": "tapdata",
+            "payload": [
+              { "value": "instance.CURRENT_DEBT", "type": "u64", "endian": "be", "pad_to": 32, "align": "right" }
+            ]
+          }
+        ]
+      },
+      "asset": "COLLATERAL_ASSET_ID",
+      "confidential": false
+    },
+    "principal_asset_auth": {
+      "description": "AssetAuth covenant holding the loan principal after activation — out[1] of AcceptOffer. Keyed by the borrower NFT (AssetAuth(borrower_nft, amount 1, with_asset_burn=false)); the borrower later claims the principal by presenting the borrower NFT. sha256(its spk) == PRINCIPAL_OUTPUT_SCRIPT_HASH.",
+      "script": {
+        "type": "simplicity",
+        "source": "./asset_auth.simf",
+        "compile_params": {
+          "ASSET_ID": "BORROWER_NFT_ASSET_ID",
+          "ASSET_AMOUNT": "1",
+          "WITH_ASSET_BURN": "false"
+        }
+      },
+      "asset": "PRINCIPAL_ASSET_ID",
+      "confidential": false
+    },
     "lender_nft_script_auth": {
       "description": "ScriptAuth covenant holding the lender NFT during a pending offer — out[3]. Keyed by SCRIPT_HASH = sha256(lending covenant scriptPubKey, INCLUDING its 2 storage slots) i.e. the pending offer's own script hash (ScriptAuth::from_simplex_program). NOTE: the manifest's tapleaf/script-hash compute currently hashes the storage-less covenant; hashing a covenant-with-storage needs the engine extension tracked in upnext/11.",
       "script": {
@@ -460,12 +510,262 @@
             }
           ],
           "validations": []
+        },
+        "AcceptOffer": {
+          "description": "A lender activates a pending offer (offer_open → loan_active). Spends the pending lending covenant (in[0], Accept witness Left(Left())) and the lender NFT locked in the ScriptAuth (in[1], authorizing input 0), supplies the principal (in[2]). Outputs: the lending covenant re-committed ACTIVE (out[0], storage is_active=1) still holding the collateral; the principal paid into an AssetAuth(borrower_nft) covenant the borrower can later claim (out[1]); the lender NFT returned to the lender's wallet (out[2]). Mirrors LendingOffer::attach_acceptance. Loads the offer instance written by CreateOffer.",
+          "inputs": [
+            {
+              "id": "pending_offer_in",
+              "description": "The pending lending (collateral) covenant UTXO (input 0). Accept path.",
+              "utxo_source": { "utxo_type": "lending_collateral" },
+              "required_index": 0,
+              "asset": "instance.COLLATERAL_ASSET_ID",
+              "amount_sat": "instance.COLLATERAL_AMOUNT",
+              "witnesses": {
+                "PATH": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "Either<Either<(), ()>, Either<Either<(u64, u64), u64>, u64>>",
+                  "value": "Left(Left(()))",
+                  "description": "OfferAcceptance (PATH::Left(Left(())))."
+                }
+              }
+            },
+            {
+              "id": "lender_nft_in",
+              "description": "Lender NFT held in the lender_nft_script_auth covenant (input 1). The ScriptAuth authorizes its spend by checking input 0 is the pending offer covenant.",
+              "utxo_source": { "utxo_type": "lender_nft_script_auth" },
+              "required_index": 1,
+              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "amount_sat": 1,
+              "witnesses": {
+                "INPUT_SCRIPT_INDEX": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u32",
+                  "value": "0",
+                  "description": "Index of the pending-offer covenant input this ScriptAuth is bound to (input 0)."
+                }
+              }
+            },
+            {
+              "id": "principal_in",
+              "description": "Lender's wallet UTXO providing the loan principal (input 2), sized >= PRINCIPAL_AMOUNT.",
+              "utxo_source": "wallet",
+              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "amount_sat": { "min_amount": "instance.PRINCIPAL_AMOUNT" },
+              "required_index": 2
+            },
+            {
+              "id": "fee_input",
+              "description": "Wallet L-BTC UTXO covering the transaction fee.",
+              "utxo_source": "wallet",
+              "asset": "lbtc"
+            }
+          ],
+          "outputs": [
+            {
+              "id": "active_offer_out",
+              "description": "The lending covenant re-committed in the ACTIVE state (output 0), still holding COLLATERAL_AMOUNT of collateral; storage slot0 = is_active = 1.",
+              "destination": { "utxo_type": "lending_collateral_active" },
+              "asset": "instance.COLLATERAL_ASSET_ID",
+              "amount_sat": "instance.COLLATERAL_AMOUNT",
+              "confidential": false,
+              "required_index": 0
+            },
+            {
+              "id": "principal_out",
+              "description": "The principal paid into an AssetAuth(borrower_nft) covenant (output 1), PRINCIPAL_AMOUNT. The borrower claims it later with the borrower NFT. Enforced by the covenant's PRINCIPAL_OUTPUT_SCRIPT_HASH.",
+              "destination": { "utxo_type": "principal_asset_auth" },
+              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "amount_sat": "instance.PRINCIPAL_AMOUNT",
+              "confidential": false,
+              "required_index": 1
+            },
+            {
+              "id": "lender_nft_out",
+              "description": "Lender NFT (1) returned to the lender's wallet (output 2) — unlocked from the ScriptAuth on activation.",
+              "destination": "wallet",
+              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "amount_sat": 1,
+              "confidential": false,
+              "required_index": 2
+            },
+            {
+              "id": "principal_change",
+              "description": "Principal-asset change back to the lender.",
+              "destination": "change",
+              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "optional": true
+            },
+            {
+              "id": "fee_change",
+              "description": "L-BTC change back to the lender.",
+              "destination": "change",
+              "asset": "lbtc",
+              "optional": true
+            }
+          ],
+          "validations": []
+        },
+        "CancelOffer": {
+          "description": "The borrower withdraws a pending offer before activation (offer_open → cancelled). Spends the pending lending covenant (in[0], Cancel witness Left(Right())) and the lender NFT from its ScriptAuth (in[1]) and the borrower NFT from the wallet (in[2]); burns both NFTs to OP_RETURN (out[0] lender, out[1] borrower — index-fixed by the covenant) and returns the collateral to the borrower (out[2]). Mirrors LendingOffer::attach_cancellation. The covenant only checks each NFT lands on an OP_RETURN, so data-less burns suffice.",
+          "inputs": [
+            {
+              "id": "pending_offer_in",
+              "description": "The pending lending (collateral) covenant UTXO (input 0). Cancel path.",
+              "utxo_source": { "utxo_type": "lending_collateral" },
+              "required_index": 0,
+              "asset": "instance.COLLATERAL_ASSET_ID",
+              "amount_sat": "instance.COLLATERAL_AMOUNT",
+              "witnesses": {
+                "PATH": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "Either<Either<(), ()>, Either<Either<(u64, u64), u64>, u64>>",
+                  "value": "Left(Right(()))",
+                  "description": "OfferCancellation (PATH::Left(Right(())))."
+                }
+              }
+            },
+            {
+              "id": "lender_nft_in",
+              "description": "Lender NFT held in the lender_nft_script_auth covenant (input 1); burned at out[0].",
+              "utxo_source": { "utxo_type": "lender_nft_script_auth" },
+              "required_index": 1,
+              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "amount_sat": 1,
+              "witnesses": {
+                "INPUT_SCRIPT_INDEX": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u32",
+                  "value": "0",
+                  "description": "The pending-offer covenant input this ScriptAuth is bound to (input 0)."
+                }
+              }
+            },
+            {
+              "id": "borrower_nft_in",
+              "description": "Borrower NFT from the wallet (input 2); burned at out[1].",
+              "utxo_source": "wallet",
+              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "amount_sat": 1,
+              "required_index": 2
+            },
+            {
+              "id": "fee_input",
+              "description": "Wallet L-BTC UTXO covering the transaction fee.",
+              "utxo_source": "wallet",
+              "asset": "lbtc"
+            }
+          ],
+          "outputs": [
+            {
+              "id": "lender_nft_burned",
+              "description": "Lender NFT burned to OP_RETURN (output 0).",
+              "destination": { "type": "op_return" },
+              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "amount_sat": 1,
+              "required_index": 0
+            },
+            {
+              "id": "borrower_nft_burned",
+              "description": "Borrower NFT burned to OP_RETURN (output 1).",
+              "destination": { "type": "op_return" },
+              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "amount_sat": 1,
+              "required_index": 1
+            },
+            {
+              "id": "collateral_returned",
+              "description": "Collateral returned to the borrower's wallet (output 2).",
+              "destination": "wallet",
+              "asset": "instance.COLLATERAL_ASSET_ID",
+              "amount_sat": "instance.COLLATERAL_AMOUNT",
+              "confidential": false,
+              "required_index": 2
+            },
+            {
+              "id": "fee_change",
+              "description": "L-BTC change back to the borrower.",
+              "destination": "change",
+              "asset": "lbtc",
+              "optional": true
+            }
+          ],
+          "validations": []
+        },
+        "ClaimPrincipal": {
+          "description": "The borrower withdraws the loan principal from the AssetAuth(borrower_nft) covenant created at activation (AcceptOffer out[1]). Spends that covenant (in[0]) while presenting the borrower NFT (in[1], INPUT_ASSET_INDEX=1) and preserving it (out[1], OUTPUT_ASSET_INDEX=1); the covenant only checks the auth NFT is present and re-output (WITH_ASSET_BURN=false), so the principal (out[0]) flows freely to the borrower. Mirrors AssetAuth::attach_unlocking (unlocks_without_burn_with_one_explicit_output). The offer stays active (loan_active → loan_active); collateral is unaffected.",
+          "inputs": [
+            {
+              "id": "principal_asset_auth_in",
+              "description": "The AssetAuth(borrower_nft) covenant UTXO holding the principal (input 0).",
+              "utxo_source": { "utxo_type": "principal_asset_auth" },
+              "required_index": 0,
+              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "amount_sat": "instance.PRINCIPAL_AMOUNT",
+              "witnesses": {
+                "INPUT_ASSET_INDEX": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u32",
+                  "value": "1",
+                  "description": "Index of the input carrying the borrower auth NFT (input 1)."
+                },
+                "OUTPUT_ASSET_INDEX": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u32",
+                  "value": "1",
+                  "description": "Index of the output the borrower auth NFT is preserved at (output 1)."
+                }
+              }
+            },
+            {
+              "id": "borrower_nft_in",
+              "description": "Borrower auth NFT from the wallet (input 1) — proves the borrower and is re-output at out[1].",
+              "utxo_source": "wallet",
+              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "amount_sat": 1,
+              "required_index": 1
+            },
+            {
+              "id": "fee_input",
+              "description": "Wallet L-BTC UTXO covering the transaction fee.",
+              "utxo_source": "wallet",
+              "asset": "lbtc"
+            }
+          ],
+          "outputs": [
+            {
+              "id": "principal_claimed",
+              "description": "The loan principal released to the borrower's wallet (output 0), PRINCIPAL_AMOUNT.",
+              "destination": "wallet",
+              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "amount_sat": "instance.PRINCIPAL_AMOUNT",
+              "confidential": false,
+              "required_index": 0
+            },
+            {
+              "id": "borrower_nft_out",
+              "description": "Borrower auth NFT (1) preserved back to the wallet (output 1) — checked by the covenant.",
+              "destination": "wallet",
+              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "amount_sat": 1,
+              "confidential": false,
+              "required_index": 1
+            },
+            {
+              "id": "fee_change",
+              "description": "L-BTC change back to the borrower.",
+              "destination": "change",
+              "asset": "lbtc",
+              "optional": true
+            }
+          ],
+          "validations": []
         }
       }
     }
   },
   "lifecycle": {
-    "states": ["factory_created", "offer_open"],
+    "states": ["factory_created", "offer_open", "loan_active", "cancelled"],
     "entry_actions": ["CreateFactory", "CreateOffer"],
     "transitions": {
       "CreateFactory": {
@@ -473,6 +773,20 @@
       },
       "CreateOffer": {
         "to": "offer_open"
+      },
+      "AcceptOffer": {
+        "from": "offer_open",
+        "to": "loan_active"
+      },
+      "CancelOffer": {
+        "from": "offer_open",
+        "to": "cancelled",
+        "unilateral": true
+      },
+      "ClaimPrincipal": {
+        "from": "loan_active",
+        "to": "loan_active",
+        "unilateral": true
       }
     }
   }

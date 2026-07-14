@@ -4215,6 +4215,38 @@ mod tests {
         assert_eq!(format!("{:x}", fac_addr.script_pubkey()),
             "5120456881785cc7d561caaa059e02f1a2823066bd860423996bea3e92c621bb064b",
             "out[1] factory covenant must be the fixed (2,0) address");
+
+        // --- AcceptOffer (task 08) covenant outputs ---
+        // ctx already holds every computed create_instance field as a compile param (set above).
+        let base_now: std::collections::HashMap<String, String> =
+            ctx.all_compile_params().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+        // out[0]: active lending covenant (storage slot0 = is_active=1) — the storage-transition
+        // address from examples/lending_active_recon.rs.
+        let act_ut = manifest.utxo_type("lending_collateral_active").expect("active utxo_type");
+        let (act_params, act_hints) = apply_utxo_compile_params(&base_now, &hints, act_ut);
+        let act_leaves = act_ut.resolve_extra_leaf_payloads(&ctx).expect("active storage leaves");
+        assert_eq!(act_leaves[0][31], 1, "active slot0 byte[31] = 1 (is_active)");
+        let act_addr = crate::covenant::compute_covenant_address(
+            &lending_simf, &act_params, &act_hints, &act_leaves, net, true).expect("active address");
+        assert_eq!(format!("{:x}", act_addr.script_pubkey()),
+            "51202451da2d003a9fd5cffe1ed523cded17cda7a39604f02642d56d503bdef3eb77",
+            "AcceptOffer out[0] active lending covenant address (storage transition)");
+        assert_ne!(act_addr.script_pubkey(), addr.script_pubkey(), "active differs from pending");
+
+        // out[1]: principal AssetAuth(borrower_nft, 1, false) — cross-check sha256(spk) == PRINCIPAL_OUTPUT_SCRIPT_HASH.
+        let pa_ut = manifest.utxo_type("principal_asset_auth").expect("principal_asset_auth utxo_type");
+        let (pa_params, pa_hints) = apply_utxo_compile_params(&base_now, &hints, pa_ut);
+        let pa_simf = manifest_path.parent().unwrap().join("asset_auth.simf");
+        let pa_addr = crate::covenant::compute_covenant_address(&pa_simf, &pa_params, &pa_hints, &[], net, true)
+            .expect("principal_asset_auth address");
+        {
+            use lwk_wollet::elements::hashes::{sha256, Hash};
+            let pa_hash: String = sha256::Hash::hash(pa_addr.script_pubkey().as_bytes())
+                .to_byte_array().iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(pa_hash, fields.get("PRINCIPAL_OUTPUT_SCRIPT_HASH").cloned().unwrap(),
+                "AcceptOffer out[1] AssetAuth spk hash must equal PRINCIPAL_OUTPUT_SCRIPT_HASH");
+        }
     }
 
     /// Task 10 — a computed u64 storage leaf encodes right-aligned, big-endian, in a
