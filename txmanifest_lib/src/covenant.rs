@@ -875,13 +875,12 @@ fn manifest_to_simf_type(manifest_type: &str) -> Option<&'static str> {
 /// Fallback name-convention inference when no manifest type hint is available.
 fn infer_simf_type(name: &str) -> Option<&'static str> {
     let upper = name.to_uppercase();
-    if upper.ends_with("_ASSET")
-        || upper.ends_with("_TOKEN_ASSET")
-        || upper.ends_with("_ASSET_ID")
-        || upper.ends_with("_REISSUANCE_TOKEN")
-        || upper.ends_with("_PUBLIC_KEY")
-        || upper.ends_with("ORACLE_PUBLIC_KEY")
-    {
+    // Pubkeys are u256 and are NOT byte-reversed. Asset-id NAMES are intentionally NOT
+    // inferred: asset-ness (and therefore reversal) comes ONLY from a declared
+    // `liquid.asset_id` type — inferring u256 from an asset name would silently skip the
+    // required reversal. So an untyped asset param falls through to `None` (loud skip),
+    // forcing an explicit `"type": "liquid.asset_id"`.
+    if upper.ends_with("_PUBLIC_KEY") || upper.ends_with("ORACLE_PUBLIC_KEY") {
         return Some("u256");
     }
     if upper.ends_with("_PER_TOKEN")
@@ -912,37 +911,26 @@ fn infer_simf_type_from_value(value: &str) -> Option<&'static str> {
     None
 }
 
-/// Fallback heuristic: returns true for compile_param names that *look* like asset IDs
-/// (display-backward format), used only when no `liquid.asset_id` manifest type is declared.
-/// Prefer declaring `"type": "liquid.asset_id"` in the manifest — the name check is a
-/// best-effort fallback and misses unconventional names such as a bare `ASSET_ID`.
-fn is_asset_id_param(name: &str) -> bool {
-    let upper = name.to_uppercase();
-    upper.ends_with("_ASSET")
-        || upper.ends_with("_TOKEN_ASSET")
-        || upper.ends_with("_ASSET_ID")
-        || upper.ends_with("_REISSUANCE_TOKEN")
-}
-
 /// Build a JSON string suitable for `Arguments::deserialize` from a `HashMap<String, String>`.
 ///
 /// Types are resolved first from `type_hints` (manifest-declared types), then by naming convention.
 /// Params that cannot be typed are skipped with a warning.
 ///
-/// Params declared with the manifest type `liquid.asset_id` are byte-reversed from Elements
-/// display-backward to natural (MSB-first) order as required by SimplicityHL jets. Other u256
-/// params (`bytes32` hashes, `pubkey`) are passed without reversal. For untyped params the
-/// reversal decision falls back to the [`is_asset_id_param`] name heuristic.
+/// Byte-reversal (Elements display-backward → natural MSB-first order, required by
+/// SimplicityHL jets) is driven ONLY by the declared manifest type `liquid.asset_id`.
+/// Other u256 params (`bytes32` hashes, `pubkey`) are passed without reversal. The param
+/// NAME never affects reversal — an asset param must declare `liquid.asset_id`, or it is not
+/// reversed. (The SimplicityHL *type* of an untyped param may still be inferred as a
+/// convenience, but never its asset-ness.)
 fn build_args_json(
     params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
 ) -> Result<String> {
     let mut entries = Vec::new();
     for (name, value) in params {
-        // Resolve the SimplicityHL type AND whether this value is a display-order
-        // asset ID that must be byte-reversed. The declared manifest type
-        // (`liquid.asset_id`) is the authoritative signal for reversal; the param
-        // name is only consulted as a fallback when no type was declared.
+        // Resolve the SimplicityHL type AND whether this value is a display-order asset ID
+        // that must be byte-reversed. Reversal is authoritative from the declared
+        // `liquid.asset_id` type only; the name is NEVER consulted for asset-ness.
         let (ty, is_asset_id): (&'static str, bool) = if let Some(manifest_type) =
             type_hints.get(name)
         {
@@ -955,9 +943,10 @@ fn build_args_json(
             }
         } else {
             match infer_simf_type(name).or_else(|| infer_simf_type_from_value(value)) {
-                Some(t) => (t, is_asset_id_param(name)),
+                // No declared type → never treat as an asset id (would need `liquid.asset_id`).
+                Some(t) => (t, false),
                 None => {
-                    eprintln!("[covenant] Cannot infer SimplicityHL type for '{name}' (value={value:?}) — skipping");
+                    eprintln!("[covenant] Cannot infer SimplicityHL type for '{name}' (value={value:?}) — declare a \"type\" for it; skipping");
                     continue;
                 }
             }
@@ -1093,10 +1082,10 @@ mod tests {
         );
     }
 
-    /// The `liquid.asset_id` manifest type — not the param name — must drive byte-reversal.
-    /// Regression for `ASSET_ID`: a bare name the `is_asset_id_param` heuristic misses, yet
-    /// declared `liquid.asset_id`, so it must still be reversed. A `bytes32` hash and a
-    /// `pubkey` of the same width must NOT be reversed.
+    /// The `liquid.asset_id` manifest type — and ONLY the declared type, never the param
+    /// name — drives byte-reversal. `ASSET_ID` here has an asset-y name but reversal comes
+    /// solely from its declared `liquid.asset_id` type. A `bytes32` hash and a `pubkey` of
+    /// the same width must NOT be reversed.
     #[test]
     fn asset_id_reversal_is_driven_by_declared_type_not_name() {
         let asset = "857e17708b6ec9ad0e2cc50a8faa8140b7ad253029443513850f14e4a95589b4";
@@ -1126,6 +1115,22 @@ mod tests {
             json.contains(&format!(r#""SOME_KEY": {{ "value": "0x{asset}""#)),
             "pubkey must NOT be reversed; got:\n{json}"
         );
+    }
+
+    /// A param with an asset-y NAME but no declared type must NOT be treated as an asset:
+    /// asset-ness (u256 + byte-reversal) comes only from `liquid.asset_id`. Since a 32-byte
+    /// hex value can't be type-inferred, such a param is skipped (loud), never silently
+    /// emitted un-reversed.
+    #[test]
+    fn untyped_asset_named_param_is_not_inferred_as_asset() {
+        let asset = "857e17708b6ec9ad0e2cc50a8faa8140b7ad253029443513850f14e4a95589b4";
+        assert_eq!(infer_simf_type("SOME_ASSET_ID"), None, "asset names are no longer type-inferred");
+
+        let mut params = HashMap::new();
+        params.insert("SOME_ASSET_ID".to_string(), asset.to_string());
+        let json = build_args_json(&params, &HashMap::new()).expect("build_args_json");
+        assert!(!json.contains("SOME_ASSET_ID"),
+            "an untyped asset-named param must be skipped, not emitted (reversed or not); got:\n{json}");
     }
 
     /// `infer_simf_type` covers naming conventions; `infer_simf_type_from_value` covers literals.

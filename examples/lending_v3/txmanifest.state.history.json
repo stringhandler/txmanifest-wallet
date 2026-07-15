@@ -13,6 +13,20 @@
           "asset": "6146688bf4e2eed0d775f400542a643d8c5c457d9bc75eecb47d181b257dae93"
         }
       ]
+    },
+    {
+      "action": "CreateFactory",
+      "txid": "a584021192417ed1ff2dbce55e62e9c6d7f2e110d11c75479684a0624dee17e7",
+      "utxos": [
+        {
+          "utxo_type": "issuance_factory",
+          "utxo_id": "factory_program_out",
+          "txid": "a584021192417ed1ff2dbce55e62e9c6d7f2e110d11c75479684a0624dee17e7",
+          "vout": 1,
+          "amount_sat": 1,
+          "asset": "c6b7a5fdf1a01787af534dc9252d1c99908d929a16f8862b8925dcf53d089c6b"
+        }
+      ]
     }
   ]
 }

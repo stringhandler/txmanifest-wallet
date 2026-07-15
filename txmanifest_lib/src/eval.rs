@@ -226,15 +226,10 @@ fn eval_op_return_concat(
         if arg.is_empty() {
             continue;
         }
-        // The referenced key (last dotted segment) drives the asset-id reversal decision.
+        // Byte-reversal is driven ONLY by the declared `liquid.asset_id` type of the
+        // referenced key — never by its name. An asset ref must be a typed compile param.
         let key = arg.rsplit('.').next().unwrap_or(arg);
-        let is_asset = match type_hints.get(key) {
-            Some(t) => t == "liquid.asset_id",
-            None => {
-                let u = key.to_uppercase();
-                u.ends_with("_ASSET_ID") || u.ends_with("_ASSET")
-            }
-        };
+        let is_asset = type_hints.get(key).map(|t| t == "liquid.asset_id").unwrap_or(false);
         let resolved = resolve_ref(arg, ctx).unwrap_or_else(|| arg.trim_matches(['"', '\'']).to_string());
         let hex = resolved.trim().trim_start_matches("0x").trim_start_matches("0X");
         if hex.len() % 2 != 0 {
