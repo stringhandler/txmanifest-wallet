@@ -71,15 +71,17 @@ pub fn eval_destination_str(dest: &str, ctx: &ExecutionContext) -> Option<String
 ///
 /// 2. **Object** `{ "parts": [ … ] }` — an ordered list of typed fields, for exact
 ///    binary layouts (e.g. protocol metadata). Each part is one of:
-///      - `{ "type": "program_id", "simf": "./x.simf" }` → `sha256(LF-normalized source)[..4]`
 ///      - `{ "type": "liquid.asset_id", "value": <ref> }` → 32 bytes, internal (reversed) order
 ///      - `{ "type": "u64"|"u32"|"u16"|"u8", "value": <ref>, "endian": "le"|"be" }` (default le)
 ///      - `{ "type": "pubkey"|"bytes32"|"bytes", "value": <ref/hex> }` → raw bytes, natural order
+///
+/// All part types are protocol-agnostic. A fixed byte prefix (e.g. a protocol
+/// "program id" / message-type tag) is just a `bytes` part whose value is a constant
+/// (typically supplied as a documented param default), not a special op.
 pub fn eval_op_return_data(
     data: &serde_json::Value,
     ctx: &ExecutionContext,
     type_hints: &std::collections::HashMap<String, String>,
-    base_dir: &std::path::Path,
 ) -> Result<Vec<u8>> {
     match data {
         serde_json::Value::String(expr) => eval_op_return_concat(expr, ctx, type_hints),
@@ -90,7 +92,7 @@ pub fn eval_op_return_data(
                 .ok_or_else(|| anyhow::anyhow!("OP_RETURN data object must have a 'parts' array"))?;
             let mut out = Vec::new();
             for part in parts {
-                out.extend_from_slice(&eval_op_return_part(part, ctx, base_dir)?);
+                out.extend_from_slice(&eval_op_return_part(part, ctx)?);
             }
             Ok(out)
         }
@@ -102,23 +104,9 @@ pub fn eval_op_return_data(
 fn eval_op_return_part(
     part: &serde_json::Value,
     ctx: &ExecutionContext,
-    base_dir: &std::path::Path,
 ) -> Result<Vec<u8>> {
     let ty = part.get("type").and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("OP_RETURN part missing 'type': {part}"))?;
-    // program_id takes a simf path rather than a value.
-    if ty == "program_id" {
-        let simf = part.get("simf").and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("OP_RETURN program_id part needs 'simf'"))?;
-        let path = base_dir.join(simf);
-        let source = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("Cannot read simf '{}': {e}", path.display()))?;
-        // Match the SimplicityHL compiler's program id: SHA256 of the LF-normalized source.
-        let normalized = source.replace("\r\n", "\n");
-        use lwk_wollet::elements::hashes::{sha256, Hash};
-        let h = sha256::Hash::hash(normalized.as_bytes()).to_byte_array();
-        return Ok(h[..4].to_vec());
-    }
     let value_ref = part.get("value").and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("OP_RETURN part needs 'value': {part}"))?;
     let resolved = resolve_ref(value_ref, ctx)
@@ -708,7 +696,6 @@ mod op_return_data_tests {
             &serde_json::json!("concat(instance.BORROWER_PUB_KEY, instance.PRINCIPAL_ASSET_ID)"),
             &ctx,
             &hints,
-            std::path::Path::new("."),
         )
         .unwrap();
 
@@ -736,8 +723,8 @@ mod op_return_data_tests {
             { "type": "u32", "value": "instance.LOAN_EXPIRATION_TIME" },
             { "type": "u16", "value": "instance.PRINCIPAL_INTEREST_RATE" }
         ]});
-        let bytes = eval_op_return_data(&data, &ctx, &std::collections::HashMap::new(), std::path::Path::new(".")).unwrap();
-        // 32 (asset) + 8 + 4 + 2 = 46 bytes (program_id omitted here).
+        let bytes = eval_op_return_data(&data, &ctx, &std::collections::HashMap::new()).unwrap();
+        // 32 (asset) + 8 + 4 + 2 = 46 bytes (no program-id prefix here).
         assert_eq!(bytes.len(), 46);
         assert_eq!(&bytes[32..40], &1000u64.to_le_bytes());
         assert_eq!(&bytes[40..44], &2536857u32.to_le_bytes());

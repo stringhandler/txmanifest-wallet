@@ -1820,7 +1820,7 @@ pub fn run(
                         // expression is present, embed its bytes so indexers can discover the tx.
                         let script_pubkey = match &output.data {
                             None => lwk_wollet::elements::Script::from(vec![0x6au8]),
-                            Some(expr) => match eval::eval_op_return_data(expr, &ctx, &compile_param_type_hints, manifest_dir) {
+                            Some(expr) => match eval::eval_op_return_data(expr, &ctx, &compile_param_type_hints) {
                                 Ok(bytes) => lwk_wollet::elements::Script::new_op_return(&bytes),
                                 Err(e) => {
                                     println!("  {} Output '{}' OP_RETURN data eval failed: {e}", style("[error]").red(), output.id);
@@ -4101,6 +4101,9 @@ mod tests {
         ctx.set_param("LOAN_EXPIRATION_TIME", "2536857");
         ctx.set_param("ZERO_HASH", &"00".repeat(32));
         ctx.set_param("FACTORY_ASSET_ID", "0101010101010101010101010101010101010101010101010101010101010101");
+        // Protocol message-type tag constant (a param default in the manifest; here set directly
+        // as a compile param since the test drives create_instance without Step 1).
+        ctx.set_compile_param("LENDING_PROGRAM_ID", "f80c6162");
         // $instance.* (issuance-resolved NFT asset ids)
         ctx.set_compile_param("BORROWER_NFT_ASSET_ID", borrower_nft);
         ctx.set_compile_param("LENDER_NFT_ASSET_ID", lender_nft);
@@ -4194,8 +4197,7 @@ mod tests {
         let op_out = action.outputs.as_ref().unwrap().iter()
             .find(|o| o.id == "creation_op_return").expect("creation_op_return output");
         let op_data = op_out.data.as_ref().expect("op_return has data");
-        let manifest_dir = manifest_path.parent().unwrap();
-        let op_bytes = eval::eval_op_return_data(op_data, &ctx, &hints, manifest_dir)
+        let op_bytes = eval::eval_op_return_data(op_data, &ctx, &hints)
             .expect("eval op_return");
         let op_hex: String = op_bytes.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(op_bytes.len(), 50, "lending creation metadata is 50 bytes");

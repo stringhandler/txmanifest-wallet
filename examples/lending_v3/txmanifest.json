@@ -1,4 +1,5 @@
 {
+  "$comment": "lending_v3 targets the DEPLOYED simplicity-lending indexer (odev). Interop constants are fixed: factory params (2,0), NUMS key, protocol-fee keeper 38fca2d9…, and the program-id tags below. Change a covenant .simf and you must recompute the matching *_PROGRAM_ID + covenant address.",
   "manifest_version": "0.1.0",
   "protocol": "simplicity-lending",
   "description": "lending_v3 — the redesigned 'issuance factory' lending protocol, wire-compatible with the deployed simplicity-lending indexer/site (odev branch). Phase 3a models factory creation: a persistent issuance_factory covenant plus the wallet-held auth NFT, from which many lending offers are later minted.",
@@ -149,6 +150,11 @@
               "type": "u64",
               "default": "0",
               "description": "Factory reissuance-flags bitmask. Leave at the default 0 — the deployed indexer only detects factories with reissuance_flags == 0."
+            },
+            "FACTORY_PROGRAM_ID": {
+              "type": "bytes",
+              "default": "dd1e7f89",
+              "description": "The 4-byte protocol message-type tag that prefixes the factory-creation OP_RETURN (out[2]). The indexer's IssuanceFactory::try_from_tx rejects the tx unless these bytes match. This is a fixed constant, NOT a per-run input — do not override. How it is derived (recompute ONLY if you edit issuance_factory.simf, which also changes the covenant address): the first 4 bytes of SHA-256 of the LF-normalized issuance_factory.simf source text. (Value verified against on-chain data; the engine no longer computes it — it's a plain constant so the tx-encoder stays protocol-agnostic.)"
             }
           },
           "create_instance": {
@@ -206,7 +212,7 @@
               },
               "data": {
                 "parts": [
-                  { "type": "program_id", "simf": "issuance_factory.simf" },
+                  { "type": "bytes", "value": "instance.FACTORY_PROGRAM_ID" },
                   { "type": "u8", "value": "instance.ISSUING_UTXOS_COUNT" },
                   { "type": "u64", "value": "instance.REISSUANCE_FLAGS", "endian": "le" }
                 ]
@@ -261,7 +267,8 @@
             "PRINCIPAL_AMOUNT": { "type": "u64", "description": "Principal amount (base units)." },
             "PRINCIPAL_INTEREST_RATE": { "type": "u64", "description": "Interest rate in basis points (u64 in v3)." },
             "LOAN_EXPIRATION_TIME": { "type": "u32", "description": "Liquidation CLTV height." },
-            "ZERO_HASH": { "type": "bytes32", "default": "0000000000000000000000000000000000000000000000000000000000000000", "description": "The all-zero finalized_vault_cov_hash used by finalized (non-active) AssetAuthVault variants. Constant; do not override." }
+            "ZERO_HASH": { "type": "bytes32", "default": "0000000000000000000000000000000000000000000000000000000000000000", "description": "The all-zero finalized_vault_cov_hash used by finalized (non-active) AssetAuthVault variants. Constant; do not override." },
+            "LENDING_PROGRAM_ID": { "type": "bytes", "default": "f80c6162", "description": "The 4-byte protocol message-type tag that prefixes the offer-creation OP_RETURN (out[4]); the indexer keys offer detection on it. Fixed constant, NOT a per-run input — do not override. Derived (recompute ONLY if you edit lending.simf, which also changes the covenant address) as the first 4 bytes of SHA-256 of the LF-normalized lending.simf source text. Verified against on-chain data; the engine treats it as a plain constant so the tx-encoder stays protocol-agnostic." }
           },
           "create_instance": {
             "class": "lending_contract",
@@ -475,8 +482,9 @@
               "description": "Lending creation metadata OP_RETURN (output 4), 50 bytes: program_id(lending.simf)[4] || principal_asset_id[32, internal] || principal_amount[8, u64 LE] || loan_expiration[4, u32 LE] || interest_rate[2, u16 LE]. Matches lending metadata::encode (task 04). Interest rate is u16 in the OP_RETURN even though it is u64 in the covenant params.",
               "destination": { "type": "op_return" },
               "data": {
+                "$comment": "50-byte layout must match lending metadata::encode exactly, in this order.",
                 "parts": [
-                  { "type": "program_id", "simf": "lending.simf" },
+                  { "type": "bytes", "value": "instance.LENDING_PROGRAM_ID", "$comment": "4-byte message-type tag; see the LENDING_PROGRAM_ID param for how it's derived." },
                   { "type": "liquid.asset_id", "value": "instance.PRINCIPAL_ASSET_ID" },
                   { "type": "u64", "value": "instance.PRINCIPAL_AMOUNT" },
                   { "type": "u32", "value": "instance.LOAN_EXPIRATION_TIME" },
