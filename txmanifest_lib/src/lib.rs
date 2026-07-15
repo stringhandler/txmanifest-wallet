@@ -9,6 +9,7 @@ pub mod instance;
 pub mod lifecycle;
 pub mod params;
 pub mod prepare;
+pub mod preview;
 pub mod prompt;
 pub mod pset_builder;
 pub mod state;

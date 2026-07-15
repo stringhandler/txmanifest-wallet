@@ -258,6 +258,67 @@ pub struct Action {
     /// Constructor-only: defines the new instance written to the instance file.
     pub create_instance: Option<InstanceCreate>,
     pub witnesses: Option<serde_json::Value>,
+    /// "Clear signing" UI metadata driving the pre-broadcast confirmation screens
+    /// (see `preview.rs`). Author-supplied, so only as trustworthy as the manifest's
+    /// own signature chain — never a substitute for what a hardware device verifies.
+    pub ui: Option<ActionUi>,
+}
+
+// ---------------------------------------------------------------------------
+// Clear-signing UI metadata
+// ---------------------------------------------------------------------------
+
+/// Action-level UI hints. Currently just the one-line action summary (screen 1).
+#[derive(Debug, Deserialize)]
+pub struct ActionUi {
+    /// Template for the one-line action summary. Supports `{ref}` and `{ref:symbol}`
+    /// interpolation against the execution context (see `preview::interpolate`).
+    pub action: Option<String>,
+}
+
+/// Per-input / per-output UI hint. Accepts either a bare label string
+/// (`"collateral locked"`) or a detailed object for finer control.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum UiSpec {
+    Label(String),
+    Detail(UiDetail),
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct UiDetail {
+    /// Human-readable one-line description of this leg.
+    pub label: Option<String>,
+    /// Optional semantic tag (e.g. "collateral", "auth_nft").
+    pub role: Option<String>,
+    /// Override the net-effect account/bucket heading (else derived from source/destination).
+    pub group: Option<String>,
+    /// Suppress this leg from the net-effect diff (e.g. pure protocol data).
+    #[serde(default)]
+    pub hide: bool,
+}
+
+impl UiSpec {
+    /// The display label, if any.
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            UiSpec::Label(s) => Some(s.as_str()),
+            UiSpec::Detail(d) => d.label.as_deref(),
+        }
+    }
+
+    /// An explicit bucket-heading override, if the detailed form set one.
+    pub fn group(&self) -> Option<&str> {
+        match self {
+            UiSpec::Detail(d) => d.group.as_deref(),
+            UiSpec::Label(_) => None,
+        }
+    }
+
+    /// Whether this leg should be omitted from the net-effect diff.
+    pub fn hidden(&self) -> bool {
+        matches!(self, UiSpec::Detail(d) if d.hide)
+    }
 }
 
 /// Methods inside a class are structurally identical to standalone actions.
@@ -294,6 +355,8 @@ pub struct Input {
     /// Inline hook evaluated after this input's UTXO is resolved and its
     /// issuance attrs (asset, reissuance_token) are computed.
     pub on_resolved: Option<InlineHook>,
+    /// Clear-signing UI hint for this input (net-effect debit line).
+    pub ui: Option<UiSpec>,
 }
 
 /// Inline hook on an input — evaluated in the standard expression language
@@ -349,6 +412,8 @@ pub struct Output {
     /// Defaults to `true` (confidential) for wallet destinations. Has no effect on
     /// covenant (`utxo_type`) outputs — those are controlled by the `utxo_type.confidential` flag.
     pub confidential: Option<bool>,
+    /// Clear-signing UI hint for this output (net-effect credit line).
+    pub ui: Option<UiSpec>,
 }
 
 impl Output {

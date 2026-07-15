@@ -12,6 +12,7 @@ use crate::context::{ExecutionContext, ResolvedInput};
 use crate::instance::InstanceFile;
 use crate::state::{history_path, ContractState, HistoryEntry, StateHistory, StateUtxo};
 use crate::params::ParamOverrides;
+use crate::preview;
 use crate::prompt;
 use crate::wallet::{self, WalletFile};
 use crate::{config, covenant, eval, pset_builder};
@@ -2641,6 +2642,12 @@ pub fn run(
         return Ok(());
     }
 
+    // Clear-signing preview: action summary + net-effect diff, from the
+    // manifest's `ui` metadata. Author-supplied, so gated by the manifest's own
+    // trust chain — not a device-verified display.
+    preview::render_preview(action, &ctx);
+
+    println!();
     println!("{}", style("=== Ready to broadcast ===").bold().cyan());
 
     let confirmed = prompt::confirm_broadcast()?;
