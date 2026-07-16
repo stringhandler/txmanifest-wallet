@@ -177,28 +177,16 @@ pub fn prompt_input_selection(input: &manifest::Input) -> Result<ResolvedInput> 
             issuance_entropy: None,
         })
     } else {
-        // Protocol UTXO — the real wallet would query LWK for matching UTXOs.
+        // Protocol/covenant UTXOs are never fabricated: a stub would silently build a
+        // transaction against a UTXO that does not exist. Callers resolve these from
+        // --input / instance.provided_inputs / the state file, and error otherwise.
         let utxo_type = input.utxo_type_name().unwrap_or_else(|| "[complex]".to_string());
-        println!(
-            "  {} utxo_type '{}' — a real wallet would auto-resolve this from the chain via LWK.",
-            style("[protocol UTXO]").yellow(),
-            utxo_type
-        );
-        println!(
-            "  {} Returning stub UTXO for demonstration.",
-            style("[stub]").yellow()
-        );
-
-        // Return a clearly-marked stub so the lifecycle can continue.
-        Ok(ResolvedInput {
-            id: input.id.clone(),
-            txid: "0000000000000000000000000000000000000000000000000000000000000000"
-                .to_string(),
-            vout: 0,
-            amount_sat: 0,
-            asset: format!("STUB_ASSET_FOR_{}", utxo_type.to_uppercase()),
-            issuance_entropy: None,
-        })
+        anyhow::bail!(
+            "Input '{}' (utxo_type '{}') must be resolved from --input, \
+             instance.provided_inputs, or the state file — it cannot be prompted for.",
+            input.id,
+            utxo_type,
+        )
     }
 }
 

@@ -1,0 +1,30 @@
+{
+  "instance": "..\\txmanifest.instance.2.json",
+  "last_action": "CreateOffer",
+  "utxos": [
+    {
+      "utxo_type": "issuance_factory",
+      "utxo_id": "factory_covenant_out",
+      "txid": "e5e7624557181015164453457965e71ecadb9f439be1bc404ee05b2d903ea59b",
+      "vout": 1,
+      "amount_sat": 1,
+      "asset": "6c7c38dbd33228a4fac33c46d38f0deb1fcf8f27e0279227d7ac868486d1fd18"
+    },
+    {
+      "utxo_type": "lender_nft_script_auth",
+      "utxo_id": "lender_nft_locked",
+      "txid": "e5e7624557181015164453457965e71ecadb9f439be1bc404ee05b2d903ea59b",
+      "vout": 3,
+      "amount_sat": 1,
+      "asset": "35668fc28ea53aad16ed5b85dfffba5b04fb8f22a265512e3ff4ec3085f3c251"
+    },
+    {
+      "utxo_type": "lending_collateral",
+      "utxo_id": "lending_collateral_out",
+      "txid": "e5e7624557181015164453457965e71ecadb9f439be1bc404ee05b2d903ea59b",
+      "vout": 5,
+      "amount_sat": 3400,
+      "asset": "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49"
+    }
+  ]
+}

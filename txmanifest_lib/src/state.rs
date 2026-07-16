@@ -19,6 +19,47 @@ pub fn history_path(state_path: &Path) -> std::path::PathBuf {
     state_path.with_file_name(history_name)
 }
 
+/// Derive the next immutable snapshot path from the state file path, one higher
+/// than the highest version already on disk:
+/// `foo.state.json` → `foo.state.1.json`, then `foo.state.2.json`, …
+///
+/// This is the default output path for a run when no explicit `--state-out` /
+/// `--instance-out` is given: each action writes a fresh numbered file, so the
+/// input state is preserved and nothing is overwritten. The `foo.state.json` base
+/// is only a naming seed (and the anchor for the single `.history.json` log) — it
+/// is not itself written. The number is one higher than the highest snapshot
+/// currently present, so during normal append-only use it increases by one each
+/// action; deleting the highest snapshot can let its number be reused, but a
+/// snapshot below the top is never clobbered. The `.history.json` sibling is
+/// never miscounted as a version.
+pub fn next_version_path(state_path: &Path) -> std::path::PathBuf {
+    let stem = state_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("contract.state.json");
+    let base = stem.strip_suffix(".json").unwrap_or(stem);
+    let prefix = format!("{base}.");
+
+    // Find the highest existing `<base>.<N>.json` in the same directory.
+    let mut max_n: u64 = 0;
+    let dir = state_path.parent().filter(|p| !p.as_os_str().is_empty());
+    let read = dir.map(std::fs::read_dir).unwrap_or_else(|| std::fs::read_dir("."));
+    if let Ok(entries) = read {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if let Some(n) = name
+                    .strip_prefix(&prefix)
+                    .and_then(|s| s.strip_suffix(".json"))
+                    .and_then(|mid| mid.parse::<u64>().ok())
+                {
+                    max_n = max_n.max(n);
+                }
+            }
+        }
+    }
+    state_path.with_file_name(format!("{base}.{}.json", max_n + 1))
+}
+
 /// One entry in the state history file — records the live UTXO set produced by a single action.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HistoryEntry {
@@ -111,5 +152,40 @@ impl ContractState {
     /// Remove the UTXO at the given outpoint (spent as an input).
     pub fn remove_spent(&mut self, txid: &str, vout: u32) {
         self.utxos.retain(|u| !(u.txid == txid && u.vout == vout));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_path_inserts_history_segment() {
+        let p = Path::new("/data/if.state.json");
+        assert_eq!(history_path(p), Path::new("/data/if.state.history.json"));
+    }
+
+    #[test]
+    fn next_version_increments_and_ignores_siblings() {
+        // Isolate in a fresh temp dir under the OS temp root.
+        let dir = std::env::temp_dir().join(format!("state_ver_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = dir.join("if.state.json");
+
+        // No snapshots yet → .1
+        assert_eq!(next_version_path(&state), dir.join("if.state.1.json"));
+
+        // Create .1 and .2 plus decoy siblings that must NOT be counted.
+        for name in ["if.state.1.json", "if.state.2.json", "if.state.history.json", "if.state.json"] {
+            std::fs::write(dir.join(name), "{}").unwrap();
+        }
+        assert_eq!(next_version_path(&state), dir.join("if.state.3.json"));
+
+        // Delete the highest (.2): next is highest-present(.1)+1 = .2 again.
+        std::fs::remove_file(dir.join("if.state.2.json")).unwrap();
+        assert_eq!(next_version_path(&state), dir.join("if.state.2.json"));
+        // ^ .1 is preserved; only the just-deleted top number is reused.
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

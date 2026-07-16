@@ -1,8 +1,48 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use tx_manifest_lib::lifecycle::OutpointOverride;
 use tx_manifest_lib::{manifest, config, describe, instance, lifecycle, prepare, validate, wallet};
+
+/// Build the input-override map from `--input id=txid:vout` flags and an optional
+/// `--inputs-file` JSON. File entries load first; `--input` flags override them.
+fn build_provided_inputs(
+    inputs: &[String],
+    inputs_file: Option<&Path>,
+) -> Result<HashMap<String, OutpointOverride>> {
+    let mut map: HashMap<String, OutpointOverride> = HashMap::new();
+
+    if let Some(path) = inputs_file {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read inputs file: {}", path.display()))?;
+        let obj: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&raw)
+            .with_context(|| format!("inputs file must be a JSON object: {}", path.display()))?;
+        for (id, value) in obj {
+            let ov = match value {
+                // Shorthand string form "txid:vout".
+                serde_json::Value::String(s) => OutpointOverride::parse_outpoint(&s)
+                    .with_context(|| format!("inputs file entry '{id}'"))?,
+                // Full object form { txid, vout, amount_sat?, asset? }.
+                other => serde_json::from_value(other)
+                    .with_context(|| format!("inputs file entry '{id}' is not a valid override"))?,
+            };
+            map.insert(id, ov);
+        }
+    }
+
+    for spec in inputs {
+        let (id, outpoint) = spec
+            .split_once('=')
+            .with_context(|| format!("--input must be <id>=<txid>:<vout>, got '{spec}'"))?;
+        let ov = OutpointOverride::parse_outpoint(outpoint)
+            .with_context(|| format!("--input '{id}'"))?;
+        map.insert(id.trim().to_string(), ov);
+    }
+
+    Ok(map)
+}
 
 #[derive(Parser)]
 #[command(name = "tx-manifest-wallet")]
@@ -39,18 +79,32 @@ enum Commands {
         /// instance fields. Not used by constructors (they create the instance).
         #[arg(long)]
         instance: Option<PathBuf>,
-        /// Instance file to WRITE (output) on constructor/deploy actions. Defaults to
-        /// <manifest-stem>.instance.json alongside the manifest file when omitted.
+        /// Instance file to WRITE (output) on constructor/deploy actions. When omitted,
+        /// defaults to a fresh numbered file <manifest-stem>.instance.N.json alongside the
+        /// manifest (never overwriting the input instance).
         #[arg(long)]
         instance_out: Option<PathBuf>,
         /// State file to LOAD (input): live on-chain UTXOs for this contract instance.
         /// Never auto-discovered — pass it explicitly to locate covenant UTXOs.
         #[arg(long)]
         state: Option<PathBuf>,
-        /// State file to WRITE (output) after broadcast. Defaults to --state when given,
-        /// else <manifest-stem>.state.json alongside the manifest file.
+        /// State file to WRITE (output) after broadcast. When omitted, defaults to a fresh
+        /// numbered file <manifest-stem>.state.N.json alongside the manifest (never
+        /// overwriting --state); the append-only <manifest-stem>.state.history.json is
+        /// always updated regardless.
         #[arg(long)]
         state_out: Option<PathBuf>,
+        /// Pin a manifest input to a specific outpoint: `--input <input_id>=<txid>:<vout>`.
+        /// Repeatable. Takes priority over instance.provided_inputs and the state file;
+        /// amount/asset are derived from the manifest input spec. Example:
+        /// `--input factory_covenant_in=fd6c…ac90:1`.
+        #[arg(long = "input", value_name = "ID=TXID:VOUT")]
+        inputs: Vec<String>,
+        /// JSON file of input overrides: `{ "<input_id>": "<txid>:<vout>" }` or
+        /// `{ "<input_id>": { "txid": "…", "vout": 0, "amount_sat": 1, "asset": "…" } }`.
+        /// Merged with (and overridden by) any `--input` flags.
+        #[arg(long)]
+        inputs_file: Option<PathBuf>,
         /// Skip auto-selection and prompt for every input manually
         #[arg(long)]
         manual_inputs: bool,
@@ -618,6 +672,8 @@ fn main() -> Result<()> {
             instance_out,
             state,
             state_out,
+            inputs,
+            inputs_file,
             manual_inputs,
             export_pset,
             debug_jets,
@@ -628,12 +684,16 @@ fn main() -> Result<()> {
 
             // Instance/state INPUT files are never auto-discovered from the manifest stem:
             // the caller must pass --instance / --state explicitly. This avoids a stale
-            // on-disk instance silently overriding --params. OUTPUT paths (--instance-out /
-            // --state-out) auto-derive from the manifest stem inside `run` when omitted.
+            // on-disk instance silently overriding --params, and never continues from a
+            // state the caller didn't ask for. OUTPUT files (--instance-out / --state-out),
+            // when omitted, default to a FRESH numbered file derived from the manifest stem
+            // (txmanifest.state.1.json, .2, …) inside `run` — never overwriting the input.
             let loaded_instance = instance
                 .as_deref()
                 .map(instance::InstanceFile::load)
                 .transpose()?;
+
+            let provided_inputs = build_provided_inputs(&inputs, inputs_file.as_deref())?;
 
             lifecycle::run(
                 &manifest_file,
@@ -645,6 +705,7 @@ fn main() -> Result<()> {
                 instance_out.as_deref(),   // instance_out_path
                 state.as_deref(),          // state_in_path
                 state_out.as_deref(),      // state_out_path
+                &provided_inputs,
                 &wallet,
                 &data_dir,
                 manual_inputs,

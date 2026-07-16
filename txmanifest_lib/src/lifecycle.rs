@@ -106,6 +106,42 @@ struct RunOutputInput {
 // Public entry point
 // ---------------------------------------------------------------------------
 
+/// A runtime override that pins a manifest input to a specific on-chain outpoint.
+///
+/// Supplied via the CLI (`--input <id>=<txid>:<vout>`) or a JSON file, it takes
+/// priority over `instance.provided_inputs` and the state file during input
+/// resolution. `amount_sat` / `asset` are optional: when omitted they are derived
+/// from the manifest input spec (e.g. a covenant input's fixed `amount_sat` and
+/// `asset: instance.X`), which is what makes `txid:vout` alone sufficient for
+/// covenant UTXOs.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct OutpointOverride {
+    pub txid: String,
+    pub vout: u32,
+    #[serde(default)]
+    pub amount_sat: Option<u64>,
+    #[serde(default)]
+    pub asset: Option<String>,
+}
+
+impl OutpointOverride {
+    /// Parse the CLI string form `<txid>:<vout>` (amount/asset derived later).
+    pub fn parse_outpoint(s: &str) -> Result<Self> {
+        let (txid, vout) = s
+            .rsplit_once(':')
+            .with_context(|| format!("expected <txid>:<vout>, got '{s}'"))?;
+        let vout: u32 = vout
+            .trim()
+            .parse()
+            .with_context(|| format!("vout in '{s}' must be a u32"))?;
+        let txid = txid.trim();
+        if txid.len() != 64 || !txid.bytes().all(|b| b.is_ascii_hexdigit()) {
+            anyhow::bail!("txid in '{s}' must be 64 hex chars");
+        }
+        Ok(Self { txid: txid.to_string(), vout, amount_sat: None, asset: None })
+    }
+}
+
 /// Run the interactive wallet lifecycle for the given action in a manifest file.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -117,14 +153,17 @@ pub fn run(
     // Path the instance was loaded from (INPUT). Never auto-discovered; recorded into the
     // state file so methods know which instance they belong to.
     instance_in_path: Option<&Path>,
-    // Path to write the instance file on deploy (OUTPUT). Auto-derived from the manifest
-    // stem (`<stem>.instance.json`) when not given.
+    // Path to write the instance file on deploy (OUTPUT). When omitted, a fresh numbered
+    // file `<stem>.instance.N.json` is used — never overwriting the input.
     instance_out_path: Option<&Path>,
     // Path to load existing contract state from (INPUT). Never auto-discovered.
     state_in_path: Option<&Path>,
-    // Path to write updated contract state to (OUTPUT). Defaults to `state_in_path` when
-    // that is given, else auto-derived from the manifest stem (`<stem>.state.json`).
+    // Path to write updated contract state to (OUTPUT). When omitted, a fresh numbered file
+    // `<stem>.state.N.json` is used — never overwriting `state_in_path`.
     state_out_path: Option<&Path>,
+    // Runtime input overrides keyed by manifest input id (INPUT). Highest priority in
+    // resolution, above `instance.provided_inputs` and the state file.
+    provided_inputs: &std::collections::HashMap<String, OutpointOverride>,
     wallet_path: &Path,
     data_dir: &Path,
     manual_inputs: bool,
@@ -147,22 +186,36 @@ pub fn run(
     // Sourced from the manifest so interop targets (e.g. simplicity-lending) can be matched
     // without hardcoding; defaults to false.
     let include_debug_symbols = manifest.include_debug_symbols();
-    // INPUT paths (instance load, state load) are never auto-discovered: passing them
-    // explicitly is what keeps a stale on-disk instance from silently overriding
-    // `--params`. OUTPUT paths auto-derive from the manifest stem when not given, so
-    // constructors and state tracking work without extra flags.
+    // INPUT paths (instance load, state load) are NEVER auto-discovered: a run only
+    // loads an instance/state if one is passed explicitly (`--instance` / `--state`).
+    // This keeps a stale on-disk file from silently overriding `--params` and never
+    // continues from a state the caller didn't ask for.
+    //
+    // OUTPUT paths: an explicit `--instance-out` / `--state-out` is used verbatim;
+    // otherwise the run writes a FRESH numbered file derived from the manifest stem
+    // (`txmanifest.state.1.json`, `.2`, …) rather than overwriting the input file or a
+    // bare canonical. Nothing is ever clobbered, and the input state is preserved.
     let manifest_dir = manifest_file.parent().unwrap_or(Path::new("."));
     let manifest_stem = manifest_file
         .file_name().and_then(|n| n.to_str()).unwrap_or("contract")
         .trim_end_matches(".json");
-    let auto_instance_out = manifest_dir.join(format!("{manifest_stem}.instance.json"));
-    let auto_state_out    = manifest_dir.join(format!("{manifest_stem}.state.json"));
-    let effective_instance_out: &Path = instance_out_path.unwrap_or(&auto_instance_out);
-    let effective_state_out: &Path = match (state_out_path, state_in_path) {
-        (Some(p), _) => p,
-        (None, Some(p)) => p,
-        (None, None) => &auto_state_out,
+    // Stable, unversioned bases — used to seed numbered outputs and to derive the
+    // single append-only history log (which must not itself be versioned).
+    let instance_base = manifest_dir.join(format!("{manifest_stem}.instance.json"));
+    let state_base    = manifest_dir.join(format!("{manifest_stem}.state.json"));
+    let effective_instance_out: std::path::PathBuf = match instance_out_path {
+        Some(p) => p.to_path_buf(),
+        None => crate::state::next_version_path(&instance_base),
     };
+    let effective_state_out: std::path::PathBuf = match state_out_path {
+        Some(p) => p.to_path_buf(),
+        None => crate::state::next_version_path(&state_base),
+    };
+    // History log lives next to the explicit output when one is given, else next to
+    // the stable state base — a single `<stem>.state.history.json`, not per-version.
+    let history_seed: std::path::PathBuf = state_out_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| state_base.clone());
 
     // Load existing contract state only from the explicitly-passed input file.
     let mut contract_state: Option<ContractState> = match state_in_path {
@@ -562,8 +615,45 @@ pub fn run(
 
     if let Some(inputs) = &action.inputs {
         for input in inputs {
-            // Resolution priority: instance.provided_inputs → state file (by utxo_type) → auto-select / prompt
-            let resolved = if let Some(provided) = instance
+            // Resolution priority: CLI/file override → instance.provided_inputs →
+            // state file (by utxo_type) → auto-select / prompt.
+            let resolved = if let Some(ov) = provided_inputs.get(&input.id) {
+                // Derive amount/asset from the override, then the state file (matching
+                // outpoint), then the manifest input spec — so `txid:vout` alone works
+                // for covenant inputs whose amount/asset are fixed in the manifest.
+                let state_utxo = contract_state.as_ref().and_then(|s| {
+                    s.utxos.iter().find(|u| u.txid == ov.txid && u.vout == ov.vout)
+                });
+                let asset = ov
+                    .asset
+                    .clone()
+                    .or_else(|| state_utxo.map(|u| u.asset.clone()))
+                    .or_else(|| input.asset.as_ref().and_then(|v| eval::eval_asset_label(v, &ctx).ok()))
+                    .unwrap_or_else(|| "lbtc".to_string());
+                let amount_sat = ov
+                    .amount_sat
+                    .or_else(|| state_utxo.map(|u| u.amount_sat))
+                    .or_else(|| input.amount_sat.as_ref().and_then(|v| eval::eval_amount(v, &ctx).ok()))
+                    .unwrap_or(0);
+                println!(
+                    "  {} {}  txid={}…  vout={}  {} sat  asset={}  {}",
+                    style("✓").green(),
+                    style(&input.id).bold(),
+                    &ov.txid[..8.min(ov.txid.len())],
+                    ov.vout,
+                    style(amount_sat).yellow(),
+                    style(&asset).dim(),
+                    style("[override]").cyan(),
+                );
+                ResolvedInput {
+                    id: input.id.clone(),
+                    txid: ov.txid.clone(),
+                    vout: ov.vout,
+                    amount_sat,
+                    asset,
+                    issuance_entropy: None,
+                }
+            } else if let Some(provided) = instance
                 .and_then(|inst| inst.provided_inputs.get(&input.id))
             {
                 println!(
@@ -2528,7 +2618,7 @@ pub fn run(
                 instance_params: std::collections::HashMap::new(),
                 provided_inputs: std::collections::HashMap::new(),
             };
-            match inst.write(effective_instance_out) {
+            match inst.write(&effective_instance_out) {
                 Ok(()) => println!(
                     "  {} Instance written: {}",
                     style("✓").green(),
@@ -2546,7 +2636,7 @@ pub fn run(
                 instance_params: ctx.all_compile_params().iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
                 provided_inputs: std::collections::HashMap::new(),
             };
-            match inst.write(effective_instance_out) {
+            match inst.write(&effective_instance_out) {
                 Ok(()) => println!(
                     "  {} Instance written: {}",
                     style("✓").green(),
@@ -2644,8 +2734,31 @@ pub fn run(
 
     // Clear-signing preview: action summary + net-effect diff, from the
     // manifest's `ui` metadata. Author-supplied, so gated by the manifest's own
-    // trust chain — not a device-verified display.
-    preview::render_preview(action, &ctx);
+    // trust chain — not a device-verified display. The verified wallet-delta
+    // section comes from the built PSET (LWK unblinds the wallet's own outputs),
+    // so it reflects the real selected inputs, change, and fee.
+    // Fee from the built PSET's explicit fee output — available whenever a PSET was
+    // built, so change amounts stay exact even if get_details can't unblind below.
+    let preview_fee = signed_pset.as_ref().map(crate::prepare::pset_fee);
+    let wallet_delta = match (&signed_pset, &wollet_opt) {
+        (Some(pset), Some(wollet)) => match wollet.get_details(pset) {
+            Ok(details) => Some(preview::WalletDelta {
+                fee_sat: details.balance.fee,
+                balances: details
+                    .balance
+                    .balances
+                    .iter()
+                    .map(|(asset, units)| (asset.to_string(), *units))
+                    .collect(),
+            }),
+            Err(e) => {
+                println!("  {} Could not compute verified wallet delta for preview: {e}", style("[warn]").yellow());
+                None
+            }
+        },
+        _ => None,
+    };
+    preview::render_preview(action, &ctx, preview_fee, wallet_delta.as_ref());
 
     println!();
     println!("{}", style("=== Ready to broadcast ===").bold().cyan());
@@ -2771,7 +2884,7 @@ pub fn run(
                                 // Record which instance file this contract belongs to: the
                                 // just-written output for constructors, else the loaded input.
                                 let recorded_instance = if action.is_constructor || action.deploy {
-                                    Some(effective_instance_out)
+                                    Some(effective_instance_out.as_path())
                                 } else {
                                     instance_in_path
                                 };
@@ -2830,14 +2943,14 @@ pub fn run(
                                         });
                                     }
                                 }
-                                match new_state.write(effective_state_out) {
+                                match new_state.write(&effective_state_out) {
                                     Ok(()) => {
                                         println!(
                                             "  {} State written:    {}",
                                             style("✓").green(),
                                             effective_state_out.display()
                                         );
-                                        let hist_path = history_path(effective_state_out);
+                                        let hist_path = history_path(&history_seed);
                                         let entry = HistoryEntry {
                                             action: action_name.to_string(),
                                             txid: txid.clone(),
@@ -2960,8 +3073,20 @@ fn select_input(
     network: Option<ElementsNetwork>,
     ctx: &ExecutionContext,
 ) -> Result<ResolvedInput> {
+    // Protocol/covenant inputs are never invented. Reaching here means every
+    // resolution source came up empty (--input override, instance.provided_inputs,
+    // and the state file), so fail loudly with the fix rather than fabricating a UTXO.
     if !input.is_wallet_source() {
-        return prompt::prompt_input_selection(input);
+        let utxo_type = input.utxo_type_name().unwrap_or_else(|| "[complex]".to_string());
+        anyhow::bail!(
+            "Input '{id}' (utxo_type '{utxo_type}') could not be resolved: it was not found in \
+             --input, the instance's provided_inputs, or the state file.\n\
+             Provide its outpoint explicitly:\n    \
+             --input {id}=<txid>:<vout>\n\
+             or pass a state file that contains it:\n    \
+             --state <contract>.state.N.json",
+            id = input.id,
+        );
     }
 
     if manual_inputs {
@@ -3846,6 +3971,7 @@ pub fn run_headless(
         instance_path,          // instance_out_path (read-only methods; unused)
         Some(&state_path),      // state_in_path
         Some(&state_path),      // state_out_path
+        &std::collections::HashMap::new(), // provided_inputs (none in headless)
         wallet_path,
         data_dir,
         false,        // manual_inputs
@@ -3879,6 +4005,28 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use crate::manifest::{FieldValue, InstanceCreate};
+
+    #[test]
+    fn outpoint_override_parses_txid_vout() {
+        let ov = OutpointOverride::parse_outpoint(
+            "fd6c7a7b01c6dee573081c8c69587eefd79df15a833a61e67a6607449418ac90:1",
+        )
+        .unwrap();
+        assert_eq!(ov.txid, "fd6c7a7b01c6dee573081c8c69587eefd79df15a833a61e67a6607449418ac90");
+        assert_eq!(ov.vout, 1);
+        assert!(ov.amount_sat.is_none() && ov.asset.is_none());
+    }
+
+    #[test]
+    fn outpoint_override_rejects_bad_forms() {
+        // Missing vout.
+        assert!(OutpointOverride::parse_outpoint("fd6c7a7b").is_err());
+        // Non-numeric vout.
+        assert!(OutpointOverride::parse_outpoint(&format!("{}:x", "a".repeat(64))).is_err());
+        // Wrong-length / non-hex txid.
+        assert!(OutpointOverride::parse_outpoint("zz:0").is_err());
+        assert!(OutpointOverride::parse_outpoint(&format!("{}:0", "a".repeat(63))).is_err());
+    }
 
     /// When the action params handler resolves a `wallet_key` param, it must write
     /// the fresh value into BOTH `params` and `compile_params`.  Without the

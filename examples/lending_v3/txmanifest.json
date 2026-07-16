@@ -659,7 +659,10 @@
               "asset": "instance.FACTORY_ASSET_ID",
               "amount_sat": 1,
               "required_index": 0,
-              "ui": "auth NFT for issuance factory"
+              "ui": {
+                "label": "auth NFT for issuance factory",
+                "role": "auth_nft"
+              }
             },
             {
               "id": "factory_covenant_in",
@@ -688,7 +691,10 @@
                   "instance.BORROWER_NFT_ASSET_ID": "asset"
                 }
               },
-              "ui": "issuance factory covenant (external)"
+              "ui": {
+                "label": "issuance factory covenant",
+                "role": "covenant"
+              }
             },
             {
               "id": "collateral_in",
@@ -709,14 +715,20 @@
                   "instance.LENDER_NFT_ASSET_ID": "asset"
                 }
               },
-              "ui": "collateral to be locked for the the loan"
+              "ui": {
+                "label": "collateral to be locked for the loan",
+                "role": "collateral"
+              }
             },
             {
               "id": "fee_input",
               "description": "Wallet L-BTC UTXO covering the transaction fee.",
               "utxo_source": "wallet",
               "asset": "lbtc",
-              "ui": "input used for paying fees"
+              "ui": {
+                "label": "input used for paying fees",
+                "role": "fee"
+              }
             }
           ],
           "outputs": [
@@ -728,7 +740,10 @@
               "amount_sat": 1,
               "confidential": false,
               "required_index": 0,
-              "ui": "auth NFT for issuance factory (returned)"
+              "ui": {
+                "label": "auth NFT for issuance factory (returned)",
+                "role": "auth_nft"
+              }
             },
             {
               "id": "factory_covenant_out",
@@ -740,7 +755,10 @@
               "amount_sat": 1,
               "confidential": false,
               "required_index": 1,
-              "ui": "issuance factory covenant (external)"
+              "ui": {
+                "label": "issuance factory covenant",
+                "role": "covenant"
+              }
             },
             {
               "id": "borrower_nft_out",
@@ -750,7 +768,10 @@
               "amount_sat": 1,
               "confidential": false,
               "required_index": 2,
-              "ui": "new NFT used for claiming the principal later"
+              "ui": {
+                "label": "new NFT used for claiming the principal later",
+                "role": "borrower_nft"
+              }
             },
             {
               "id": "lender_nft_locked",
@@ -762,7 +783,10 @@
               "amount_sat": 1,
               "confidential": false,
               "required_index": 3,
-              "ui": "newly created NFT to be sent to the lender"
+              "ui": {
+                "label": "newly created NFT to be sent to the lender",
+                "role": "lender_nft"
+              }
             },
             {
               "id": "creation_op_return",
@@ -797,7 +821,13 @@
                 ]
               },
               "required_index": 4,
-              "ui": "data created for the indexer to detect the offer and parse its terms"
+              "ui": {
+                "$comment": "Full structured UI hint (all fields). A bare string is shorthand for just `label`. `role` is a semantic tag; `group` overrides the derived net-effect account heading; `hide: true` drops this leg from the diff entirely.",
+                "label": "data created for the indexer to detect the offer and parse its terms",
+                "role": "protocol_data",
+                "group": "burned / protocol data",
+                "hide": false
+              }
             },
             {
               "id": "lending_collateral_out",
@@ -809,7 +839,10 @@
               "amount_sat": "instance.COLLATERAL_AMOUNT",
               "confidential": false,
               "required_index": 5,
-              "ui": "collateral prelocked in the lending covenant"
+              "ui": {
+                "label": "collateral prelocked in the lending covenant",
+                "role": "collateral"
+              }
             },
             {
               "id": "collateral_change",
@@ -817,7 +850,10 @@
               "destination": "change",
               "asset": "instance.COLLATERAL_ASSET_ID",
               "optional": true,
-              "ui": "change from the collateral, if any"
+              "ui": {
+                "label": "change from the collateral",
+                "role": "change"
+              }
             },
             {
               "id": "fee_change",
@@ -825,7 +861,10 @@
               "destination": "change",
               "asset": "lbtc",
               "optional": true,
-              "ui": "change from paying fees, if any"
+              "ui": {
+                "label": "change from paying fees",
+                "role": "change"
+              }
             }
           ],
           "validations": [],

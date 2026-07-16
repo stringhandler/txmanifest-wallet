@@ -1,0 +1,14 @@
+{
+  "instance": "..\\txmanifest.instance.1.json",
+  "last_action": "CreateFactory",
+  "utxos": [
+    {
+      "utxo_type": "issuance_factory",
+      "utxo_id": "factory_program_out",
+      "txid": "fd6c7a7b01c6dee573081c8c69587eefd79df15a833a61e67a6607449418ac90",
+      "vout": 1,
+      "amount_sat": 1,
+      "asset": "6c7c38dbd33228a4fac33c46d38f0deb1fcf8f27e0279227d7ac868486d1fd18"
+    }
+  ]
+}
