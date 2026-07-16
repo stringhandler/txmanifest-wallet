@@ -691,6 +691,61 @@ mod tests {
             .expect("CreateOffer method")
     }
 
+    /// Every leg of every lending_v3 method must carry a `ui.label` and a `ui.role`.
+    ///
+    /// Without them the run flow identifies an input only by its manifest id — `active_offer_in`
+    /// tells a signer nothing about what is being spent. This guards the whole surface rather
+    /// than one action, so a leg added later cannot quietly ship label-less.
+    #[test]
+    fn every_lending_v3_leg_declares_a_label_and_role() {
+        let src = include_str!("../../examples/lending_v3/txmanifest.json");
+        let manifest: Manifest = serde_json::from_str(src).expect("parse example manifest");
+
+        let mut missing: Vec<String> = Vec::new();
+        for (cname, class) in manifest.classes.as_ref().expect("classes") {
+            for (mname, method) in &class.methods {
+                // A one-line summary of intent, shown as the first clear-signing screen.
+                if method.ui.as_ref().and_then(|u| u.action.as_deref()).is_none() {
+                    missing.push(format!("{cname}.{mname}: no ui.action summary"));
+                }
+                for i in method.inputs.iter().flatten() {
+                    if i.ui_label().is_none() {
+                        missing.push(format!("{cname}.{mname}.inputs.{}: no ui.label", i.id));
+                    }
+                    if i.ui_role().is_none() {
+                        missing.push(format!("{cname}.{mname}.inputs.{}: no ui.role", i.id));
+                    }
+                }
+                for o in method.outputs.iter().flatten() {
+                    if o.ui_label().is_none() {
+                        missing.push(format!("{cname}.{mname}.outputs.{}: no ui.label", o.id));
+                    }
+                    if o.ui_role().is_none() {
+                        missing.push(format!("{cname}.{mname}.outputs.{}: no ui.role", o.id));
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "lending_v3 legs missing UI descriptors:\n  {}", missing.join("\n  "));
+    }
+
+    /// The role is the machine-readable half of the hint and was declared-but-never-read until
+    /// the run flow and `describe` started rendering it. Pin the accessor to the detailed form.
+    #[test]
+    fn ui_role_reads_detail_form_only() {
+        use crate::manifest::UiSpec;
+        let detail: UiSpec = serde_json::from_value(
+            serde_json::json!({ "label": "the live loan", "role": "covenant" })
+        ).unwrap();
+        assert_eq!(detail.label(), Some("the live loan"));
+        assert_eq!(detail.role(), Some("covenant"));
+
+        // The bare-string shorthand carries a label and no role.
+        let bare: UiSpec = serde_json::from_value(serde_json::json!("just a label")).unwrap();
+        assert_eq!(bare.label(), Some("just a label"));
+        assert_eq!(bare.role(), None);
+    }
+
     #[test]
     fn interpolates_action_summary_with_symbols() {
         let (manifest, ctx) = create_offer_ctx();

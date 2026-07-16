@@ -234,6 +234,10 @@
                 "set": {
                   "instance.FACTORY_ASSET_ID": "asset"
                 }
+              },
+              "ui": {
+                "label": "the L-BTC input that mints the factory asset — its outpoint is what gives the factory its identity",
+                "role": "issuance"
               }
             }
           ],
@@ -245,7 +249,11 @@
               "asset": "instance.FACTORY_ASSET_ID",
               "amount_sat": 1,
               "confidential": false,
-              "required_index": 0
+              "required_index": 0,
+              "ui": {
+                "label": "your factory auth NFT — keep it, it is what lets you mint offers from this factory",
+                "role": "auth_nft"
+              }
             },
             {
               "id": "factory_program_out",
@@ -256,7 +264,11 @@
               "asset": "instance.FACTORY_ASSET_ID",
               "amount_sat": 1,
               "confidential": false,
-              "required_index": 1
+              "required_index": 1,
+              "ui": {
+                "label": "the factory covenant itself — spent and recreated every time you mint an offer",
+                "role": "covenant"
+              }
             },
             {
               "id": "creation_op_return",
@@ -281,17 +293,29 @@
                   }
                 ]
               },
-              "required_index": 2
+              "required_index": 2,
+              "ui": {
+                "label": "data telling the indexer this factory exists, and what parameters it was built with",
+                "role": "protocol_data",
+                "group": "burned / protocol data"
+              }
             },
             {
               "id": "fee_change",
               "description": "L-BTC change back to the wallet.",
               "destination": "change",
               "asset": "lbtc",
-              "optional": true
+              "optional": true,
+              "ui": {
+                "label": "change from paying fees",
+                "role": "change"
+              }
             }
           ],
-          "validations": []
+          "validations": [],
+          "ui": {
+            "action": "create a reusable issuance factory — the minter you will create lending offers from"
+          }
         }
       }
     },
@@ -935,6 +959,10 @@
                   "value": "Left(Left(()))",
                   "description": "OfferAcceptance (PATH::Left(Left(())))."
                 }
+              },
+              "ui": {
+                "label": "the open offer you are accepting — the covenant holding the borrower's collateral",
+                "role": "covenant"
               }
             },
             {
@@ -953,6 +981,10 @@
                   "value": "0",
                   "description": "Index of the pending-offer covenant input this ScriptAuth is bound to (input 0)."
                 }
+              },
+              "ui": {
+                "label": "the lender NFT, unlocked from escrow — it is the claim on this loan",
+                "role": "lender_nft"
               }
             },
             {
@@ -963,13 +995,21 @@
               "amount_sat": {
                 "min_amount": "instance.PRINCIPAL_AMOUNT"
               },
-              "required_index": 2
+              "required_index": 2,
+              "ui": {
+                "label": "the principal you are lending",
+                "role": "principal"
+              }
             },
             {
               "id": "fee_input",
               "description": "Wallet L-BTC UTXO covering the transaction fee.",
               "utxo_source": "wallet",
-              "asset": "lbtc"
+              "asset": "lbtc",
+              "ui": {
+                "label": "input used for paying fees",
+                "role": "fee"
+              }
             }
           ],
           "outputs": [
@@ -982,7 +1022,11 @@
               "asset": "instance.COLLATERAL_ASSET_ID",
               "amount_sat": "instance.COLLATERAL_AMOUNT",
               "confidential": false,
-              "required_index": 0
+              "required_index": 0,
+              "ui": {
+                "label": "the loan, now live — still holding the borrower's collateral until they repay",
+                "role": "covenant"
+              }
             },
             {
               "id": "principal_out",
@@ -993,7 +1037,11 @@
               "asset": "instance.PRINCIPAL_ASSET_ID",
               "amount_sat": "instance.PRINCIPAL_AMOUNT",
               "confidential": false,
-              "required_index": 1
+              "required_index": 1,
+              "ui": {
+                "label": "the principal, locked where only the borrower can claim it",
+                "role": "principal"
+              }
             },
             {
               "id": "lender_nft_out",
@@ -1002,24 +1050,39 @@
               "asset": "instance.LENDER_NFT_ASSET_ID",
               "amount_sat": 1,
               "confidential": false,
-              "required_index": 2
+              "required_index": 2,
+              "ui": {
+                "label": "your lender NFT — keep it, it is how you collect the repayment",
+                "role": "lender_nft"
+              }
             },
             {
               "id": "principal_change",
               "description": "Principal-asset change back to the lender.",
               "destination": "change",
               "asset": "instance.PRINCIPAL_ASSET_ID",
-              "optional": true
+              "optional": true,
+              "ui": {
+                "label": "change from the principal",
+                "role": "change"
+              }
             },
             {
               "id": "fee_change",
               "description": "L-BTC change back to the lender.",
               "destination": "change",
               "asset": "lbtc",
-              "optional": true
+              "optional": true,
+              "ui": {
+                "label": "change from paying fees",
+                "role": "change"
+              }
             }
           ],
-          "validations": []
+          "validations": [],
+          "ui": {
+            "action": "lend {instance.PRINCIPAL_AMOUNT} {instance.PRINCIPAL_ASSET_ID:symbol} against {instance.COLLATERAL_AMOUNT} {instance.COLLATERAL_ASSET_ID:symbol} of collateral"
+          }
         },
         "CancelOffer": {
           "description": "The borrower withdraws a pending offer before activation (offer_open → cancelled). Spends the pending lending covenant (in[0], Cancel witness Left(Right())) and the lender NFT from its ScriptAuth (in[1]) and the borrower NFT from the wallet (in[2]); burns both NFTs to OP_RETURN (out[0] lender, out[1] borrower — index-fixed by the covenant) and returns the collateral to the borrower (out[2]). Mirrors LendingOffer::attach_cancellation. The covenant only checks each NFT lands on an OP_RETURN, so data-less burns suffice.",
@@ -1040,6 +1103,10 @@
                   "value": "Left(Right(()))",
                   "description": "OfferCancellation (PATH::Left(Right(())))."
                 }
+              },
+              "ui": {
+                "label": "your open offer — the covenant holding your collateral",
+                "role": "covenant"
               }
             },
             {
@@ -1058,6 +1125,10 @@
                   "value": "0",
                   "description": "The pending-offer covenant input this ScriptAuth is bound to (input 0)."
                 }
+              },
+              "ui": {
+                "label": "the lender NFT, unlocked from escrow — destroyed below, since nobody took the offer",
+                "role": "lender_nft"
               }
             },
             {
@@ -1066,13 +1137,21 @@
               "utxo_source": "wallet",
               "asset": "instance.BORROWER_NFT_ASSET_ID",
               "amount_sat": 1,
-              "required_index": 2
+              "required_index": 2,
+              "ui": {
+                "label": "your borrower NFT — destroyed below",
+                "role": "borrower_nft"
+              }
             },
             {
               "id": "fee_input",
               "description": "Wallet L-BTC UTXO covering the transaction fee.",
               "utxo_source": "wallet",
-              "asset": "lbtc"
+              "asset": "lbtc",
+              "ui": {
+                "label": "input used for paying fees",
+                "role": "fee"
+              }
             }
           ],
           "outputs": [
@@ -1084,7 +1163,11 @@
               },
               "asset": "instance.LENDER_NFT_ASSET_ID",
               "amount_sat": 1,
-              "required_index": 0
+              "required_index": 0,
+              "ui": {
+                "label": "lender NFT destroyed — the offer can never be accepted now",
+                "role": "lender_nft"
+              }
             },
             {
               "id": "borrower_nft_burned",
@@ -1094,7 +1177,11 @@
               },
               "asset": "instance.BORROWER_NFT_ASSET_ID",
               "amount_sat": 1,
-              "required_index": 1
+              "required_index": 1,
+              "ui": {
+                "label": "your borrower NFT, destroyed",
+                "role": "borrower_nft"
+              }
             },
             {
               "id": "collateral_returned",
@@ -1103,17 +1190,28 @@
               "asset": "instance.COLLATERAL_ASSET_ID",
               "amount_sat": "instance.COLLATERAL_AMOUNT",
               "confidential": false,
-              "required_index": 2
+              "required_index": 2,
+              "ui": {
+                "label": "your collateral, returned to you",
+                "role": "collateral"
+              }
             },
             {
               "id": "fee_change",
               "description": "L-BTC change back to the borrower.",
               "destination": "change",
               "asset": "lbtc",
-              "optional": true
+              "optional": true,
+              "ui": {
+                "label": "change from paying fees",
+                "role": "change"
+              }
             }
           ],
-          "validations": []
+          "validations": [],
+          "ui": {
+            "action": "cancel your offer and take back the {instance.COLLATERAL_AMOUNT} {instance.COLLATERAL_ASSET_ID:symbol} collateral"
+          }
         },
         "ClaimPrincipal": {
           "ui": {
@@ -1143,6 +1241,10 @@
                   "value": "1",
                   "description": "Index of the output the borrower auth NFT is preserved at (output 1)."
                 }
+              },
+              "ui": {
+                "label": "the covenant holding your borrowed funds, created when the lender accepted",
+                "role": "covenant"
               }
             },
             {
@@ -1151,13 +1253,21 @@
               "utxo_source": "wallet",
               "asset": "instance.BORROWER_NFT_ASSET_ID",
               "amount_sat": 1,
-              "required_index": 1
+              "required_index": 1,
+              "ui": {
+                "label": "your borrower NFT, proving the loan is yours — returned to you below",
+                "role": "borrower_nft"
+              }
             },
             {
               "id": "fee_input",
               "description": "Wallet L-BTC UTXO covering the transaction fee.",
               "utxo_source": "wallet",
-              "asset": "lbtc"
+              "asset": "lbtc",
+              "ui": {
+                "label": "input used for paying fees",
+                "role": "fee"
+              }
             }
           ],
           "outputs": [
@@ -1168,7 +1278,11 @@
               "asset": "instance.PRINCIPAL_ASSET_ID",
               "amount_sat": "instance.PRINCIPAL_AMOUNT",
               "confidential": false,
-              "required_index": 0
+              "required_index": 0,
+              "ui": {
+                "label": "the borrowed funds, released to you",
+                "role": "principal"
+              }
             },
             {
               "id": "borrower_nft_out",
@@ -1177,14 +1291,22 @@
               "asset": "instance.BORROWER_NFT_ASSET_ID",
               "amount_sat": 1,
               "confidential": false,
-              "required_index": 1
+              "required_index": 1,
+              "ui": {
+                "label": "your borrower NFT, back in your wallet — you need it to repay later",
+                "role": "borrower_nft"
+              }
             },
             {
               "id": "fee_change",
               "description": "L-BTC change back to the borrower.",
               "destination": "change",
               "asset": "lbtc",
-              "optional": true
+              "optional": true,
+              "ui": {
+                "label": "change from paying fees",
+                "role": "change"
+              }
             }
           ],
           "validations": []
@@ -1215,7 +1337,7 @@
               "amount_sat": 1,
               "required_index": 0,
               "ui": {
-                "label": "borrower NFT proving the loan is yours (burned — the loan is closing)",
+                "label": "your borrower NFT, proving this loan is yours — burned here, which closes the loan",
                 "role": "borrower_nft"
               }
             },
@@ -1237,7 +1359,7 @@
                 }
               },
               "ui": {
-                "label": "the active loan, holding your collateral",
+                "label": "the live loan itself — the covenant holding your collateral, created when the lender accepted",
                 "role": "covenant"
               }
             },
@@ -1251,8 +1373,8 @@
               },
               "required_index": 2,
               "ui": {
-                "label": "funds to repay the loan with",
-                "role": "principal"
+                "label": "your funds to repay with — the debt is the principal plus interest",
+                "role": "repayment"
               }
             },
             {
@@ -1277,7 +1399,7 @@
               "amount_sat": 1,
               "required_index": 0,
               "ui": {
-                "label": "borrower NFT destroyed — closes the loan for good",
+                "label": "your borrower NFT, destroyed — this is what closes the loan for good",
                 "role": "borrower_nft",
                 "group": "burned / protocol data"
               }
@@ -1293,7 +1415,7 @@
               "confidential": false,
               "required_index": 1,
               "ui": {
-                "label": "repayment held for the lender to collect",
+                "label": "the lender's repayment, parked for them to collect",
                 "role": "vault"
               }
             },
@@ -1308,7 +1430,7 @@
               "confidential": false,
               "required_index": 2,
               "ui": {
-                "label": "protocol fee (10% of the interest)",
+                "label": "the protocol's fee — 10% of the interest",
                 "role": "vault"
               }
             },
@@ -1321,7 +1443,7 @@
               "confidential": false,
               "required_index": 3,
               "ui": {
-                "label": "your collateral, released",
+                "label": "your collateral, released back to you",
                 "role": "collateral"
               }
             },

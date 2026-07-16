@@ -315,6 +315,15 @@ impl UiSpec {
         }
     }
 
+    /// The semantic role tag (e.g. "collateral", "auth_nft"), if the detailed form set one.
+    /// The bare-label form carries no role.
+    pub fn role(&self) -> Option<&str> {
+        match self {
+            UiSpec::Detail(d) => d.role.as_deref(),
+            UiSpec::Label(_) => None,
+        }
+    }
+
     /// Whether this leg should be omitted from the net-effect diff.
     pub fn hidden(&self) -> bool {
         matches!(self, UiSpec::Detail(d) if d.hide)
@@ -373,6 +382,21 @@ pub struct InlineHook {
 }
 
 impl Input {
+    /// This input's short human-readable label, if it declares one.
+    ///
+    /// Deliberately does NOT fall back to `description`: descriptions are multi-sentence
+    /// prose meant for readers of the manifest, so they would wreck a one-line terminal
+    /// display. Callers that want a guaranteed-present string (the net-effect preview)
+    /// apply their own `description` → `id` fallback.
+    pub fn ui_label(&self) -> Option<&str> {
+        self.ui.as_ref().and_then(|u| u.label())
+    }
+
+    /// This input's semantic role tag (e.g. "collateral", "covenant"), if declared.
+    pub fn ui_role(&self) -> Option<&str> {
+        self.ui.as_ref().and_then(|u| u.role())
+    }
+
     /// Returns true when this is a wallet-sourced input.
     pub fn is_wallet_source(&self) -> bool {
         matches!(&self.utxo_source, serde_json::Value::String(s) if s == "wallet")
@@ -417,6 +441,17 @@ pub struct Output {
 }
 
 impl Output {
+    /// This output's short human-readable label, if it declares one.
+    /// See [`Input::ui_label`] for why `description` is not a fallback here.
+    pub fn ui_label(&self) -> Option<&str> {
+        self.ui.as_ref().and_then(|u| u.label())
+    }
+
+    /// This output's semantic role tag (e.g. "change", "vault"), if declared.
+    pub fn ui_role(&self) -> Option<&str> {
+        self.ui.as_ref().and_then(|u| u.role())
+    }
+
     /// Human-readable summary of the destination.
     pub fn destination_summary(&self) -> String {
         match &self.destination {

@@ -287,7 +287,10 @@ fn print_inputs(inputs: &Option<Vec<Input>>) {
         };
         let asset = inp.asset.as_ref().map(|a| format!("  asset={}", val_str(a))).unwrap_or_default();
         let amount = inp.amount_sat.as_ref().map(|a| format!("  amount={}", val_str(a))).unwrap_or_default();
-        println!("    {} ← {}{}{}", style(&inp.id).green(), src, style(asset).dim(), style(amount).dim());
+        println!("    {}{} ← {}{}{}", style(&inp.id).green(), role_tag(inp.ui_role()), src, style(asset).dim(), style(amount).dim());
+        if let Some(label) = inp.ui_label() {
+            println!("        {}", style(label).dim());
+        }
         if let Some(Value::Object(m)) = &inp.witnesses {
             if !m.is_empty() {
                 let keys: Vec<&str> = m.keys().map(String::as_str).collect();
@@ -315,14 +318,24 @@ fn print_outputs(outputs: &Option<Vec<Output>>) {
         let asset = o.asset.as_ref().map(|a| format!("  asset={}", val_str(a))).unwrap_or_default();
         let opt = if o.optional.unwrap_or(false) { "  (optional)" } else { "" };
         println!(
-            "    {} → {}{}{}{}",
+            "    {}{} → {}{}{}{}",
             style(&o.id).green(),
+            role_tag(o.ui_role()),
             o.destination_summary(),
             style(amount).dim(),
             style(asset).dim(),
             style(opt).dim(),
         );
+        if let Some(label) = o.ui_label() {
+            println!("        {}", style(label).dim());
+        }
     }
+}
+
+/// Render a `ui.role` as an inline `[tag]`, or nothing when the leg declares no role.
+fn role_tag(role: Option<&str>) -> String {
+    role.map(|r| format!(" {}", style(format!("[{r}]")).cyan()))
+        .unwrap_or_default()
 }
 
 fn print_witnesses(label: &str, witnesses: &Option<Value>) {

@@ -615,6 +615,7 @@ pub fn run(
 
     if let Some(inputs) = &action.inputs {
         for input in inputs {
+            print_input_intent(input);
             // Resolution priority: CLI/file override → instance.provided_inputs →
             // state file (by utxo_type) → auto-select / prompt.
             let resolved = if let Some(ov) = provided_inputs.get(&input.id) {
@@ -3068,6 +3069,33 @@ fn resolve_asset_id(
     }
 }
 
+/// Announce what an input *is* — its `ui.label` and `ui.role` — before resolution is attempted.
+///
+/// The resolution lines that follow identify an input only by its manifest id (`active_offer_in`),
+/// which says nothing about the thing being spent. Printed ahead of resolution so the intent is on
+/// screen even when resolution then fails. Silent for inputs with no declared label, so manifests
+/// that carry no UI hints log exactly as before.
+fn print_input_intent(input: &Input) {
+    let Some(label) = input.ui_label() else { return };
+    // Separator is ':' rather than a dash — labels commonly contain an em-dash of their own,
+    // and two dashes on one line read as a single run-on sentence.
+    match input.ui_role() {
+        Some(role) => println!(
+            "  {} {}{} {}",
+            style(&input.id).bold(),
+            style(format!("[{role}]")).cyan(),
+            style(":").dim(),
+            style(label).dim(),
+        ),
+        None => println!(
+            "  {}{} {}",
+            style(&input.id).bold(),
+            style(":").dim(),
+            style(label).dim(),
+        ),
+    }
+}
+
 fn select_input(
     input: &Input,
     available: &[lwk_wollet::WalletTxOut],
@@ -3082,9 +3110,18 @@ fn select_input(
     // and the state file), so fail loudly with the fix rather than fabricating a UTXO.
     if !input.is_wallet_source() {
         let utxo_type = input.utxo_type_name().unwrap_or_else(|| "[complex]".to_string());
+        // Say what the input IS, not just its id — this error is the one place a covenant input's
+        // absence surfaces, and "active_offer_in could not be resolved" alone gives the reader
+        // nothing to act on. Broken across lines: the label is a sentence, so inlining it into the
+        // headline ran the id, the prose and the utxo_type together.
+        let what = input
+            .ui_label()
+            .map(|l| format!("\n  what it is : {l}"))
+            .unwrap_or_default();
         anyhow::bail!(
-            "Input '{id}' (utxo_type '{utxo_type}') could not be resolved: it was not found in \
-             --input, the instance's provided_inputs, or the state file.\n\
+            "Input '{id}' could not be resolved.{what}\n  \
+             utxo_type  : {utxo_type}\n\
+             It was not found in --input, the instance's provided_inputs, or the state file.\n\
              Provide its outpoint explicitly:\n    \
              --input {id}=<txid>:<vout>\n\
              or pass a state file that contains it:\n    \
