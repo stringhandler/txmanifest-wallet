@@ -16,11 +16,40 @@ use crate::manifest::{
 };
 
 /// Entry point: explore the contract interactively, or dump it if non-interactive.
-pub fn describe(manifest: &Manifest) -> Result<()> {
+///
+/// When `action` names a standalone action or a class method, its docs are printed
+/// directly and no menu is shown.
+pub fn describe(manifest: &Manifest, action: Option<&str>) -> Result<()> {
+    if let Some(name) = action {
+        return describe_action(manifest, name);
+    }
     if !Term::stdout().is_term() {
         return dump_all(manifest);
     }
     main_menu(manifest)
+}
+
+/// Print one action's docs: a standalone action, or a `Class.method`.
+fn describe_action(manifest: &Manifest, name: &str) -> Result<()> {
+    if let Some(action) = manifest.actions.get(name) {
+        print_action(name, action);
+        return Ok(());
+    }
+    if let Some((class_id, _class_def, method)) = manifest.find_class_and_method(name) {
+        print_action(&format!("{class_id}.{name}"), method);
+        return Ok(());
+    }
+
+    let mut available: Vec<String> = manifest.actions.keys().cloned().collect();
+    if let Some(classes) = &manifest.classes {
+        for (class_id, cls) in classes {
+            available.extend(cls.methods.keys().map(|m| format!("{class_id}.{m}")));
+        }
+    }
+    anyhow::bail!(
+        "Action '{name}' not found in this manifest. Available: {}",
+        available.join(", ")
+    )
 }
 
 /// What a top-level menu entry maps to.

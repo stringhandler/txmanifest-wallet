@@ -1072,6 +1072,9 @@
           "validations": []
         },
         "ClaimPrincipal": {
+          "ui": {
+            "action": "claim the loan principal of {instance.PRINCIPAL_AMOUNT} {instance.PRINCIPAL_ASSET_ID:symbol}"
+          },
           "description": "The borrower withdraws the loan principal from the AssetAuth(borrower_nft) covenant created at activation (AcceptOffer out[1]). Spends that covenant (in[0]) while presenting the borrower NFT (in[1], INPUT_ASSET_INDEX=1) and preserving it (out[1], OUTPUT_ASSET_INDEX=1); the covenant only checks the auth NFT is present and re-output (WITH_ASSET_BURN=false), so the principal (out[0]) flows freely to the borrower. Mirrors AssetAuth::attach_unlocking (unlocks_without_burn_with_one_explicit_output). The offer stays active (loan_active → loan_active); collateral is unaffected.",
           "inputs": [
             {

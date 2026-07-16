@@ -128,6 +128,9 @@ enum Commands {
     Describe {
         /// Path to the manifest (txmanifest.json) file
         manifest_file: PathBuf,
+        /// Optional action or class method (e.g. ClaimPrincipal) to show the docs for
+        /// directly, skipping the menu.
+        action_name: Option<String>,
     },
 
     /// Create a new wallet and save it to a JSON file
@@ -649,12 +652,12 @@ fn cmd_validate(manifest_path: &Path) -> Result<()> {
     }
 }
 
-fn cmd_describe(manifest_path: &Path) -> Result<()> {
+fn cmd_describe(manifest_path: &Path, action_name: Option<&str>) -> Result<()> {
     let raw = std::fs::read_to_string(manifest_path)
         .with_context(|| format!("Cannot read manifest file: {}", manifest_path.display()))?;
     let manifest: manifest::Manifest = serde_json::from_str(&raw)
         .with_context(|| format!("Cannot parse manifest file: {}", manifest_path.display()))?;
-    describe::describe(&manifest)
+    describe::describe(&manifest, action_name)
 }
 
 fn main() -> Result<()> {
@@ -715,7 +718,9 @@ fn main() -> Result<()> {
         }
 
         Commands::Validate { manifest_file } => cmd_validate(&manifest_file),
-        Commands::Describe { manifest_file } => cmd_describe(&manifest_file),
+        Commands::Describe { manifest_file, action_name } => {
+            cmd_describe(&manifest_file, action_name.as_deref())
+        }
         Commands::Config { key, value } => cmd_config(key.as_deref(), value.as_deref()),
         Commands::Prepare { manifest_file, action_name, wallet, esplora, data_dir, split_amount } =>
             cmd_prepare(&manifest_file, &action_name, &wallet, esplora.as_deref(), data_dir.as_deref(), split_amount),

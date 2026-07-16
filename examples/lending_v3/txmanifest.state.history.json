@@ -101,6 +101,11 @@
           "asset": "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49"
         }
       ]
+    },
+    {
+      "action": "ClaimPrincipal",
+      "txid": "b3630b9e1722f66127818bd4733f7a95841a471f09028a4ad7971e9cc06329c2",
+      "utxos": []
     }
   ]
 }

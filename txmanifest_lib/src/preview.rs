@@ -1,14 +1,18 @@
 //! Pre-broadcast "clear signing" preview.
 //!
-//! Renders two confirmation screens from the manifest's author-supplied `ui`
+//! Renders three confirmation screens from the manifest's author-supplied `ui`
 //! metadata, right before the broadcast prompt:
 //!
-//!   1. **Action summary** — the one-line intent (`action.ui.action`), with
+//!   1. **Review action** — the one-line intent (`action.ui.action`), with
 //!      `{ref}` / `{ref:symbol}` interpolation against the execution context.
-//!   2. **Net-effect diff** — every input (a debit) and output (a credit),
+//!   2. **Net effect** — the bottom line: what your wallet actually gains or
+//!      loses, netted per asset. Assets that merely round-trip (an auth NFT
+//!      spent and re-output) net to zero and are omitted, so a claim reads as
+//!      just "− fee, + principal".
+//!   3. **Detailed effect** — every input (a debit) and output (a credit),
 //!      grouped by the account it touches (your wallet / a covenant / an
-//!      external address / burned-or-data), with signed amounts and the asset
-//!      symbol.
+//!      external address / burned-or-data) and then by asset, so an asset
+//!      leaving and returning reads together.
 //!
 //! This mirrors as closely as a host terminal can what a Ledger/Jade would show
 //! for the same transaction. It is NOT a device trust boundary: the strings come
@@ -168,15 +172,30 @@ fn format_signed(units: i64, meta: &AssetMeta) -> (bool, String) {
 // Screen 2 — net-effect diff
 // ---------------------------------------------------------------------------
 
+/// The bucket heading for the user's own wallet — the account the net summary is
+/// computed over.
+const WALLET_BUCKET: &str = "your wallet";
+
 /// One signed movement line within an account bucket.
 struct Leg {
     credit: bool,
-    /// Pre-formatted `amount symbol` string, or `None` for an auto/optional amount.
-    amount: Option<String>,
-    /// Asset display symbol, used to group same-asset legs together. `None` for
+    /// Amount in base units, or `None` when not known (auto/optional with no fee).
+    units: Option<u64>,
+    /// Asset display symbol, used to group and net same-asset legs. `None` for
     /// amount-less legs (e.g. an OP_RETURN data line).
     asset: Option<String>,
+    /// Decimal places for `units`.
+    precision: u8,
     label: String,
+}
+
+impl Leg {
+    /// The `amount symbol` display string, when the amount is known.
+    fn amount_text(&self) -> Option<String> {
+        let units = self.units?;
+        let sym = self.asset.as_deref()?;
+        Some(format!("{} {sym}", format_amount(units, self.precision)))
+    }
 }
 
 /// An account and the movements that touch it, in author order.
@@ -191,59 +210,124 @@ struct Bucket {
 /// it lets change outputs show exact values and is available whenever a PSET was
 /// built, independent of whether `wallet` could be computed.
 ///
-/// `wallet` is the authoritative wallet balance change from `Wollet::get_details`,
-/// shown as a "verified" section under the manifest-driven diff; pass `None` when
-/// it couldn't be computed (e.g. a dry run, or the wallet can't unblind the PSET).
+/// `wallet` is the authoritative wallet balance change from `Wollet::get_details`.
+/// When present it is the source of the "Net effect" summary; otherwise that
+/// summary is netted from the legs. Pass `None` when it couldn't be computed
+/// (e.g. a dry run, or the wallet can't unblind the PSET).
 pub fn render_preview(
     action: &Action,
     ctx: &ExecutionContext,
     fee_sat: Option<u64>,
     wallet: Option<&WalletDelta>,
 ) {
-    // -- Screen 1 --------------------------------------------------------
+    // -- Screen 1 — what this action does --------------------------------
     if let Some(summary) = action.ui.as_ref().and_then(|u| u.action.as_deref()) {
         println!();
         println!("{}", style("=== Review action ===").bold().cyan());
         println!("  {}", style(interpolate(summary, ctx)).bold());
     }
 
-    // -- Screen 2 --------------------------------------------------------
     // Exact change needs the fee (change = inputs − explicit outputs − fee),
     // read straight from the PSET's fee output.
     let buckets = build_net_effect(action, ctx, fee_sat);
+
+    // -- Screen 2 — the bottom line: what your wallet actually gains/loses -
+    render_net_summary(&buckets, fee_sat, wallet);
+
+    // -- Screen 3 — every individual movement ----------------------------
     if !buckets.is_empty() {
         println!();
-        println!("{}", style("=== Net effect ===").bold().cyan());
+        println!("{}", style("=== Detailed effect ===").bold().cyan());
         for bucket in &buckets {
             println!("  {}", style(format!("({})", bucket.heading)).bold());
             for leg in &bucket.legs {
                 let sign = if leg.credit { style("+").green() } else { style("−").red() };
-                match &leg.amount {
+                match leg.amount_text() {
                     Some(a) => println!("    {sign} {}  {}", style(a).yellow(), style(&leg.label).dim()),
                     None => println!("    {sign} {}", style(&leg.label).dim()),
                 }
             }
         }
     }
+}
 
-    // -- Verified wallet delta (exact, from the signed PSET) -------------
+/// Print the wallet's net position change, one line per asset, zeros omitted.
+///
+/// An asset that merely round-trips (e.g. an auth NFT spent and re-output) nets to
+/// zero and is deliberately not shown — the point of this screen is what actually
+/// leaves or joins the wallet. Prefers the verified `WalletDelta`; falls back to
+/// netting the wallet bucket's legs when it isn't available.
+fn render_net_summary(buckets: &[Bucket], fee_sat: Option<u64>, wallet: Option<&WalletDelta>) {
+    let nets = wallet_nets(buckets, wallet);
+
+    println!();
+    println!("{}", style("=== Net effect ===").bold().cyan());
+    if nets.is_empty() {
+        println!("  {}", style("no net change to your wallet").dim());
+        return;
+    }
+    for (meta, units, exact) in &nets {
+        let (credit, text) = format_signed(*units, meta);
+        let sign = if credit { style("+").green() } else { style("−").red() };
+        let approx = if *exact { "" } else { "≈ " };
+        println!("    {sign} {approx}{}{}", style(&text).yellow(), style(fee_note(meta, *units, fee_sat)).dim());
+    }
+}
+
+/// The wallet's net position change per asset: `(asset, signed base units, exact?)`.
+///
+/// Assets that net to zero (a pure round-trip) are omitted. Prefers the verified
+/// `WalletDelta`; otherwise nets the wallet bucket's legs, marking an asset inexact
+/// if any of its legs had an unknown amount.
+fn wallet_nets(buckets: &[Bucket], wallet: Option<&WalletDelta>) -> Vec<(AssetMeta, i64, bool)> {
+    // Authoritative: already netted per asset by the wallet.
     if let Some(delta) = wallet {
-        println!();
-        println!("{}", style("=== Wallet balance change (verified) ===").bold().cyan());
-        if delta.balances.is_empty() {
-            println!("  {}", style("no net change to your wallet").dim());
+        return delta
+            .balances
+            .iter()
+            .filter(|(_, units)| *units != 0)
+            .map(|(asset, units)| (lookup_asset(asset), *units, true))
+            .collect();
+    }
+
+    let Some(bucket) = buckets.iter().find(|b| b.heading == WALLET_BUCKET) else {
+        return Vec::new();
+    };
+    let mut order: Vec<String> = Vec::new();
+    let mut acc: std::collections::HashMap<String, (u8, i64, bool)> = Default::default();
+    for leg in &bucket.legs {
+        let Some(sym) = leg.asset.clone() else { continue };
+        let e = acc.entry(sym.clone()).or_insert_with(|| {
+            order.push(sym.clone());
+            (leg.precision, 0, true)
+        });
+        match leg.units {
+            Some(n) => e.1 += if leg.credit { n as i64 } else { -(n as i64) },
+            // An unknown amount makes this asset's net inexact.
+            None => e.2 = false,
         }
-        for (asset, units) in &delta.balances {
-            let meta = lookup_asset(asset);
-            let (credit, text) = format_signed(*units, &meta);
-            let sign = if credit { style("+").green() } else { style("−").red() };
-            let note = if meta.symbol == "tL-BTC" && delta.fee_sat > 0 {
-                style(format!("  (incl. {} tL-BTC network fee)", format_amount(delta.fee_sat, meta.precision))).dim()
-            } else {
-                style(String::new()).dim()
-            };
-            println!("    {sign} {}{note}", style(text).yellow());
-        }
+    }
+    order
+        .into_iter()
+        .filter_map(|sym| {
+            let (prec, units, exact) = acc[&sym];
+            // Drop assets that merely round-trip, but keep inexact ones visible.
+            (units != 0 || !exact).then(|| (AssetMeta { symbol: sym, precision: prec }, units, exact))
+        })
+        .collect()
+}
+
+/// Annotate the policy-asset line with the network fee: `(network fee)` when the
+/// whole net *is* the fee, else `(incl. N tL-BTC network fee)`.
+fn fee_note(meta: &AssetMeta, units: i64, fee_sat: Option<u64>) -> String {
+    let Some(fee) = fee_sat.filter(|f| *f > 0) else { return String::new() };
+    if meta.symbol != POLICY_SYMBOL || units >= 0 {
+        return String::new();
+    }
+    if units.unsigned_abs() == fee {
+        "  (network fee)".to_string()
+    } else {
+        format!("  (incl. {} {POLICY_SYMBOL} network fee)", format_amount(fee, meta.precision))
     }
 }
 
@@ -322,8 +406,9 @@ fn build_net_effect(action: &Action, ctx: &ExecutionContext, fee_sat: Option<u64
             heading,
             Leg {
                 credit: false,
+                units: amt.as_ref().map(|(n, _, _)| *n),
                 asset: amt.as_ref().map(|(_, sym, _)| sym.clone()),
-                amount: amt.map(|(n, sym, prec)| format!("{} {sym}", format_amount(n, prec))),
+                precision: amt.as_ref().map(|(_, _, p)| *p).unwrap_or(0),
                 label: input_label(input),
             },
         );
@@ -360,17 +445,18 @@ fn build_net_effect(action: &Action, ctx: &ExecutionContext, fee_sat: Option<u64
                 Some(0) => continue,
                 Some(n) => push(
                     heading,
-                    Leg {
-                        credit: true,
-                        amount: Some(format!("{} {sym}", format_amount(n, prec))),
-                        asset: Some(sym),
-                        label,
-                    },
+                    Leg { credit: true, units: Some(n), asset: Some(sym), precision: prec, label },
                 ),
                 // Fee unknown (e.g. dry run) — fall back to the placeholder label.
                 None => push(
                     heading,
-                    Leg { credit: true, amount: None, asset: Some(sym), label: output_label(output) },
+                    Leg {
+                        credit: true,
+                        units: None,
+                        asset: Some(sym),
+                        precision: prec,
+                        label: output_label(output),
+                    },
                 ),
             }
             continue;
@@ -381,8 +467,9 @@ fn build_net_effect(action: &Action, ctx: &ExecutionContext, fee_sat: Option<u64
             heading,
             Leg {
                 credit: true,
+                units: amt.as_ref().map(|(n, _, _)| *n),
                 asset: amt.as_ref().map(|(_, sym, _)| sym.clone()),
-                amount: amt.map(|(n, sym, prec)| format!("{} {sym}", format_amount(n, prec))),
+                precision: amt.as_ref().map(|(_, _, p)| *p).unwrap_or(0),
                 label: output_label(output),
             },
         );
@@ -427,7 +514,7 @@ fn output_asset_symbol(output: &Output, ctx: &ExecutionContext) -> String {
 
 fn input_bucket(input: &Input, _ctx: &ExecutionContext) -> String {
     if input.is_wallet_source() {
-        "your wallet".into()
+        WALLET_BUCKET.into()
     } else if let Some(t) = input.utxo_type_name() {
         format!("covenant: {t}")
     } else {
@@ -437,7 +524,7 @@ fn input_bucket(input: &Input, _ctx: &ExecutionContext) -> String {
 
 fn output_bucket(output: &Output, ctx: &ExecutionContext) -> String {
     match &output.destination {
-        serde_json::Value::String(s) if s == "wallet" || s == "change" => "your wallet".into(),
+        serde_json::Value::String(s) if s == "wallet" || s == "change" => WALLET_BUCKET.into(),
         serde_json::Value::String(other) => {
             // A `params.X` / `instance.X` destination resolves to an address.
             match eval::eval_destination_str(other, ctx) {
@@ -646,7 +733,7 @@ mod tests {
         // The collateral output lands in the lending covenant as a debit-free credit.
         let cov = buckets.iter().find(|b| b.heading == "covenant: lending_collateral").unwrap();
         let collateral_leg = cov.legs.iter().find(|l| l.credit).unwrap();
-        assert_eq!(collateral_leg.amount.as_deref(), Some("0.000034 tL-BTC"));
+        assert_eq!(collateral_leg.amount_text().as_deref(), Some("0.000034 tL-BTC"));
     }
 
     #[test]
@@ -668,14 +755,14 @@ mod tests {
         // fee = 226 sat. change(tL-BTC) = 98_940 − 3_400 (locked) − 226 = 95_314 sat.
         let buckets = build_net_effect(action, &ctx, Some(226));
         let wallet = buckets.iter().find(|b| b.heading == "your wallet").unwrap();
-        let change: Vec<&str> = wallet
+        let change: Vec<String> = wallet
             .legs
             .iter()
             .filter(|l| l.credit && l.label.contains("change"))
-            .filter_map(|l| l.amount.as_deref())
+            .filter_map(|l| l.amount_text())
             .collect();
         // The two per-purpose tL-BTC change legs collapse to one exact line.
-        assert_eq!(change, vec!["0.00095314 tL-BTC"]);
+        assert_eq!(change, vec!["0.00095314 tL-BTC".to_string()]);
         // And no "(if any)" placeholder remains on any change leg.
         assert!(!wallet.legs.iter().any(|l| l.label.contains("if any")));
     }
@@ -718,6 +805,73 @@ mod tests {
         assert_eq!(idxs[1], idxs[0] + 1);
     }
 
+    /// ClaimPrincipal: the borrower NFT is spent and re-output (nets 0), L-BTC nets
+    /// to just the fee, and the principal lands. The summary must show only the
+    /// latter two — a round-tripping asset is noise.
+    #[test]
+    fn wallet_nets_omit_round_trips_and_keep_real_movement() {
+        use crate::context::ResolvedInput;
+        let src = include_str!("../../examples/lending_v3/txmanifest.json");
+        let manifest: Manifest = serde_json::from_str(src).unwrap();
+        let mut ctx = ExecutionContext::new();
+        for (k, v) in [
+            ("PRINCIPAL_AMOUNT", "1000"),
+            ("PRINCIPAL_ASSET_ID", PRINCIPAL_ID),
+            ("BORROWER_NFT_ASSET_ID", "a2f1d6000000000000000000000000000000000000000000000000000000001059"),
+        ] {
+            ctx.set_compile_param(k, v);
+        }
+        for (id, vout, amount, asset) in [
+            ("principal_asset_auth_in", 0u32, 1000u64, PRINCIPAL_ID),
+            ("borrower_nft_in", 1, 1, "a2f1d6000000000000000000000000000000000000000000000000000000001059"),
+            ("fee_input", 2, 92_509, "lbtc"),
+        ] {
+            ctx.set_input(ResolvedInput {
+                id: id.into(), txid: "00".repeat(32), vout,
+                amount_sat: amount, asset: asset.into(), issuance_entropy: None,
+            });
+        }
+        let action = manifest.classes.as_ref().unwrap().get("lending_contract").unwrap()
+            .methods.get("ClaimPrincipal").unwrap();
+        let buckets = build_net_effect(action, &ctx, Some(195));
+        let nets = wallet_nets(&buckets, None);
+
+        let rendered: Vec<(String, i64)> =
+            nets.iter().map(|(m, u, _)| (m.symbol.clone(), *u)).collect();
+        // The NFT round-trip is gone; L-BTC is exactly −fee; principal is +1000.
+        assert_eq!(rendered, vec![("tL-BTC".to_string(), -195), ("tUSD".to_string(), 1000)]);
+        assert!(nets.iter().all(|(_, _, exact)| *exact));
+    }
+
+    #[test]
+    fn fee_note_distinguishes_fee_only_from_partial() {
+        let lbtc = lookup_asset("lbtc");
+        // Net is exactly the fee → it *is* the fee.
+        assert_eq!(fee_note(&lbtc, -195, Some(195)), "  (network fee)");
+        // Net is larger than the fee → fee is only part of it.
+        assert_eq!(
+            fee_note(&lbtc, -3626, Some(226)),
+            "  (incl. 0.00000226 tL-BTC network fee)"
+        );
+        // Non-policy assets and credits get no fee note.
+        assert_eq!(fee_note(&lookup_asset(PRINCIPAL_ID), -1000, Some(195)), "");
+        assert_eq!(fee_note(&lbtc, 500, Some(195)), "");
+        assert_eq!(fee_note(&lbtc, -195, None), "");
+    }
+
+    #[test]
+    fn wallet_nets_prefers_verified_delta() {
+        let delta = WalletDelta {
+            fee_sat: 226,
+            balances: vec![("lbtc".into(), -3626), (PRINCIPAL_ID.into(), 0)],
+        };
+        // Verified source wins and still drops zero-net assets.
+        let nets = wallet_nets(&[], Some(&delta));
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].0.symbol, "tL-BTC");
+        assert_eq!(nets[0].1, -3626);
+    }
+
     #[test]
     fn net_effect_without_fee_falls_back_to_placeholder() {
         use crate::context::ResolvedInput;
@@ -734,6 +888,6 @@ mod tests {
         let buckets = build_net_effect(action, &ctx, None); // fee unknown
         let wallet = buckets.iter().find(|b| b.heading == "your wallet").unwrap();
         // With no fee we cannot be exact, so change stays a labelled placeholder.
-        assert!(wallet.legs.iter().any(|l| l.amount.is_none() && l.label.contains("if any")));
+        assert!(wallet.legs.iter().any(|l| l.units.is_none() && l.label.contains("if any")));
     }
 }
