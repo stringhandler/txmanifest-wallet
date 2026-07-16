@@ -95,11 +95,47 @@ repay/claim via `attach_supplying_with_goal` / vault withdrawal. Their witness +
   - Mirrors `AssetAuth::attach_unlocking` (unlock_success_flows, no burn). Covenant only checks the
     auth NFT is present at in[1] + re-output at out[1]; principal flows freely. Reuses the verified
     `principal_asset_auth` utxo_type (sha256(spk)==PRINCIPAL_OUTPUT_SCRIPT_HASH), so in[0] is anchored.
+- DONE (2026-07-16): **RepayLoan** — full repayment of an untouched active loan
+  (`loan_active → repaid`, unilateral), authored + verified offline (52 pass; `validate` clean):
+  - in[0] borrower NFT (wallet), in[1] `lending_collateral_active` (FullRepayment witness
+    `Right(Left(Right(current_debt)))`), in[2] borrower principal `>= CURRENT_DEBT`, in[3] fee.
+    out[0] burn borrower NFT, out[1] `lender_vault_finalized` (debt − protocol fee),
+    out[2] `protocol_fee_vault_finalized` (10% of interest), out[3] collateral → wallet.
+  - Mirrors `attach_full_repayment` + `attach_vaults` in the **NoRepayments** phase, matching the
+    reference test `full_repayment_succeeds_in_no_repayments_phase` input/output ordering exactly.
+    That phase is the one where `validate_vaults` sees `already_repaid_amount == 0` and CREATES the
+    vaults as plain outputs (`attach_creation`) — so this flow needs **no** AssetAuthVault
+    spend/witness model, which is why it landed ahead of the rest of Repay.
+  - New utxo_types `lender_vault_finalized`, `protocol_fee_vault_finalized` (both
+    `asset_auth_vault.simf`, `IS_ACTIVE=false`, `FINALIZED_VAULT_COV_HASH=ZERO_HASH`; lender burns
+    its keeper NFT, protocol-fee keeper does not).
+  - **Anchored**, despite there being no on-chain repaid-state tx: the covenant enforces
+    `sha256(out[1..2] spk) == FINALIZED_{LENDER,PROTOCOL_FEE}_VAULT_COV_HASH`, and those hashes are
+    part of the create_instance chain that reproduces live offer 43ab4efe's out[5] byte-exactly.
+    Test `lending_v3_repay_loan_vault_outputs_match_covenant_hashes` asserts both vault utxo_types
+    compile to exactly those hashes (mutation-checked: flipping one burn flag fails it), that the
+    split is `100 + 1900 == CURRENT_DEBT(2000)`, and that in[1] is the same active covenant
+    `51202451da2d…ef3eb77` AcceptOffer creates.
+  - Engine: witness `value` strings now resolve context refs (`eval::resolve_witness_refs`) — the
+    FullRepayment branch is the first witness carrying a runtime payload (`instance.CURRENT_DEBT`);
+    previously values were parsed verbatim, so only literals worked.
+  - New class field `ZERO_HASH` (bytes32) + `create_instance` wiring. It exists so the vault
+    utxo_types can reference the zero finalized-hash *by name* and inherit a declared type:
+    inlined as a literal, 64 zero chars are all ASCII digits and
+    `infer_simf_type_from_value` would silently type it `u64`. Added to the example instance files.
 - REMAINING (each needs live/broadcast verification — no on-chain anchor for active/repaid states):
-  - **Repay** (active→repaid): vault-heavy — needs the AssetAuthVault spend/witness model
-    (`asset_auth_vault.simf` + `programs/asset_auth_vault/core.rs`) mapped first; phased by
-    `get_repayment_phase`. Largest remaining piece.
+  - **Repay — partial, and full after a partial** (the other 3 `get_repayment_phase` cases):
+    still vault-heavy. `RepayingOfferFee` / `RepayingPrincipal` take
+    `already_repaid_amount != 0`, which SPENDS the live vaults and tops them up via
+    `attach_supplying_with_goal` → needs the AssetAuthVault supply/final_supply witness model
+    (`asset_auth_vault.simf` PATH `Right(Left|Right((u32,u32,u32,u64)))`) mapped first. Partial
+    repayment also re-commits the covenant at a *reduced* debt, so it needs a
+    `lending_collateral_active` variant whose slot1 is the new debt (the extra_leaves machinery
+    already supports this — it is a per-action storage recompute, cf. task 10).
   - **Liquidate** (active→liquidated): blocked on engine task 12 (absolute nLockTime).
-  - **Vault claim** — lender/protocol withdraw the repaid funds from the AssetAuthVault covenants
-    (comes with the Repay/vault-model work). (Borrower principal claim is DONE above.)
-  Kept in backlog. On-chain verification of Accept/Cancel/ClaimPrincipal folds into the 05/06 testnet run.
+  - **Vault claim** — lender/protocol withdraw from the finalized vaults (`withdraw_all`,
+    `AssetAuthVault` PATH `Left(Left((u32,u32)))`, keeper NFT burned for the lender / preserved for
+    the protocol fee). Now unblocked for the RepayLoan path: the two finalized-vault utxo_types
+    exist and are hash-verified, so claiming is an input-side spend of them.
+  Kept in backlog. On-chain verification of Accept/Cancel/ClaimPrincipal/RepayLoan folds into the
+  05/06 testnet run.

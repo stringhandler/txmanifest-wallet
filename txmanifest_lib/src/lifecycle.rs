@@ -2355,6 +2355,8 @@ pub fn run(
                                     );
                                     let _ = std::io::stdout().flush();
 
+                                    let dry_witnesses = action_inp.witnesses.as_ref()
+                                        .map(|w| eval::resolve_witness_refs(w, &ctx));
                                     let dry_inp_witnesses = action_inp.witnesses.clone();
                                     let dry_params_snap = compile_params_map.clone();
                                     let dry_action_params_snap = action_params_map.clone();
@@ -2378,7 +2380,7 @@ pub fn run(
                                         &dry_params,
                                         &dry_hints,
                                         &leaf_payloads,
-                                        action_inp.witnesses.as_ref(),
+                                        dry_witnesses.as_ref(),
                                         Some(&dry_signer_fn),
                                         Arc::clone(&tx),
                                         &utxos,
@@ -2520,6 +2522,8 @@ pub fn run(
                                 // Build a signer closure for any "type": "Signature" witnesses.
                                 // Resolves the key reference from compile_params, then signs
                                 // the hash with the wallet key.
+                                let fin_witnesses = action_inp.witnesses.as_ref()
+                                    .map(|w| eval::resolve_witness_refs(w, &ctx));
                                 let inp_witnesses = action_inp.witnesses.clone();
                                 let params_snap = compile_params_map.clone();
                                 let action_params_snap = action_params_map.clone();
@@ -2544,7 +2548,7 @@ pub fn run(
                                     &fin_params,
                                     &fin_hints,
                                     &leaf_payloads,
-                                    action_inp.witnesses.as_ref(),
+                                    fin_witnesses.as_ref(),
                                     Some(&signer_fn),
                                     Arc::clone(&tx),
                                     &utxos,
@@ -4404,6 +4408,148 @@ mod tests {
             assert_eq!(pa_hash, fields.get("PRINCIPAL_OUTPUT_SCRIPT_HASH").cloned().unwrap(),
                 "AcceptOffer out[1] AssetAuth spk hash must equal PRINCIPAL_OUTPUT_SCRIPT_HASH");
         }
+    }
+
+    /// Task 08 — RepayLoan (full repayment, NoRepayments phase).
+    ///
+    /// The lending covenant bakes `FINALIZED_LENDER_VAULT_COV_HASH` /
+    /// `FINALIZED_PROTOCOL_FEE_VAULT_COV_HASH` into its params and, on the full-repayment path,
+    /// enforces them as the script hashes of out[1]/out[2] (`validate_vaults` →
+    /// `ensure_output_script_hash`). Those two hashes are themselves anchored: they are part of
+    /// the create_instance chain that reproduces live offer 43ab4efe's out[5] byte-exactly
+    /// (see `lending_v3_create_offer_reproduces_live_offer_out5`).
+    ///
+    /// So a repayment output is provably correct iff the utxo_type behind it compiles to a
+    /// scriptPubKey whose sha256 equals that baked-in hash. That is what this asserts — an
+    /// independent check of the vault utxo_types' param wiring (keeper/supplier roles, burn
+    /// flags, is_active, the zero finalized-hash) against the anchored values.
+    #[test]
+    fn lending_v3_repay_loan_vault_outputs_match_covenant_hashes() {
+        use crate::manifest::Manifest;
+        use lwk_wollet::elements::hashes::{sha256, Hash};
+
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../examples/lending_v3/txmanifest.json");
+        let raw = std::fs::read_to_string(&manifest_path).expect("read lending_v3 manifest");
+        let manifest: Manifest = serde_json::from_str(&raw).expect("parse lending_v3 manifest");
+        let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
+
+        let (_class, _class_def, create) = manifest
+            .find_class_and_method("CreateOffer")
+            .expect("CreateOffer method exists");
+        let ci = create.create_instance.as_ref().expect("CreateOffer has create_instance");
+
+        // Same live-offer 43ab4efe parameters as the out[5] reproduction test, so the vault
+        // hashes computed here are the verified ones.
+        let mut ctx = ExecutionContext::new();
+        ctx.set_param("COLLATERAL_ASSET_ID", "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49");
+        ctx.set_param("PRINCIPAL_ASSET_ID", "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5");
+        ctx.set_param("PROTOCOL_FEE_KEEPER_ASSET_ID", "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5");
+        ctx.set_param("COLLATERAL_AMOUNT", "21000");
+        ctx.set_param("PRINCIPAL_AMOUNT", "1000");
+        ctx.set_param("PRINCIPAL_INTEREST_RATE", "10000");
+        ctx.set_param("LOAN_EXPIRATION_TIME", "2536857");
+        ctx.set_param("ZERO_HASH", &"00".repeat(32));
+        ctx.set_param("FACTORY_ASSET_ID", "0101010101010101010101010101010101010101010101010101010101010101");
+        ctx.set_compile_param("LENDING_PROGRAM_ID", "f80c6162");
+        ctx.set_compile_param("BORROWER_NFT_ASSET_ID", "78d61185c79f855fac51a87c191b00266f02d28752f50b3d9092ccf6b978181e");
+        ctx.set_compile_param("LENDER_NFT_ASSET_ID", "213462821a5cdb96f435f5ea6597e8937359d6fd5a64b6ac8ef4262bc279fcfb");
+
+        let mut hints: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        if let Some((_, class_def, _)) = manifest.find_class_and_method("CreateOffer") {
+            for (fname, fdef) in &class_def.fields {
+                hints.insert(fname.clone(), fdef.type_.clone());
+            }
+        }
+        if let Some(params) = &create.params {
+            for (pname, pdef) in params {
+                hints.entry(pname.clone()).or_insert_with(|| pdef.type_.clone());
+            }
+        }
+
+        let fields = eval_create_instance_fields(ci, &ctx, &manifest_path, &hints, net, false, true);
+        for (k, v) in &fields {
+            ctx.set_compile_param(k, v);
+        }
+
+        // ZERO_HASH must reach the instance: the vault utxo_types reference it by name to pick up
+        // its declared `bytes32` type. Inlined as a literal it would infer as u64 (all digits).
+        assert_eq!(fields.get("ZERO_HASH").map(String::as_str), Some("00".repeat(32).as_str()),
+            "ZERO_HASH must be carried into the instance for the vault utxo_types to type it");
+        assert_eq!(hints.get("ZERO_HASH").map(String::as_str), Some("bytes32"),
+            "ZERO_HASH must be declared bytes32, not left to value-based inference");
+
+        let base: std::collections::HashMap<String, String> =
+            ctx.all_compile_params().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let vault_simf = manifest_path.parent().unwrap().join("asset_auth_vault.simf");
+
+        // out[1] — the lender's finalized vault.
+        let lender_ut = manifest.utxo_type("lender_vault_finalized").expect("lender_vault_finalized utxo_type");
+        let (lp, lh) = apply_utxo_compile_params(&base, &hints, lender_ut);
+        assert_eq!(lh.get("FINALIZED_VAULT_COV_HASH").map(String::as_str), Some("bytes32"),
+            "the zero finalized-hash must carry a bytes32 hint into the compiler");
+        let lender_addr = crate::covenant::compute_covenant_address(&vault_simf, &lp, &lh, &[], net, true)
+            .expect("lender_vault_finalized address compiles");
+        let lender_hash: String = sha256::Hash::hash(lender_addr.script_pubkey().as_bytes())
+            .to_byte_array().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(Some(lender_hash.as_str()), fields.get("FINALIZED_LENDER_VAULT_COV_HASH").map(String::as_str),
+            "RepayLoan out[1] spk hash must equal the FINALIZED_LENDER_VAULT_COV_HASH the covenant enforces");
+
+        // out[2] — the protocol-fee finalized vault (keeper burn = false, unlike the lender's).
+        let proto_ut = manifest.utxo_type("protocol_fee_vault_finalized").expect("protocol_fee_vault_finalized utxo_type");
+        let (pp, ph) = apply_utxo_compile_params(&base, &hints, proto_ut);
+        let proto_addr = crate::covenant::compute_covenant_address(&vault_simf, &pp, &ph, &[], net, true)
+            .expect("protocol_fee_vault_finalized address compiles");
+        let proto_hash: String = sha256::Hash::hash(proto_addr.script_pubkey().as_bytes())
+            .to_byte_array().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(Some(proto_hash.as_str()), fields.get("FINALIZED_PROTOCOL_FEE_VAULT_COV_HASH").map(String::as_str),
+            "RepayLoan out[2] spk hash must equal the FINALIZED_PROTOCOL_FEE_VAULT_COV_HASH the covenant enforces");
+
+        // The two vaults must be distinct covenants — a keeper/burn-flag mix-up would collapse them.
+        assert_ne!(lender_hash, proto_hash, "lender and protocol-fee vaults must be different covenants");
+
+        // The repayment split must reproduce the covenant's own arithmetic, floor-division and all:
+        //   total_fee     = 1000 * 10000/10000       = 1000
+        //   protocol_fee  = 1000 * 1000/10000        =  100   (10% of the interest)
+        //   lender share  = CURRENT_DEBT(2000) - 100 = 1900
+        // Sum must be exactly the debt — the covenant's split_repayment_by_fees leaves no dust.
+        let (_, _, repay) = manifest.find_class_and_method("RepayLoan").expect("RepayLoan method exists");
+        let rp = repay.params.as_ref().expect("RepayLoan has params");
+        let formula_of = |name: &str| rp.get(name).and_then(|p| p.formula.clone())
+            .unwrap_or_else(|| panic!("{name} has a formula"));
+        let protocol_fee = crate::eval::eval_expr_str(&formula_of("TOTAL_PROTOCOL_FEE"), &ctx)
+            .expect("TOTAL_PROTOCOL_FEE evaluates");
+        let lender_amount = crate::eval::eval_expr_str(&formula_of("LENDER_VAULT_AMOUNT"), &ctx)
+            .expect("LENDER_VAULT_AMOUNT evaluates");
+        assert_eq!(protocol_fee, "100", "protocol fee = 10% of the 1000 interest");
+        assert_eq!(lender_amount, "1900", "lender receives the debt less the protocol fee");
+        let debt: u64 = fields.get("CURRENT_DEBT").unwrap().parse().unwrap();
+        assert_eq!(
+            protocol_fee.parse::<u64>().unwrap() + lender_amount.parse::<u64>().unwrap(),
+            debt,
+            "the two vault outputs must account for the whole debt exactly"
+        );
+
+        // The FullRepayment witness carries the debt, so its `instance.CURRENT_DEBT` ref must
+        // resolve to a literal the SimplicityHL value parser can read.
+        let offer_in = repay.inputs.as_ref().unwrap().iter()
+            .find(|i| i.id == "active_offer_in").expect("active_offer_in input");
+        let wits = crate::eval::resolve_witness_refs(
+            offer_in.witnesses.as_ref().expect("active_offer_in has witnesses"), &ctx);
+        assert_eq!(wits["PATH"]["value"].as_str(), Some("Right(Left(Right(2000)))"),
+            "FullRepayment witness must resolve to PATH::Right(Left(Right(current_debt)))");
+
+        // The offer input spends the ACTIVE covenant AcceptOffer produced — same storage, so the
+        // same address (this is what the covenant re-derives from the witness debt and compares).
+        let act_ut = manifest.utxo_type("lending_collateral_active").expect("active utxo_type");
+        let (ap, ah) = apply_utxo_compile_params(&base, &hints, act_ut);
+        let act_leaves = act_ut.resolve_extra_leaf_payloads(&ctx).expect("active storage leaves");
+        let lending_simf = manifest_path.parent().unwrap().join("lending.simf");
+        let act_addr = crate::covenant::compute_covenant_address(&lending_simf, &ap, &ah, &act_leaves, net, true)
+            .expect("active address");
+        assert_eq!(format!("{:x}", act_addr.script_pubkey()),
+            "51202451da2d003a9fd5cffe1ed523cded17cda7a39604f02642d56d503bdef3eb77",
+            "RepayLoan in[1] must be the same active covenant AcceptOffer created");
     }
 
     /// Task 10 — a computed u64 storage leaf encodes right-aligned, big-endian, in a

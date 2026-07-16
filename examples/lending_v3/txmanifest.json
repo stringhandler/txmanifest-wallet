@@ -121,6 +121,44 @@
       "asset": "PRINCIPAL_ASSET_ID",
       "confidential": false
     },
+    "lender_vault_finalized": {
+      "description": "The lender's settlement vault in its FINALIZED state — RepayLoan out[1]. A FinalizedAssetAuthVault(vault=principal, keeper=lender_nft, supplier=borrower_nft, keeper_burn=true, supplier_burn=true, is_active=false, finalized=ZERO_HASH) holding the whole repayment less the protocol fee. 'Finalized' = the debt is fully cleared, so the vault no longer accepts supply; the lender withdraws from it by presenting (and burning) the lender NFT. The lending covenant hard-codes sha256(this spk) as FINALIZED_LENDER_VAULT_COV_HASH and enforces it on the repayment output, so this utxo_type MUST compile to that exact hash — asserted by lending_v3_repay_loan_vault_outputs_match_covenant_hashes.",
+      "script": {
+        "type": "simplicity",
+        "source": "./asset_auth_vault.simf",
+        "compile_params": {
+          "VAULT_ASSET_ID": "PRINCIPAL_ASSET_ID",
+          "KEEPER_AUTH_ASSET_ID": "LENDER_NFT_ASSET_ID",
+          "SUPPLIER_AUTH_ASSET_ID": "BORROWER_NFT_ASSET_ID",
+          "KEEPER_AUTH_ASSET_AMOUNT": "1",
+          "FINALIZED_VAULT_COV_HASH": "ZERO_HASH",
+          "IS_ACTIVE": "false",
+          "WITH_KEEPER_ASSET_BURN": "true",
+          "WITH_SUPPLIER_ASSET_BURN": "true"
+        }
+      },
+      "asset": "PRINCIPAL_ASSET_ID",
+      "confidential": false
+    },
+    "protocol_fee_vault_finalized": {
+      "description": "The protocol-fee settlement vault in its FINALIZED state — RepayLoan out[2]. Same shape as lender_vault_finalized but keyed to the protocol-fee keeper asset and with keeper_burn=FALSE (the keeper asset is a shared, reusable fee-collection NFT, so it is preserved rather than burned on withdrawal). Holds the 10% protocol cut of the loan interest. The lending covenant hard-codes sha256(this spk) as FINALIZED_PROTOCOL_FEE_VAULT_COV_HASH and enforces it on the repayment output.",
+      "script": {
+        "type": "simplicity",
+        "source": "./asset_auth_vault.simf",
+        "compile_params": {
+          "VAULT_ASSET_ID": "PRINCIPAL_ASSET_ID",
+          "KEEPER_AUTH_ASSET_ID": "PROTOCOL_FEE_KEEPER_ASSET_ID",
+          "SUPPLIER_AUTH_ASSET_ID": "BORROWER_NFT_ASSET_ID",
+          "KEEPER_AUTH_ASSET_AMOUNT": "1",
+          "FINALIZED_VAULT_COV_HASH": "ZERO_HASH",
+          "IS_ACTIVE": "false",
+          "WITH_KEEPER_ASSET_BURN": "false",
+          "WITH_SUPPLIER_ASSET_BURN": "true"
+        }
+      },
+      "asset": "PRINCIPAL_ASSET_ID",
+      "confidential": false
+    },
     "lender_nft_script_auth": {
       "description": "ScriptAuth covenant holding the lender NFT during a pending offer — out[3]. Keyed by SCRIPT_HASH = sha256(lending covenant scriptPubKey, INCLUDING its 2 storage slots) i.e. the pending offer's own script hash (ScriptAuth::from_simplex_program). NOTE: the manifest's tapleaf/script-hash compute currently hashes the storage-less covenant; hashing a covenant-with-storage needs the engine extension tracked in upnext/11.",
       "script": {
@@ -335,6 +373,11 @@
         "LENDING_COV_SCRIPT_HASH": {
           "type": "bytes32",
           "description": "sha256(scriptPubKey) of the pending lending covenant INCLUDING its 2 storage slots (= sha256 of out[5]'s spk). The lender_nft_script_auth covenant (out[3]) commits to this via ScriptAuth::from_simplex_program(pending_offer). Computed with a tapleaf-over-lending.simf that folds the same storage leaves (task 11)."
+        },
+        "ZERO_HASH": {
+          "type": "bytes32",
+          "default": "0000000000000000000000000000000000000000000000000000000000000000",
+          "description": "The all-zero FINALIZED_VAULT_COV_HASH baked into the finalized (non-active) AssetAuthVault variants. A fixed constant, kept as a field so the *_vault_finalized utxo_types can reference it by name and inherit its declared bytes32 type. Do not inline the zeros as a literal in compile_params: 64 zero characters are all ASCII digits, so the engine's value-based type inference would type it u64 and mis-compile the covenant."
         }
       },
       "methods": {
@@ -394,6 +437,7 @@
               "COLLATERAL_ASSET_ID": "$params.COLLATERAL_ASSET_ID",
               "PRINCIPAL_ASSET_ID": "$params.PRINCIPAL_ASSET_ID",
               "PROTOCOL_FEE_KEEPER_ASSET_ID": "$params.PROTOCOL_FEE_KEEPER_ASSET_ID",
+              "ZERO_HASH": "$params.ZERO_HASH",
               "BORROWER_NFT_ASSET_ID": "$instance.BORROWER_NFT_ASSET_ID",
               "LENDER_NFT_ASSET_ID": "$instance.LENDER_NFT_ASSET_ID",
               "COLLATERAL_AMOUNT": "$params.COLLATERAL_AMOUNT",
@@ -1144,6 +1188,167 @@
             }
           ],
           "validations": []
+        },
+        "RepayLoan": {
+          "ui": {
+            "action": "repay the loan in full — {instance.CURRENT_DEBT} {instance.PRINCIPAL_ASSET_ID:symbol} (principal + interest) — and release the {instance.COLLATERAL_AMOUNT} {instance.COLLATERAL_ASSET_ID:symbol} collateral"
+          },
+          "description": "The borrower clears the whole debt in one transaction and takes the collateral back (loan_active → repaid). Spends the ACTIVE lending covenant (in[1], FullRepayment witness) while presenting and BURNING the borrower NFT (in[0]/out[0]) — burning the NFT is what makes this final: it is the auth token for ClaimPrincipal and for supplying the vaults, so no further action on the offer is possible. The repayment is split into two freshly-created settlement vaults the covenant's baked-in hashes pin exactly: the lender's (out[1], debt minus the protocol fee) and the protocol's (out[2], 10% of the interest). The collateral (out[3]) is then unconstrained and goes back to the borrower's wallet. Mirrors LendingOffer::attach_full_repayment + attach_vaults in the NoRepayments phase. SCOPE: this models a full repayment of an UNTOUCHED active loan (no prior partial repayment), which is the case the covenant's validate_vaults reaches via `already_repaid_amount == 0` — the branch that CREATES the vaults as plain outputs rather than spending existing ones. A repayment after a partial one must instead spend + top up the live vaults (AssetAuthVault supply/final_supply witnesses); see backlog/08.",
+          "params": {
+            "TOTAL_PROTOCOL_FEE": {
+              "type": "u64",
+              "formula": "instance.PRINCIPAL_AMOUNT * instance.PRINCIPAL_INTEREST_RATE / 10000 * 1000 / 10000",
+              "description": "The protocol's cut, paid to out[2]: 10% (PROTOCOL_FEE_BPS=1000) of the total loan interest, where interest = PRINCIPAL_AMOUNT * PRINCIPAL_INTEREST_RATE / 10000. Auto-computed; do not override — the covenant recomputes it and rejects any other split. Both divisions floor, and in this order, exactly as lending.simf's apply_basis_points chain does (get_protocol_fee_amount(get_total_fee_amount())); folding them into one division would round differently."
+            },
+            "LENDER_VAULT_AMOUNT": {
+              "type": "u64",
+              "formula": "instance.CURRENT_DEBT - instance.PRINCIPAL_AMOUNT * instance.PRINCIPAL_INTEREST_RATE / 10000 * 1000 / 10000",
+              "description": "The lender's share, paid to out[1]: the entire debt less TOTAL_PROTOCOL_FEE (= the covenant's additional_lender_vault_amount = amount_to_repay - protocol_fee_repaid). Auto-computed; do not override. Spelled out from instance fields rather than referencing TOTAL_PROTOCOL_FEE so the two formulas are independent of the order params are evaluated in."
+            }
+          },
+          "inputs": [
+            {
+              "id": "borrower_nft_in",
+              "description": "Borrower NFT from the wallet (input 0) — authorizes the repayment and is burned at out[0]. The covenant fixes this at input 0 (full_repay_offer's borrower_nft_input_index).",
+              "utxo_source": "wallet",
+              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "amount_sat": 1,
+              "required_index": 0,
+              "ui": {
+                "label": "borrower NFT proving the loan is yours (burned — the loan is closing)",
+                "role": "borrower_nft"
+              }
+            },
+            {
+              "id": "active_offer_in",
+              "description": "The ACTIVE lending (collateral) covenant UTXO (input 1) — storage is_active=1, current_debt=CURRENT_DEBT. FullRepayment path. The covenant asserts its own input index is 1 and that its script hash commits to storage(true, current_debt), which is what ties the witness's debt payload to reality.",
+              "utxo_source": {
+                "utxo_type": "lending_collateral_active"
+              },
+              "required_index": 1,
+              "asset": "instance.COLLATERAL_ASSET_ID",
+              "amount_sat": "instance.COLLATERAL_AMOUNT",
+              "witnesses": {
+                "PATH": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "Either<Either<(), ()>, Either<Either<(u64, u64), u64>, u64>>",
+                  "value": "Right(Left(Right(instance.CURRENT_DEBT)))",
+                  "description": "FullRepayment (PATH::Right(Left(Right(current_debt)))). The u64 payload is the debt being cleared; it is not trusted input — the covenant recomputes the input's expected script hash from it and compares against the real one."
+                }
+              },
+              "ui": {
+                "label": "the active loan, holding your collateral",
+                "role": "covenant"
+              }
+            },
+            {
+              "id": "repayment_in",
+              "description": "The borrower's principal-asset UTXO funding the repayment (input 2), sized >= CURRENT_DEBT. The covenant does not constrain this input (in this branch input indexes 2/3 are the unused vault-input slots); the repayment is enforced on the vault OUTPUTS instead, so any funding source works.",
+              "utxo_source": "wallet",
+              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "amount_sat": {
+                "min_amount": "instance.CURRENT_DEBT"
+              },
+              "required_index": 2,
+              "ui": {
+                "label": "funds to repay the loan with",
+                "role": "principal"
+              }
+            },
+            {
+              "id": "fee_input",
+              "description": "Wallet L-BTC UTXO covering the transaction fee.",
+              "utxo_source": "wallet",
+              "asset": "lbtc",
+              "ui": {
+                "label": "input used for paying fees",
+                "role": "fee"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "borrower_nft_burned",
+              "description": "Borrower NFT burned to OP_RETURN (output 0) — covenant-fixed index. Data-less burn; the covenant only checks is_op_return.",
+              "destination": {
+                "type": "op_return"
+              },
+              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "amount_sat": 1,
+              "required_index": 0,
+              "ui": {
+                "label": "borrower NFT destroyed — closes the loan for good",
+                "role": "borrower_nft",
+                "group": "burned / protocol data"
+              }
+            },
+            {
+              "id": "lender_vault_out",
+              "description": "The lender's finalized settlement vault (output 1), holding LENDER_VAULT_AMOUNT of the principal asset. Covenant-fixed: full_repay_offer's lender-vault output index is 1, and validate_vaults pins the script hash to FINALIZED_LENDER_VAULT_COV_HASH (finalized, not active, because current_debt == amount_to_repay). The lender collects it later with the lender NFT.",
+              "destination": {
+                "utxo_type": "lender_vault_finalized"
+              },
+              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "amount_sat": "params.LENDER_VAULT_AMOUNT",
+              "confidential": false,
+              "required_index": 1,
+              "ui": {
+                "label": "repayment held for the lender to collect",
+                "role": "vault"
+              }
+            },
+            {
+              "id": "protocol_fee_vault_out",
+              "description": "The protocol-fee finalized settlement vault (output 2), holding TOTAL_PROTOCOL_FEE of the principal asset. Covenant-fixed index 2; script hash pinned to FINALIZED_PROTOCOL_FEE_VAULT_COV_HASH (finalized because this repayment clears the entire protocol fee at once).",
+              "destination": {
+                "utxo_type": "protocol_fee_vault_finalized"
+              },
+              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "amount_sat": "params.TOTAL_PROTOCOL_FEE",
+              "confidential": false,
+              "required_index": 2,
+              "ui": {
+                "label": "protocol fee (10% of the interest)",
+                "role": "vault"
+              }
+            },
+            {
+              "id": "collateral_returned",
+              "description": "The collateral released back to the borrower's wallet (output 3), COLLATERAL_AMOUNT. Index 3 is this manifest's choice, not the covenant's: full_repay_offer only checks the collateral on the INPUT side and adds no program output, so once the vaults are satisfied the collateral is unconstrained.",
+              "destination": "wallet",
+              "asset": "instance.COLLATERAL_ASSET_ID",
+              "amount_sat": "instance.COLLATERAL_AMOUNT",
+              "confidential": false,
+              "required_index": 3,
+              "ui": {
+                "label": "your collateral, released",
+                "role": "collateral"
+              }
+            },
+            {
+              "id": "principal_change",
+              "description": "Principal-asset change back to the borrower (anything above CURRENT_DEBT).",
+              "destination": "change",
+              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "optional": true,
+              "ui": {
+                "label": "change from the repayment",
+                "role": "change"
+              }
+            },
+            {
+              "id": "fee_change",
+              "description": "L-BTC change back to the borrower.",
+              "destination": "change",
+              "asset": "lbtc",
+              "optional": true,
+              "ui": {
+                "label": "change from paying fees",
+                "role": "change"
+              }
+            }
+          ],
+          "validations": []
         }
       }
     }
@@ -1153,7 +1358,8 @@
       "factory_created",
       "offer_open",
       "loan_active",
-      "cancelled"
+      "cancelled",
+      "repaid"
     ],
     "entry_actions": [
       "CreateFactory",
@@ -1178,6 +1384,11 @@
       "ClaimPrincipal": {
         "from": "loan_active",
         "to": "loan_active",
+        "unilateral": true
+      },
+      "RepayLoan": {
+        "from": "loan_active",
+        "to": "repaid",
         "unilateral": true
       }
     }

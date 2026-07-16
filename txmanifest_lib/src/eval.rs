@@ -308,6 +308,45 @@ pub fn resolve_compile_param_value(value: &str, ctx: &ExecutionContext) -> Strin
     v.to_string()
 }
 
+/// Resolve context references inside the `value` of every `simplicityhl` witness in an
+/// input's witness map, returning the rewritten map.
+///
+/// Witness values are handed verbatim to the SimplicityHL value parser, so a witness whose
+/// payload is a runtime value must be resolved first. Example: the lending covenant's
+/// full-repayment branch carries the offer's current debt, so the manifest writes
+/// `Right(Left(Right(instance.CURRENT_DEBT)))`, which resolves to `Right(Left(Right(1010)))`.
+///
+/// Only the `value` field is rewritten — `source.key` (signing-key references) and every
+/// other field are left untouched. Entries that are not `"type": "simplicityhl"` are copied
+/// through unchanged.
+pub fn resolve_witness_refs(
+    witnesses: &serde_json::Value,
+    ctx: &ExecutionContext,
+) -> serde_json::Value {
+    let Some(obj) = witnesses.as_object() else {
+        return witnesses.clone();
+    };
+    let mut out = serde_json::Map::with_capacity(obj.len());
+    for (name, def) in obj {
+        let rewritten = match (def.as_object(), def.get("type").and_then(|v| v.as_str())) {
+            (Some(spec), Some("simplicityhl")) => match def.get("value").and_then(|v| v.as_str()) {
+                Some(raw) => {
+                    let mut spec = spec.clone();
+                    spec.insert(
+                        "value".to_string(),
+                        serde_json::Value::String(substitute_vars(raw, ctx)),
+                    );
+                    serde_json::Value::Object(spec)
+                }
+                None => def.clone(),
+            },
+            _ => def.clone(),
+        };
+        out.insert(name.clone(), rewritten);
+    }
+    serde_json::Value::Object(out)
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -665,6 +704,62 @@ mod fee_keyword_tests {
         assert_eq!(eval_amount(&serde_json::json!("amount - fee"), &ctx).unwrap(), 99750);
         // Bare `fee` resolves directly.
         assert_eq!(eval_amount(&serde_json::json!("fee"), &ctx).unwrap(), 250);
+    }
+}
+
+#[cfg(test)]
+mod witness_ref_tests {
+    use super::*;
+    use crate::context::ExecutionContext;
+
+    /// A witness payload carrying a runtime value (the lending covenant's full-repayment
+    /// branch takes the offer's current debt) must have its refs resolved before the
+    /// SimplicityHL value parser sees it.
+    #[test]
+    fn simplicityhl_witness_value_refs_resolve() {
+        let mut ctx = ExecutionContext::new();
+        ctx.set_compile_param("CURRENT_DEBT", "1010");
+
+        let wits = serde_json::json!({
+            "PATH": {
+                "type": "simplicityhl",
+                "simplicity_type": "Either<Either<(), ()>, Either<Either<(u64, u64), u64>, u64>>",
+                "value": "Right(Left(Right(instance.CURRENT_DEBT)))",
+                "description": "FullRepayment"
+            }
+        });
+        let out = resolve_witness_refs(&wits, &ctx);
+        assert_eq!(
+            out["PATH"]["value"].as_str(),
+            Some("Right(Left(Right(1010)))"),
+            "instance ref inside the witness payload must resolve"
+        );
+        // Untouched fields survive.
+        assert_eq!(out["PATH"]["description"].as_str(), Some("FullRepayment"));
+        assert_eq!(out["PATH"]["type"].as_str(), Some("simplicityhl"));
+    }
+
+    /// Static witness values (every existing lending_v3 witness) must pass through byte-identical,
+    /// and non-simplicityhl entries must not be rewritten at all.
+    #[test]
+    fn static_and_non_simplicityhl_witnesses_pass_through() {
+        let mut ctx = ExecutionContext::new();
+        ctx.set_compile_param("CURRENT_DEBT", "1010");
+
+        let wits = serde_json::json!({
+            "PATH": { "type": "simplicityhl", "value": "Left(Left(()))" },
+            "INPUT_SCRIPT_INDEX": { "type": "simplicityhl", "value": "0" },
+            "SIGNATURE": { "type": "Signature", "source": { "key": "instance.BORROWER_PUB_KEY" } }
+        });
+        let out = resolve_witness_refs(&wits, &ctx);
+        assert_eq!(out["PATH"]["value"].as_str(), Some("Left(Left(()))"));
+        assert_eq!(out["INPUT_SCRIPT_INDEX"]["value"].as_str(), Some("0"));
+        // A Signature witness's `source.key` is a signing-key ref, NOT a value to substitute.
+        assert_eq!(
+            out["SIGNATURE"]["source"]["key"].as_str(),
+            Some("instance.BORROWER_PUB_KEY"),
+            "non-simplicityhl witnesses must be copied through untouched"
+        );
     }
 }
 
