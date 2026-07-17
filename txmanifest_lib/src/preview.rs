@@ -270,8 +270,26 @@ fn render_net_summary(buckets: &[Bucket], fee_sat: Option<u64>, wallet: Option<&
         let (credit, text) = format_signed(*units, meta);
         let sign = if credit { style("+").green() } else { style("−").red() };
         let approx = if *exact { "" } else { "≈ " };
-        println!("    {sign} {approx}{}{}", style(&text).yellow(), style(fee_note(meta, *units, fee_sat)).dim());
+        println!("    {sign} {approx}{}", style(&text).yellow());
     }
+    if let Some(line) = fee_line(fee_sat) {
+        println!("      {}", style(line).dim());
+    }
+}
+
+/// The informational network-fee line for the net summary.
+///
+/// The fee is already baked into the policy-asset net above (it is paid out of the
+/// same wallet inputs), so this line is explicitly marked as included rather than
+/// signed — a `−` here would invite double-counting.
+fn fee_line(fee_sat: Option<u64>) -> Option<String> {
+    let fee = fee_sat.filter(|f| *f > 0)?;
+    let meta = lookup_asset("lbtc");
+    Some(format!(
+        "network fee: {} {} (included above)",
+        format_amount(fee, meta.precision),
+        meta.symbol,
+    ))
 }
 
 /// The wallet's net position change per asset: `(asset, signed base units, exact?)`.
@@ -317,19 +335,6 @@ fn wallet_nets(buckets: &[Bucket], wallet: Option<&WalletDelta>) -> Vec<(AssetMe
         .collect()
 }
 
-/// Annotate the policy-asset line with the network fee: `(network fee)` when the
-/// whole net *is* the fee, else `(incl. N tL-BTC network fee)`.
-fn fee_note(meta: &AssetMeta, units: i64, fee_sat: Option<u64>) -> String {
-    let Some(fee) = fee_sat.filter(|f| *f > 0) else { return String::new() };
-    if meta.symbol != POLICY_SYMBOL || units >= 0 {
-        return String::new();
-    }
-    if units.unsigned_abs() == fee {
-        "  (network fee)".to_string()
-    } else {
-        format!("  (incl. {} {POLICY_SYMBOL} network fee)", format_amount(fee, meta.precision))
-    }
-}
 
 /// The policy-asset symbol the network fee is denominated in. (Registry is out of
 /// scope; on testnet L-BTC is the fee/policy asset.)
@@ -899,19 +904,14 @@ mod tests {
     }
 
     #[test]
-    fn fee_note_distinguishes_fee_only_from_partial() {
-        let lbtc = lookup_asset("lbtc");
-        // Net is exactly the fee → it *is* the fee.
-        assert_eq!(fee_note(&lbtc, -195, Some(195)), "  (network fee)");
-        // Net is larger than the fee → fee is only part of it.
+    fn fee_line_states_amount_and_that_it_is_already_counted() {
         assert_eq!(
-            fee_note(&lbtc, -3626, Some(226)),
-            "  (incl. 0.00000226 tL-BTC network fee)"
+            fee_line(Some(226)).as_deref(),
+            Some("network fee: 0.00000226 tL-BTC (included above)")
         );
-        // Non-policy assets and credits get no fee note.
-        assert_eq!(fee_note(&lookup_asset(PRINCIPAL_ID), -1000, Some(195)), "");
-        assert_eq!(fee_note(&lbtc, 500, Some(195)), "");
-        assert_eq!(fee_note(&lbtc, -195, None), "");
+        // No fee known, or a zero fee, means no line at all.
+        assert_eq!(fee_line(None), None);
+        assert_eq!(fee_line(Some(0)), None);
     }
 
     #[test]

@@ -106,6 +106,28 @@
       "action": "ClaimPrincipal",
       "txid": "b3630b9e1722f66127818bd4733f7a95841a471f09028a4ad7971e9cc06329c2",
       "utxos": []
+    },
+    {
+      "action": "RepayLoan",
+      "txid": "3150b26447426d503a046a5d76b2ae6265c1628ddd36161b6ceccfaf65b1db8a",
+      "utxos": [
+        {
+          "utxo_type": "lender_vault_finalized",
+          "utxo_id": "lender_vault_out",
+          "txid": "3150b26447426d503a046a5d76b2ae6265c1628ddd36161b6ceccfaf65b1db8a",
+          "vout": 1,
+          "amount_sat": 1009,
+          "asset": "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5"
+        },
+        {
+          "utxo_type": "protocol_fee_vault_finalized",
+          "utxo_id": "protocol_fee_vault_out",
+          "txid": "3150b26447426d503a046a5d76b2ae6265c1628ddd36161b6ceccfaf65b1db8a",
+          "vout": 2,
+          "amount_sat": 1,
+          "asset": "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5"
+        }
+      ]
     }
   ]
 }
