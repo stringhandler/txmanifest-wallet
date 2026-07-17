@@ -4608,4 +4608,138 @@ mod tests {
         });
         assert_eq!(crate::eval::encode_leaf_value(&item_left, &ctx).unwrap(), vec![8u8, 0, 0, 0]);
     }
+
+    /// The dex (Tessera) example's `MakeOffer.create_instance` must compute MAKER_SPK
+    /// from MAKER_PUB_KEY, and that hash must be what the offer address commits to.
+    ///
+    /// This is the load-bearing link in the example: tessera.simf enforces payment to a
+    /// scriptPubKey *hash*, so the settle output can only be built if MAKER_SPK is derived
+    /// from the same program the payout output targets — not pasted in by hand. Constructors
+    /// pre-compute create_instance tapleaf fields into compile params before the PSET is
+    /// built, which is what makes the offer address resolvable in the same transaction.
+    #[test]
+    fn dex_make_offer_computes_maker_spk_and_offer_address() {
+        use crate::manifest::Manifest;
+        use lwk_wollet::elements::hashes::{sha256, Hash};
+
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../examples/dex/txmanifest.json");
+        let raw = std::fs::read_to_string(&manifest_path).expect("read dex manifest");
+        let manifest: Manifest = serde_json::from_str(&raw).expect("parse dex manifest");
+        let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
+
+        let (_class, class_def, action) = manifest
+            .find_class_and_method("MakeOffer")
+            .expect("MakeOffer method exists");
+        let ci = action.create_instance.as_ref().expect("MakeOffer has create_instance");
+
+        // Track the manifest's own setting — debug symbols change the CMR, so a hardcoded
+        // value here would verify a compilation mode the CLI never actually runs.
+        let debug = manifest.include_debug_symbols();
+        let maker_pub_key = "e1512ae2f5b4ee8c12e9c57ccd0943273c6256f496516d3aefeaa16c32d3c05b";
+        let lbtc_testnet = "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49";
+        let usdt_ish = "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5";
+
+        // Populate ctx as if Step 1 had prompted for the offer terms.
+        let mut ctx = ExecutionContext::new();
+        ctx.set_param("OFFER_ASSET_ID", usdt_ish);
+        ctx.set_param("OFFER_AMOUNT", "100000");
+        ctx.set_param("ASSET_B", lbtc_testnet);
+        ctx.set_param("AMOUNT_B", "50000");
+        ctx.set_param("MAKER_PUB_KEY", maker_pub_key);
+        ctx.set_param("TIMEOUT", "2000000");
+        ctx.set_param("MAX_FEE", "5000");
+
+        // Type hints from the class field + method param declarations (mirrors Step 7's pre-pass).
+        let mut hints: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (fname, fdef) in &class_def.fields {
+            hints.insert(fname.clone(), fdef.type_.clone());
+        }
+        if let Some(params) = &action.params {
+            for (pname, pdef) in params {
+                hints.entry(pname.clone()).or_insert_with(|| pdef.type_.clone());
+            }
+        }
+
+        let fields = eval_create_instance_fields(ci, &ctx, &manifest_path, &hints, net, false, debug);
+
+        // MAKER_SPK is sha256 of the maker_payout covenant's scriptPubKey — verify against the
+        // program itself rather than a copied constant.
+        let payout_simf = manifest_path.parent().unwrap().join("maker_payout.simf");
+        let payout_params: std::collections::HashMap<String, String> =
+            [("PUB_KEY".to_string(), maker_pub_key.to_string())].into_iter().collect();
+        let payout_hints: std::collections::HashMap<String, String> =
+            [("PUB_KEY".to_string(), "pubkey".to_string())].into_iter().collect();
+        let payout_addr = crate::covenant::compute_covenant_address(
+            &payout_simf, &payout_params, &payout_hints, &[], net, debug,
+        )
+        .expect("maker_payout covenant address compiles");
+        let expect_spk_hash: String =
+            sha256::Hash::hash(payout_addr.script_pubkey().as_bytes())
+                .to_byte_array()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+
+        assert_eq!(
+            fields.get("MAKER_SPK").map(String::as_str),
+            Some(expect_spk_hash.as_str()),
+            "create_instance MAKER_SPK must equal sha256(maker_payout scriptPubKey) for MAKER_PUB_KEY"
+        );
+
+        // The plain `$params.*` fields carry through untouched.
+        assert_eq!(fields.get("AMOUNT_B").map(String::as_str), Some("50000"));
+        assert_eq!(fields.get("TIMEOUT").map(String::as_str), Some("2000000"));
+        assert_eq!(fields.get("MAX_FEE").map(String::as_str), Some("5000"));
+
+        // Drive the ACTUAL tessera_offer utxo_type end-to-end: fold the computed fields back into
+        // ctx (as the constructor pre-pass does) and resolve the offer covenant address.
+        for (k, v) in &fields {
+            ctx.set_compile_param(k, v);
+        }
+        let ut = manifest.utxo_type("tessera_offer").expect("tessera_offer utxo_type exists");
+        let base: std::collections::HashMap<String, String> =
+            ctx.all_compile_params().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let (offer_params, offer_hints) = apply_utxo_compile_params(&base, &hints, ut);
+
+        assert_eq!(
+            offer_params.get("MAKER_SPK").map(String::as_str),
+            Some(expect_spk_hash.as_str()),
+            "the offer covenant compiles against the computed MAKER_SPK"
+        );
+        let offer_simf = manifest_path.parent().unwrap().join("tessera.simf");
+        let offer_addr = crate::covenant::compute_covenant_address(
+            &offer_simf, &offer_params, &offer_hints, &[], net, debug,
+        )
+        .expect("tessera_offer covenant address compiles from create_instance output");
+
+        // Changing an offer term must move the offer address (the terms live in the tapleaf).
+        let mut bumped = offer_params.clone();
+        bumped.insert("AMOUNT_B".to_string(), "50001".to_string());
+        let bumped_addr = crate::covenant::compute_covenant_address(
+            &offer_simf, &bumped, &offer_hints, &[], net, debug,
+        )
+        .expect("bumped offer address compiles");
+        assert_ne!(
+            offer_addr.script_pubkey(),
+            bumped_addr.script_pubkey(),
+            "an offer's price is committed to by its address"
+        );
+
+        // But asset A and its amount are NOT terms — the covenant never inspects them on the
+        // settle path, so the address must not move when they change (see tessera.simf).
+        let mut other_side = offer_params.clone();
+        other_side.insert("OFFER_ASSET_ID".to_string(), lbtc_testnet.to_string());
+        other_side.insert("OFFER_AMOUNT".to_string(), "999".to_string());
+        let other_side_addr = crate::covenant::compute_covenant_address(
+            &offer_simf, &other_side, &offer_hints, &[], net, debug,
+        )
+        .expect("offer address compiles with a different asset A");
+        assert_eq!(
+            offer_addr.script_pubkey(),
+            other_side_addr.script_pubkey(),
+            "asset A and its amount are deliberately not offer terms — the offer is \
+             'whatever sits in this UTXO, for AMOUNT_B of ASSET_B'"
+        );
+    }
 }

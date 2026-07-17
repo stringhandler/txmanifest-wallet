@@ -1,0 +1,14 @@
+{
+  "instance": "..\\txmanifest.instance.1.json",
+  "last_action": "Settle",
+  "utxos": [
+    {
+      "utxo_type": "maker_payout",
+      "utxo_id": "maker_payout_out",
+      "txid": "d6621f52458572ece5d119c5059dc186bc2fe280cb58a498366a38092c45eb6b",
+      "vout": 0,
+      "amount_sat": 2000,
+      "asset": "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49"
+    }
+  ]
+}

@@ -39,6 +39,7 @@ manifest-wallet/
 └── examples/               # sample manifests + .simf programs
     ├── p2pk/               # "hello world" — pay-to-public-key via Simplicity
     ├── lending/            # P2P collateralised lending protocol
+    ├── dex/                # keyless atomic swap offers (Mosaik's Tessera covenant)
     └── last_will/          # time-locked inheritance
 ```
 

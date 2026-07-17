@@ -1,0 +1,14 @@
+{
+  "instance": "..\\txmanifest.instance.1.json",
+  "last_action": "MakeOffer",
+  "utxos": [
+    {
+      "utxo_type": "tessera_offer",
+      "utxo_id": "offer_out",
+      "txid": "b619b09517ff32db71008c0d2fa8efc4e2ca7af1d8361f2cca52d1cdf436dbe1",
+      "vout": 0,
+      "amount_sat": 1000,
+      "asset": "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5"
+    }
+  ]
+}
