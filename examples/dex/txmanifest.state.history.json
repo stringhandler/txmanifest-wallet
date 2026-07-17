@@ -27,6 +27,11 @@
           "asset": "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49"
         }
       ]
+    },
+    {
+      "action": "ClaimPayout",
+      "txid": "2d8c190313370393e3168cef75abb21809a51b880dd07098ed2e99154f8bfcc8",
+      "utxos": []
     }
   ]
 }

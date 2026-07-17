@@ -408,25 +408,15 @@
           "ui": {
             "action": "sweep your swap proceeds into your wallet"
           },
-          "params": {
-            "CLAIM_ASSET_ID": {
-              "type": "liquid.asset_id",
-              "description": "Which asset to sweep out of the payout address: asset B after a Settle, or asset A after a Refund."
-            },
-            "CLAIM_AMOUNT": {
-              "type": "u64",
-              "description": "How much to sweep: AMOUNT_B after a Settle, or the offer amount after a Refund. Unlike the offer inputs this cannot be read off the instance, since it depends on which path paid you — so it is an explicit param. Passing --state lets the state file supply it instead."
-            }
-          },
           "inputs": [
             {
               "id": "payout_in",
-              "description": "The maker_payout covenant UTXO holding the proceeds, located via the state file.",
+              "description": "The maker_payout covenant UTXO holding the proceeds. With --state (the normal flow, since Settle writes one) the amount and asset are read straight off the UTXO record and the values below are ignored entirely. They exist only as the fallback for pinning the outpoint with --input and no state file, and they describe the post-Settle claim: the payout holds exactly AMOUNT_B of ASSET_B. After a Refund it holds asset A instead — that claim needs --state, which is fine, since Refund is not executable yet anyway.",
               "utxo_source": {
                 "utxo_type": "maker_payout"
               },
-              "asset": "params.CLAIM_ASSET_ID",
-              "amount_sat": "params.CLAIM_AMOUNT",
+              "asset": "instance.ASSET_B",
+              "amount_sat": "instance.AMOUNT_B",
               "witnesses": {
                 "SIGNATURE": {
                   "type": "Signature",
@@ -458,9 +448,9 @@
           "outputs": [
             {
               "id": "claimed_out",
-              "description": "The swept proceeds, sent to the maker's wallet.",
+              "description": "The swept proceeds, sent to the maker's wallet. Reads the amount off payout_in, so whatever actually landed in the payout address is what gets swept.",
               "destination": "wallet",
-              "asset": "params.CLAIM_ASSET_ID",
+              "asset": "payout_in.asset",
               "amount_sat": "payout_in.amount_sat",
               "ui": {
                 "label": "proceeds swept to your wallet",
