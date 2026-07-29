@@ -8,5 +8,10 @@
 wallet*.json
 oracle.json
 *_wallet.json
+# Both the base names and the versioned/history ones the engine writes:
+# txmanifest.state.1.json, if.state.history.json, txmanifest.instance.2.json …
 *.state.json
+*.state.*.json
 *.instance.json
+*.instance.*.json
+meta
