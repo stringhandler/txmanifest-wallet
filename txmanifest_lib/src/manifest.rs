@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 
 /// A borrowed list of `(param_name, definition)` pairs.
@@ -11,7 +12,8 @@ pub type ParamRefs<'a> = Vec<(&'a str, &'a ParamDef)>;
 // Top-level file
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     /// Manifest schema version. `compose_version` is accepted as a legacy alias.
     #[serde(alias = "compose_version")]
@@ -19,6 +21,15 @@ pub struct Manifest {
     pub protocol: String,
     pub description: Option<String>,
     pub chain: Option<String>,
+    /// SimplicityHL toolchain version this manifest's `.simf` programs were authored
+    /// against (e.g. `"0.6.0"`). Informational: the engine does not check it, but a
+    /// mismatch is a plausible cause of unexpected CMR/address differences.
+    /// Undocumented in `tx_manifest_spec` as of Spec rev 0.4.0 — see also
+    /// [`Manifest::compile_debug_symbols`], which has the same status but real teeth.
+    pub simplicity_hl_version: Option<String>,
+    /// Version of the attestation format this manifest is signed under. Informational;
+    /// also undocumented in `tx_manifest_spec` as of rev 0.4.0.
+    pub attestation_version: Option<String>,
     /// Top-level SimplicityHL source file (relative to the manifest file).
     pub source: Option<String>,
     /// File-level default for output confidentiality (blinding). When absent, the chain
@@ -48,7 +59,54 @@ pub struct Manifest {
     pub lifecycle: Option<serde_json::Value>,
 }
 
+/// Structural keys an author may place in a manifest that carry no protocol meaning
+/// and are stripped before deserialization.
+///
+/// Every model type is `deny_unknown_fields`, so without this an unremarkable
+/// authoring convention would be a hard parse error:
+///
+/// - `$comment` — JSON has no comment syntax, so manifests carry prose here. Legal in
+///   *any* object, at any depth.
+/// - `$schema` — the editor hint pointing at the published schema (see
+///   [`crate::schema::SCHEMA_ID`]). Conventionally only at the top level, but stripped
+///   anywhere so it never becomes a foot-gun.
+///
+/// The generated schema re-admits both explicitly; see `crate::schema`.
+pub const STRIPPED_KEYS: [&str; 2] = ["$comment", "$schema"];
+
+/// Recursively drop [`STRIPPED_KEYS`] entries from a JSON tree.
+fn strip_authoring_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for key in STRIPPED_KEYS {
+                map.remove(key);
+            }
+            for nested in map.values_mut() {
+                strip_authoring_keys(nested);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_authoring_keys),
+        _ => {}
+    }
+}
+
 impl Manifest {
+    /// Parse a manifest from JSON text. **This is the canonical entry point** —
+    /// prefer it over `serde_json::from_str` so every caller gets the same
+    /// treatment.
+    ///
+    /// Two things happen here that a bare `from_str` does not do:
+    /// 1. [`STRIPPED_KEYS`] (`$comment`, `$schema`) are removed at any depth.
+    /// 2. Everything else is parsed with `deny_unknown_fields`, so a key the
+    ///    model does not know is a hard error rather than a silent no-op. A
+    ///    misspelled `is_constructor` used to parse fine and then simply never
+    ///    fire; now it fails loudly at load time.
+    pub fn from_json_str(raw: &str) -> Result<Self, serde_json::Error> {
+        let mut value: serde_json::Value = serde_json::from_str(raw)?;
+        strip_authoring_keys(&mut value);
+        serde_json::from_value(value)
+    }
+
     /// Return all compile params as (name, def) pairs split into
     /// (user-provided, derived) regardless of which on-disk format is used.
     pub fn compile_param_sets(&self) -> (ParamRefs<'_>, ParamRefs<'_>) {
@@ -99,13 +157,15 @@ impl Manifest {
 // Compile params
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CompileParams {
     pub user_provided: Option<BTreeMap<String, ParamDef>>,
     pub derived: Option<BTreeMap<String, ParamDef>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ParamDef {
     #[serde(rename = "type")]
     pub type_: String,
@@ -130,8 +190,8 @@ pub struct ParamDef {
 /// - `"expr"`: arithmetic expression over other compile params (`pow(base, exp)` supported)
 /// - `"tapleaf"`: compile a `.simf` file and return its Simplicity tapleaf hash (32 bytes hex)
 /// - `"simf_fn"`: call a named function in a `.simf` file and use its return value
-#[derive(Debug, Deserialize)]
-#[serde(tag = "compute", rename_all = "snake_case")]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, tag = "compute", rename_all = "snake_case")]
 pub enum ParamCompute {
     Expr { expr: String },
     Tapleaf {
@@ -182,10 +242,11 @@ fn normalize_compute_value<E: serde::de::Error>(
     mut value: serde_json::Value,
 ) -> Result<ParamCompute, E> {
     if let Some(obj) = value.as_object_mut() {
-        if !obj.contains_key("compute") {
-            if let Some(lang) = obj.remove("lang") {
-                obj.insert("compute".to_string(), lang);
-            }
+        // `lang` is always consumed here, never left in place: the variants are
+        // `deny_unknown_fields`, so a surviving `lang` would fail to deserialize.
+        // When both keys are present `compute` wins and `lang` is simply dropped.
+        if let Some(lang) = obj.remove("lang") {
+            obj.entry("compute".to_string()).or_insert(lang);
         }
     }
     ParamCompute::deserialize(value).map_err(E::custom)
@@ -213,7 +274,8 @@ where
 
 /// A single entry in a `ParamCompute::Tapleaf` params map.
 /// Combines the value reference (compile-param name or literal) with an optional type hint.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TapleafParam {
     /// Manifest type, e.g. `"liquid.asset_id"`, `"u64"`, `"bool"`.
     /// When absent, the type is inferred from the compile-param of the same name.
@@ -223,7 +285,8 @@ pub struct TapleafParam {
     pub value: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ParamSource {
     #[serde(rename = "type")]
     pub type_: String,
@@ -233,7 +296,8 @@ pub struct ParamSource {
 // Action
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Action {
     pub description: Option<String>,
     /// Legacy deploy flag — writes instance_params on broadcast. Prefer `is_constructor`.
@@ -269,7 +333,8 @@ pub struct Action {
 // ---------------------------------------------------------------------------
 
 /// Action-level UI hints. Currently just the one-line action summary (screen 1).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ActionUi {
     /// Template for the one-line action summary. Supports `{ref}` and `{ref:symbol}`
     /// interpolation against the execution context (see `preview::interpolate`).
@@ -278,14 +343,15 @@ pub struct ActionUi {
 
 /// Per-input / per-output UI hint. Accepts either a bare label string
 /// (`"collateral locked"`) or a detailed object for finer control.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, untagged)]
 pub enum UiSpec {
     Label(String),
     Detail(UiDetail),
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UiDetail {
     /// Human-readable one-line description of this leg.
     pub label: Option<String>,
@@ -337,13 +403,29 @@ pub type MethodDef = Action;
 // Inputs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Input {
     pub id: String,
     pub description: Option<String>,
     /// "wallet" or {"utxo_type": "..."} or conditional object
     pub utxo_source: serde_json::Value,
     pub asset: Option<serde_json::Value>,
+    /// When `true`, the transaction proceeds even if this UTXO is not found. Spec §6.
+    ///
+    /// ⚠️ **Parsed but NOT enforced** — the engine has no optional-input path, so a
+    /// missing UTXO fails resolution regardless. `examples/dex` marks its `fee_input`
+    /// optional and does not get that behaviour.
+    pub optional: Option<bool>,
+    /// Required transaction input index: `0`-based absolute, or negative to count from
+    /// the end (`-1` = last). Spec §6.
+    ///
+    /// ⚠️ **Parsed but NOT enforced.** Nothing in the engine reads this field; inputs
+    /// land in declaration order and that ordering happens to satisfy the covenants.
+    /// Manifests assert an index here 106 times and none of it is checked, so a
+    /// reordering that breaks a covenant's introspection would surface only as an
+    /// on-chain failure. See `validate.rs` for where a static check belongs.
+    pub required_index: Option<i64>,
     /// For `utxo_source: "wallet"` inputs: constrain coin selection to UTXOs whose
     /// scriptPubKey equals this address's. A reference (`instance.X` / `params.X`) or a
     /// literal address string. Use this to pin an input to a committed address — e.g. so a
@@ -376,7 +458,8 @@ pub struct Input {
 /// resolves to the input's computed issuance asset ID (or its UTXO asset for
 /// non-issuance inputs), and `"reissuance_token"` resolves to the computed
 /// reissuance token asset ID.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct InlineHook {
     pub set: BTreeMap<String, String>,
 }
@@ -417,7 +500,8 @@ impl Input {
 // Outputs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Output {
     pub id: String,
     pub description: Option<String>,
@@ -426,6 +510,9 @@ pub struct Output {
     pub amount_sat: Option<serde_json::Value>,
     pub asset: Option<serde_json::Value>,
     pub optional: Option<bool>,
+    /// Required transaction output index; same semantics and same caveat as
+    /// [`Input::required_index`] (Spec §7) — parsed, never enforced.
+    pub required_index: Option<i64>,
     pub condition: Option<String>,
     /// OP_RETURN payload, for `destination: {"type":"op_return"}` outputs. Either a
     /// `concat(ref, …)` string, or an object `{"parts": [ … ]}` of typed fields (for exact
@@ -484,7 +571,8 @@ fn json_value_display(v: &serde_json::Value) -> String {
 // Validations
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Validation {
     pub id: String,
     pub description: Option<String>,
@@ -494,7 +582,8 @@ pub struct Validation {
     pub error: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ValidationRule {
     #[serde(rename = "type")]
     pub type_: String,
@@ -507,7 +596,8 @@ pub struct ValidationRule {
 // Hooks (legacy action-level)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Hooks {
     /// keyed by input id, in declaration order
     pub on_input_resolved: Option<BTreeMap<String, InputHook>>,
@@ -515,7 +605,8 @@ pub struct Hooks {
     pub on_validate: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct InputHook {
     pub lang: String,
     /// param path -> SimplicityHL expression
@@ -527,7 +618,8 @@ pub struct InputHook {
 // ---------------------------------------------------------------------------
 
 /// A class definition: typed field declarations and named methods.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ClassDef {
     pub description: Option<String>,
     /// Field declarations — names and types only.  Values are set by constructors.
@@ -539,7 +631,8 @@ pub struct ClassDef {
 }
 
 /// A field declaration inside a class.  Just a name and type; no compute here.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FieldDef {
     #[serde(rename = "type")]
     pub type_: String,
@@ -552,13 +645,15 @@ pub struct FieldDef {
 /// Targets use dot-path notation:
 ///   `"params.FOO"` — sets a method param
 ///   `"args.BAR"`   — sets a method arg
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HookBlock {
     pub set: BTreeMap<String, String>,
 }
 
 /// Describes the new instance written by a constructor after broadcast.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct InstanceCreate {
     /// Must match a key in `manifest.classes`.
     pub class: String,
@@ -570,8 +665,8 @@ pub struct InstanceCreate {
 
 /// A field value in `create_instance.fields`: either a plain expression string
 /// or a structured compute spec (tapleaf hash, etc.).
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, untagged)]
 pub enum FieldValue {
     /// Simple expression: `"$params.COLLATERAL_ASSET_ID"`, `"$inputs.foo.asset"`, etc.
     Expr(String),
@@ -583,7 +678,8 @@ pub enum FieldValue {
 // UtxoType
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UtxoScript {
     #[serde(rename = "type")]
     pub type_: String,
@@ -597,7 +693,8 @@ pub struct UtxoScript {
 }
 
 /// Describes one additional taproot leaf appended to the Simplicity program leaf.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TaprootLeafSpec {
     #[serde(rename = "type")]
     pub type_: String,
@@ -606,7 +703,8 @@ pub struct TaprootLeafSpec {
     pub payload: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UtxoType {
     pub description: String,
     pub script: Option<UtxoScript>,
@@ -719,6 +817,55 @@ mod tests {
 
     fn parse_field_value(json: &str) -> FieldValue {
         serde_json::from_str(json).expect("FieldValue should deserialize")
+    }
+
+    /// A minimal well-formed manifest, with `extra` splatted into the single input.
+    fn manifest_json(extra: &str) -> String {
+        format!(
+            r#"{{
+                "manifest_version": "1",
+                "protocol": "test",
+                "actions": {{ "A": {{ "inputs": [
+                    {{ "id": "in0", "utxo_source": "wallet"{extra} }}
+                ] }} }}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn baseline_manifest_parses() {
+        Manifest::from_json_str(&manifest_json("")).expect("baseline manifest should parse");
+    }
+
+    #[test]
+    fn misspelled_field_is_rejected() {
+        // The whole point of `deny_unknown_fields`: `from_addres` (one 's') used to
+        // parse fine and then silently never constrain coin selection.
+        let err = Manifest::from_json_str(&manifest_json(r#", "from_addres": "abc""#))
+            .expect_err("a misspelled field must not parse");
+        assert!(
+            err.to_string().contains("from_addres"),
+            "error should name the offending key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn comment_key_is_allowed_at_any_depth() {
+        // `$comment` is the one key authors may put in any object; it is stripped
+        // before deserialization rather than modelled on every struct.
+        let json = manifest_json(r#", "$comment": "why this input exists""#);
+        let manifest = Manifest::from_json_str(&json).expect("$comment should be stripped");
+        assert_eq!(manifest.actions["A"].inputs.as_ref().unwrap()[0].id, "in0");
+    }
+
+    #[test]
+    fn comment_key_is_allowed_at_top_level() {
+        let json = r#"{
+            "$comment": "file-level note",
+            "manifest_version": "1",
+            "protocol": "test"
+        }"#;
+        Manifest::from_json_str(json).expect("top-level $comment should be stripped");
     }
 
     #[test]

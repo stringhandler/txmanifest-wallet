@@ -671,7 +671,7 @@ mod tests {
     /// with its instance values.
     fn create_offer_ctx() -> (Manifest, ExecutionContext) {
         let src = include_str!("../../examples/lending_v3/txmanifest.json");
-        let manifest: Manifest = serde_json::from_str(src).expect("parse example manifest");
+        let manifest: Manifest = Manifest::from_json_str(src).expect("parse example manifest");
         let mut ctx = ExecutionContext::new();
         for (k, v) in [
             ("PRINCIPAL_AMOUNT", "1000"),
@@ -704,7 +704,7 @@ mod tests {
     #[test]
     fn every_lending_v3_leg_declares_a_label_and_role() {
         let src = include_str!("../../examples/lending_v3/txmanifest.json");
-        let manifest: Manifest = serde_json::from_str(src).expect("parse example manifest");
+        let manifest: Manifest = Manifest::from_json_str(src).expect("parse example manifest");
 
         let mut missing: Vec<String> = Vec::new();
         for (cname, class) in manifest.classes.as_ref().expect("classes") {
@@ -872,7 +872,7 @@ mod tests {
     fn wallet_nets_omit_round_trips_and_keep_real_movement() {
         use crate::context::ResolvedInput;
         let src = include_str!("../../examples/lending_v3/txmanifest.json");
-        let manifest: Manifest = serde_json::from_str(src).unwrap();
+        let manifest: Manifest = Manifest::from_json_str(src).unwrap();
         let mut ctx = ExecutionContext::new();
         for (k, v) in [
             ("PRINCIPAL_AMOUNT", "1000"),

@@ -1,4 +1,5 @@
 {
+  "$schema": "../../schema/txmanifest.schema.json",
   "$comment": "lending_v3 targets the DEPLOYED simplicity-lending indexer (odev). Interop constants are fixed: factory params (2,0), NUMS key, protocol-fee keeper 38fca2d9…, and the program-id tags below. Change a covenant .simf and you must recompute the matching *_PROGRAM_ID + covenant address.",
   "manifest_version": "0.1.0",
   "protocol": "simplicity-lending",

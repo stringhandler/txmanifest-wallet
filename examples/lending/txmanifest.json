@@ -1,4 +1,5 @@
 {
+  "$schema": "../../schema/txmanifest.schema.json",
   "manifest_version": "0.1.0",
   "protocol": "simplicity-lending",
   "description": "P2P collateralised lending protocol on Liquid using SimplicityHL covenants. Borrower locks collateral in a PreLockCovenant and advertises terms via bit-packed Parameter NFTs. A Lender accepts by providing the principal, activating the LendingCovenant. Settlement is either repayment (borrower returns principal+interest, reclaims collateral) or liquidation (lender claims collateral after loan expiry). All covenants are enforced on-chain via Simplicity programs; no trusted backend is required.",

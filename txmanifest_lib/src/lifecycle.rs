@@ -179,7 +179,7 @@ pub fn run(
         format!("Failed to read manifest file: {}", manifest_file.display())
     })?;
 
-    let manifest: Manifest = serde_json::from_str(&raw).with_context(|| {
+    let manifest: Manifest = Manifest::from_json_str(&raw).with_context(|| {
         format!("Failed to parse manifest file: {}", manifest_file.display())
     })?;
     // Whether covenants compile with SimplicityHL debug symbols (affects every CMR/address).
@@ -4269,7 +4269,7 @@ mod tests {
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../examples/lending_v3/txmanifest.json");
         let raw = std::fs::read_to_string(&manifest_path).expect("read lending_v3 manifest");
-        let manifest: Manifest = serde_json::from_str(&raw).expect("parse lending_v3 manifest");
+        let manifest: Manifest = Manifest::from_json_str(&raw).expect("parse lending_v3 manifest");
         let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
 
         let (_class, _class_def, action) = manifest
@@ -4468,7 +4468,7 @@ mod tests {
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../examples/lending_v3/txmanifest.json");
         let raw = std::fs::read_to_string(&manifest_path).expect("read lending_v3 manifest");
-        let manifest: Manifest = serde_json::from_str(&raw).expect("parse lending_v3 manifest");
+        let manifest: Manifest = Manifest::from_json_str(&raw).expect("parse lending_v3 manifest");
         let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
 
         let (_class, _class_def, create) = manifest
@@ -4625,7 +4625,7 @@ mod tests {
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../examples/dex/txmanifest.json");
         let raw = std::fs::read_to_string(&manifest_path).expect("read dex manifest");
-        let manifest: Manifest = serde_json::from_str(&raw).expect("parse dex manifest");
+        let manifest: Manifest = Manifest::from_json_str(&raw).expect("parse dex manifest");
         let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
 
         let (_class, class_def, action) = manifest

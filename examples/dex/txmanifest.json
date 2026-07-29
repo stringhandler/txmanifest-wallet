@@ -1,4 +1,5 @@
 {
+  "$schema": "../../schema/txmanifest.schema.json",
   "$comment": "Ported from Mosaik's tessera.simf (github.com/kaleidoswap/mosaik, crates/tessera/contracts/tessera.simf). Upstream substitutes the four offer terms as inline TESSERA_PARAM literals; here they are ordinary compile params. Change tessera.simf and every offer address changes — the terms live in the tapleaf. NOTE: the Refund method is not executable until upnext/12 (absolute nLockTime) lands; see its description.",
   "manifest_version": "0.1.0",
   "attestation_version": "1",

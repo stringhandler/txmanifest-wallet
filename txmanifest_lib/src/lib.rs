@@ -12,6 +12,7 @@ pub mod prepare;
 pub mod preview;
 pub mod prompt;
 pub mod pset_builder;
+pub mod schema;
 pub mod state;
 pub mod validate;
 pub mod wallet;
