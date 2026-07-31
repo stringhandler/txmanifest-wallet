@@ -37,17 +37,6 @@
             "null"
           ]
         },
-        "hooks": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Hooks"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Legacy hook block (input-level on_input_resolved)."
-        },
         "inputs": {
           "items": {
             "$ref": "#/definitions/Input"
@@ -233,33 +222,6 @@
       ],
       "type": "object"
     },
-    "Hooks": {
-      "additionalProperties": false,
-      "properties": {
-        "$comment": {
-          "description": "Documentation only; ignored by the engine.",
-          "type": "string"
-        },
-        "on_input_resolved": {
-          "additionalProperties": {
-            "$ref": "#/definitions/InputHook"
-          },
-          "description": "keyed by input id, in declaration order",
-          "type": [
-            "object",
-            "null"
-          ]
-        },
-        "on_validate": {
-          "description": "Inline SimplicityHL source for on_validate",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
     "InlineHook": {
       "additionalProperties": false,
       "description": "Inline hook on an input — evaluated in the standard expression language (not SimplicityHL) once the input is resolved.\n\n`set` maps target paths (e.g. `\"instance.BORROWER_NFT_ASSET_ID\"`) to expressions.  Within an input's own `on_resolved`, the bare keyword `\"asset\"` resolves to the input's computed issuance asset ID (or its UTXO asset for non-issuance inputs), and `\"reissuance_token\"` resolves to the computed reissuance token asset ID.",
@@ -356,30 +318,6 @@
       "required": [
         "id",
         "utxo_source"
-      ],
-      "type": "object"
-    },
-    "InputHook": {
-      "additionalProperties": false,
-      "properties": {
-        "$comment": {
-          "description": "Documentation only; ignored by the engine.",
-          "type": "string"
-        },
-        "lang": {
-          "type": "string"
-        },
-        "set": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "description": "param path -> SimplicityHL expression",
-          "type": "object"
-        }
-      },
-      "required": [
-        "lang",
-        "set"
       ],
       "type": "object"
     },

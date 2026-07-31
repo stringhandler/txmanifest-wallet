@@ -265,8 +265,6 @@ pub struct Action {
     pub args: Option<BTreeMap<String, ParamDef>>,
     pub inputs: Option<Vec<Input>>,
     pub outputs: Option<Vec<Output>>,
-    /// Legacy hook block (input-level on_input_resolved).
-    pub hooks: Option<Hooks>,
     /// Method-level hook: runs after inputs are resolved, before PSET is built.
     pub on_pre_broadcast: Option<HookBlock>,
     /// Method-level hook: runs after broadcast (captures txids, asset IDs).
@@ -518,27 +516,6 @@ fn json_value_display(v: &serde_json::Value) -> String {
         serde_json::Value::Object(_) => "[conditional]".to_string(),
         other => other.to_string(),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Hooks (legacy action-level)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Hooks {
-    /// keyed by input id, in declaration order
-    pub on_input_resolved: Option<BTreeMap<String, InputHook>>,
-    /// Inline SimplicityHL source for on_validate
-    pub on_validate: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct InputHook {
-    pub lang: String,
-    /// param path -> SimplicityHL expression
-    pub set: BTreeMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -858,7 +835,17 @@ mod tests {
             "classes": { "C": { "fields": {}, "methods": {} } }
         }"#;
 
+        // `hooks` — the legacy action-level block. Both members were unused by every
+        // example: `on_input_resolved` is superseded by per-input `on_resolved` (and
+        // executed hooks in alphabetical rather than declaration order), and
+        // `on_validate` was never executed at all.
+        let hooks = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "actions": { "A": { "hooks": { "on_validate": "assert!(true)" } } }
+        }"#;
+
         for (name, json) in [
+            ("hooks", hooks),
             ("classes", classes),
             ("params", params),
             ("source", source),

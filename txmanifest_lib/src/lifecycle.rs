@@ -606,65 +606,6 @@ pub fn run(
         println!("  (no inputs defined for this action)");
     }
 
-    // ------------------------------------------------------------------
-    // Step 3 — Resolving Derived Parameters (on_input_resolved hooks)
-    // ------------------------------------------------------------------
-    println!();
-    println!("{}", step_header("Step 3: Resolving Derived Parameters"));
-
-    let has_hooks = action
-        .hooks
-        .as_ref()
-        .and_then(|h| h.on_input_resolved.as_ref())
-        .map(|m| !m.is_empty())
-        .unwrap_or(false);
-
-    if has_hooks {
-        let hooks = action.hooks.as_ref().unwrap().on_input_resolved.as_ref().unwrap();
-        println!(
-            "  {}",
-            style("Note: hook execution order follows BTreeMap key order (alphabetical). \
-                 A production wallet should use IndexMap to preserve declaration order.")
-            .yellow()
-        );
-        for (input_id, hook) in hooks {
-            for (param_path, expr) in &hook.set {
-                match eval::eval_simplicityhl_hook(expr, input_id, &ctx) {
-                    Ok(value) => {
-                        // Store the result under the appropriate context namespace
-                        if let Some(name) = param_path
-                            .strip_prefix("instance.")
-                            .or_else(|| param_path.strip_prefix("compile_params."))
-                        {
-                            ctx.set_compile_param(name, &value);
-                        } else if let Some(name) = param_path.strip_prefix("params.") {
-                            ctx.set_param(name, &value);
-                        } else if let Some(name) = param_path.strip_prefix("args.") {
-                            ctx.set_arg(name, &value);
-                        }
-                        let short = &value[..value.len().min(16)];
-                        println!(
-                            "  {} {} = {}…",
-                            style("✓").green(),
-                            style(param_path).bold(),
-                            style(short).yellow(),
-                        );
-                    }
-                    Err(e) => {
-                        println!(
-                            "  {} {} (SimplicityHL: {})",
-                            style("[hook — not evaluated]").yellow(),
-                            style(param_path).bold(),
-                            style(e).dim(),
-                        );
-                    }
-                }
-            }
-        }
-    } else {
-        println!("  (no on_input_resolved hooks for this action)");
-    }
-
 
     // ------------------------------------------------------------------
     // Step 3a — Issuance asset IDs + on_resolved compile-param hooks
@@ -891,23 +832,6 @@ pub fn run(
         println!("  {} Using fee rate: {} sat/vb", style("✓").green(), r);
         r
     };
-
-    // ------------------------------------------------------------------
-    // Step 6 — Validation
-    // ------------------------------------------------------------------
-    println!();
-    println!("{}", step_header("Step 6: Validation"));
-
-    // Declarative `validations` were removed pending a future design; the only
-    // thing left to report here is an unexecuted on_validate hook.
-    if let Some(hooks) = &action.hooks {
-        if hooks.on_validate.is_some() {
-            println!(
-                "  {} on_validate hook present (SimplicityHL) — not executed in this version.",
-                style("[TODO]").yellow()
-            );
-        }
-    }
 
     // ------------------------------------------------------------------
     // Step 7 — PSET
