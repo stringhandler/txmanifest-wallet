@@ -695,6 +695,22 @@
       ],
       "type": "object"
     },
+    "SimplicityHl": {
+      "additionalProperties": false,
+      "description": "SimplicityHL toolchain settings — how the `.simf` programs are compiled, as distinct from what the protocol does.\n\nDeliberately carries **no** compiler-version field. SimplicityHL has its own `simc \"<range>\";` source directive, which the compiler enforces fail-fast before lexing, across the entry file and every reachable dependency — none of which a manifest key can do. Tooling that wants the requirement without compiling can read it via `version::SimcDirective::requirement_of`. Declaring it here as well would only create a second place to disagree.",
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "debug_symbols": {
+          "default": false,
+          "description": "Whether covenant `.simf` programs are compiled with debug symbols included.\n\nThis changes the program's CMR **and therefore every covenant address**, because `assert!`/`panic!` embed source info into `fail`-node commitments. Set it to match the toolchain of any protocol this manifest must interoperate with — e.g. `true` for simplicity-lending / `smplx-sdk`, which compiles with debug symbols on.\n\nDefaults to `false` (production; debug symbols are a transitional feature).",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "TapleafParam": {
       "additionalProperties": false,
       "description": "A single entry in a `ParamCompute::Tapleaf` params map. Combines the value reference (compile-param name or literal) with an optional type hint.",
@@ -966,13 +982,6 @@
         "null"
       ]
     },
-    "compile_debug_symbols": {
-      "description": "Whether covenant `.simf` programs are compiled with SimplicityHL debug symbols included. This changes the program's CMR (and therefore every covenant address), because `assert!`/`panic!` embed source info into `fail`-node commitments. Set it to match the toolchain of any protocol this manifest must interoperate with — e.g. `true` for simplicity-lending / `smplx-sdk`, which compiles with debug symbols on. Defaults to `false` (production; debug symbols are a transitional feature).",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
     "description": {
       "type": [
         "string",
@@ -1006,12 +1015,16 @@
     "protocol": {
       "type": "string"
     },
-    "simplicity_hl_version": {
-      "description": "SimplicityHL toolchain version this manifest's `.simf` programs were authored against (e.g. `\"0.6.0\"`). Informational: the engine does not check it, but a mismatch is a plausible cause of unexpected CMR/address differences. Undocumented in `tx_manifest_spec` as of Spec rev 0.4.0 — see also [`Manifest::compile_debug_symbols`], which has the same status but real teeth.",
-      "type": [
-        "string",
-        "null"
-      ]
+    "simplicity_hl": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SimplicityHl"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "SimplicityHL toolchain settings for this manifest's `.simf` programs."
     },
     "source": {
       "description": "Top-level SimplicityHL source file (relative to the manifest file).",

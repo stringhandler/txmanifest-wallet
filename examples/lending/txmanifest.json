@@ -3,7 +3,6 @@
   "manifest_version": "0.1.0",
   "protocol": "simplicity-lending",
   "description": "P2P collateralised lending protocol on Liquid using SimplicityHL covenants. Borrower locks collateral in a PreLockCovenant and advertises terms via bit-packed Parameter NFTs. A Lender accepts by providing the principal, activating the LendingCovenant. Settlement is either repayment (borrower returns principal+interest, reclaims collateral) or liquidation (lender claims collateral after loan expiry). All covenants are enforced on-chain via Simplicity programs; no trusted backend is required.",
-  "simplicity_hl_version": "0.6.0",
   "utxo_types": {
     "p2pk": {
       "description": "Simple Schnorr-signature covenant (p2pk.simf) keyed to BORROWER_PUB_KEY. Used as the borrower's principal-payment and NFT-release address.",

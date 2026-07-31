@@ -20,21 +20,10 @@ pub struct Manifest {
     pub protocol: String,
     pub description: Option<String>,
     pub chain: Option<String>,
-    /// SimplicityHL toolchain version this manifest's `.simf` programs were authored
-    /// against (e.g. `"0.6.0"`). Informational: the engine does not check it, but a
-    /// mismatch is a plausible cause of unexpected CMR/address differences.
-    /// Undocumented in `tx_manifest_spec` as of Spec rev 0.4.0 — see also
-    /// [`Manifest::compile_debug_symbols`], which has the same status but real teeth.
-    pub simplicity_hl_version: Option<String>,
+    /// SimplicityHL toolchain settings for this manifest's `.simf` programs.
+    pub simplicity_hl: Option<SimplicityHl>,
     /// Top-level SimplicityHL source file (relative to the manifest file).
     pub source: Option<String>,
-    /// Whether covenant `.simf` programs are compiled with SimplicityHL debug symbols
-    /// included. This changes the program's CMR (and therefore every covenant address),
-    /// because `assert!`/`panic!` embed source info into `fail`-node commitments. Set it
-    /// to match the toolchain of any protocol this manifest must interoperate with — e.g.
-    /// `true` for simplicity-lending / `smplx-sdk`, which compiles with debug symbols on.
-    /// Defaults to `false` (production; debug symbols are a transitional feature).
-    pub compile_debug_symbols: Option<bool>,
     /// Flat compile-parameter map per spec §5.  Derived params carry `derived: true`.
     /// Kept for backward compatibility; prefer class `fields` in new files.
     pub params: Option<BTreeMap<String, ParamDef>>,
@@ -47,6 +36,30 @@ pub struct Manifest {
     pub classes: Option<BTreeMap<String, ClassDef>>,
     /// u16 error code (as string key) -> English description
     pub errors: Option<BTreeMap<String, String>>,
+}
+
+/// SimplicityHL toolchain settings — how the `.simf` programs are compiled, as
+/// distinct from what the protocol does.
+///
+/// Deliberately carries **no** compiler-version field. SimplicityHL has its own
+/// `simc "<range>";` source directive, which the compiler enforces fail-fast before
+/// lexing, across the entry file and every reachable dependency — none of which a
+/// manifest key can do. Tooling that wants the requirement without compiling can read
+/// it via `version::SimcDirective::requirement_of`. Declaring it here as well would
+/// only create a second place to disagree.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SimplicityHl {
+    /// Whether covenant `.simf` programs are compiled with debug symbols included.
+    ///
+    /// This changes the program's CMR **and therefore every covenant address**, because
+    /// `assert!`/`panic!` embed source info into `fail`-node commitments. Set it to match
+    /// the toolchain of any protocol this manifest must interoperate with — e.g. `true`
+    /// for simplicity-lending / `smplx-sdk`, which compiles with debug symbols on.
+    ///
+    /// Defaults to `false` (production; debug symbols are a transitional feature).
+    #[serde(default)]
+    pub debug_symbols: bool,
 }
 
 /// Structural keys an author may place in a manifest that carry no protocol meaning
@@ -775,9 +788,9 @@ impl UtxoType {
 
 impl Manifest {
     /// Whether covenants should be compiled with SimplicityHL debug symbols included.
-    /// Defaults to `false`; see [`Manifest::compile_debug_symbols`].
+    /// Defaults to `false`; see [`SimplicityHl::debug_symbols`].
     pub fn include_debug_symbols(&self) -> bool {
-        self.compile_debug_symbols.unwrap_or(false)
+        self.simplicity_hl.as_ref().is_some_and(|s| s.debug_symbols)
     }
 
     /// Look up a named `utxo_type` entry.
@@ -861,12 +874,24 @@ mod tests {
             "lifecycle": { "states": ["a"], "transitions": {} }
         }"#;
 
+        // Both folded into the `simplicity_hl` object.
+        let hl_version = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "simplicity_hl_version": "0.6.0"
+        }"#;
+        let debug_symbols = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "compile_debug_symbols": true
+        }"#;
+
         for (name, json) in [
             ("deploy", deploy),
             ("compile_params", compile_params),
             ("attestation_version", attestation),
             ("confidential_outputs", confidential),
             ("lifecycle", lifecycle),
+            ("simplicity_hl_version", hl_version),
+            ("compile_debug_symbols", debug_symbols),
         ] {
             let err =
                 Manifest::from_json_str(json).expect_err("removed field '{name}' must not parse");
@@ -875,6 +900,43 @@ mod tests {
                 "error for '{name}' should name the key, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn simplicity_hl_block_drives_debug_symbols() {
+        // `debug_symbols` changes every covenant address, so pin both the plumbing
+        // and the default rather than trusting the field is wired up.
+        let with_debug = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t",
+                 "simplicity_hl": { "debug_symbols": true } }"#,
+        )
+        .expect("simplicity_hl should parse");
+        assert!(with_debug.include_debug_symbols());
+
+        // An empty block defaults to false...
+        let empty = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t", "simplicity_hl": {} }"#,
+        )
+        .expect("empty simplicity_hl should parse");
+        assert!(!empty.include_debug_symbols());
+
+        // ...and a compiler version does NOT belong here: that is the `.simf`
+        // `simc "<range>";` directive's job, so the key must be rejected.
+        for key in ["version", "min_version", "simc"] {
+            let json = format!(
+                r#"{{ "manifest_version": "1", "protocol": "t",
+                      "simplicity_hl": {{ "{key}": "0.6.0" }} }}"#
+            );
+            assert!(
+                Manifest::from_json_str(&json).is_err(),
+                "simplicity_hl.{key} must not be accepted"
+            );
+        }
+
+        // ...as does an absent block entirely.
+        let absent =
+            Manifest::from_json_str(r#"{ "manifest_version": "1", "protocol": "t" }"#).unwrap();
+        assert!(!absent.include_debug_symbols());
     }
 
     #[test]
