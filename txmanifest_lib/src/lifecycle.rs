@@ -7,7 +7,7 @@ use console::style;
 use lwk_common::Signer;
 use lwk_wollet::{ElementsNetwork, FsPersister, Wollet};
 
-use crate::manifest::{Manifest, Input, Validation};
+use crate::manifest::{Manifest, Input};
 use crate::context::{ExecutionContext, ResolvedInput};
 use crate::instance::InstanceFile;
 use crate::state::{history_path, ContractState, HistoryEntry, StateHistory, StateUtxo};
@@ -1156,6 +1156,8 @@ pub fn run(
     println!();
     println!("{}", step_header("Step 6: Validation"));
 
+    // Declarative `validations` were removed pending a future design; the only
+    // thing left to report here is an unexecuted on_validate hook.
     if let Some(hooks) = &action.hooks {
         if hooks.on_validate.is_some() {
             println!(
@@ -1163,17 +1165,6 @@ pub fn run(
                 style("[TODO]").yellow()
             );
         }
-    }
-
-    if let Some(validations) = &action.validations {
-        if validations.is_empty() {
-            println!("  (no validations defined for this action)");
-        }
-        for validation in validations {
-            run_validation(validation, &manifest, &ctx)?;
-        }
-    } else {
-        println!("  (no validations defined for this action)");
     }
 
     // ------------------------------------------------------------------
@@ -3190,79 +3181,6 @@ fn apply_site_compile_param_overrides(
     (params, hints)
 }
 
-fn run_validation(
-    validation: &Validation,
-    manifest: &Manifest,
-    ctx: &ExecutionContext,
-) -> Result<()> {
-    let desc = validation.description.as_deref().unwrap_or("");
-
-    match validation.rule.type_.as_str() {
-        "arithmetic" => {
-            let expr = validation.rule.expr.as_deref().unwrap_or("[missing expr]");
-            // `!=` comparisons are enforced (e.g. asserting two asset IDs differ).
-            // Other operators remain informational — see eval::eval_inequality_validation.
-            match eval::eval_inequality_validation(expr, ctx) {
-                Some(true) => {
-                    println!(
-                        "  {} Validation '{}': {} {}",
-                        style("✓").green(),
-                        style(&validation.id).bold(),
-                        expr,
-                        style("(ok)").dim(),
-                    );
-                }
-                Some(false) => {
-                    let msg = validation_error_message(validation).unwrap_or_else(|| {
-                        format!("Validation '{}' failed: {}", validation.id, expr)
-                    });
-                    anyhow::bail!("{msg}");
-                }
-                None => {
-                    println!(
-                        "  {} Validation '{}': {}",
-                        style("[TODO]").yellow(),
-                        style(&validation.id).bold(),
-                        expr
-                    );
-                    if !desc.is_empty() {
-                        println!("    {}", style(desc).dim());
-                    }
-                }
-            }
-        }
-        "simplicity_hl" | "simplicityhl" => {
-            println!(
-                "  {} SimplicityHL validation '{}'",
-                style("[TODO]").yellow(),
-                style(&validation.id).bold()
-            );
-            if !desc.is_empty() {
-                println!("    {}", style(desc).dim());
-            }
-        }
-        "utxo_exists" => {
-            let utxo_type = validation.rule.utxo_type.as_deref().unwrap_or("[unknown]");
-            println!(
-                "  {} utxo_exists '{}': checking for utxo_type '{}'",
-                style("[TODO]").yellow(),
-                style(&validation.id).bold(),
-                style(utxo_type).cyan()
-            );
-        }
-        other => {
-            println!(
-                "  {} Unknown validation type '{}' for '{}'",
-                style("[warn]").yellow(),
-                other,
-                validation.id
-            );
-        }
-    }
-
-    let _ = manifest;
-    Ok(())
-}
 
 /// Broadcast a finalized transaction through the configured backend, returning the
 /// txid on success. Esplora uses a direct HTTP `POST /tx`; Electrum goes through the
@@ -3321,15 +3239,6 @@ fn broadcast_finalized_tx(
 
 /// Extract a human-readable message from a validation's `error` field, which may be
 /// a bare string or a `{"code": ..., "message": ...}` object.
-fn validation_error_message(validation: &Validation) -> Option<String> {
-    match validation.error.as_ref()? {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Object(m) => {
-            m.get("message").and_then(|v| v.as_str()).map(String::from)
-        }
-        _ => None,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Method-level hook execution

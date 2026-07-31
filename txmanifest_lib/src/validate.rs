@@ -209,34 +209,6 @@ fn check_action(
         }
     }
 
-    // --- Validations -----------------------------------------------------
-    if let Some(validations) = &action.validations {
-        let mut validation_ids: BTreeSet<&str> = BTreeSet::new();
-        for v in validations {
-            if !validation_ids.insert(v.id.as_str()) {
-                report.error(format!("{loc}.validations"), format!("duplicate validation id '{}'", v.id));
-            }
-            let vloc = format!("{loc}.validations.{}", v.id);
-            match v.rule.type_.as_str() {
-                "arithmetic" => {
-                    if v.rule.expr.as_deref().unwrap_or("").trim().is_empty() {
-                        report.error(vloc, "arithmetic rule has no expr");
-                    }
-                }
-                "utxo_exists" => match v.rule.utxo_type.as_deref() {
-                    Some(name) => {
-                        referenced.insert(name.to_string());
-                        if !utxo_types.contains(name) {
-                            report.error(vloc, format!("utxo_exists references unknown utxo_type '{name}'"));
-                        }
-                    }
-                    None => report.error(vloc, "utxo_exists rule is missing utxo_type"),
-                },
-                other => report.warn(vloc, format!("unknown validation rule type '{other}'")),
-            }
-        }
-    }
-
     // --- Constructor / create_instance -----------------------------------
     if action.is_constructor && action.create_instance.is_none() {
         report.warn(loc.to_string(), "is_constructor is true but there is no create_instance block");

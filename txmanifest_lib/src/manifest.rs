@@ -34,8 +34,6 @@ pub struct Manifest {
     /// Class definitions. Each class has typed fields and methods.
     /// Constructors (`is_constructor: true`) create new instances via `create_instance`.
     pub classes: Option<BTreeMap<String, ClassDef>>,
-    /// u16 error code (as string key) -> English description
-    pub errors: Option<BTreeMap<String, String>>,
 }
 
 /// SimplicityHL toolchain settings — how the `.simf` programs are compiled, as
@@ -300,7 +298,6 @@ pub struct Action {
     pub args: Option<BTreeMap<String, ParamDef>>,
     pub inputs: Option<Vec<Input>>,
     pub outputs: Option<Vec<Output>>,
-    pub validations: Option<Vec<Validation>>,
     /// Legacy hook block (input-level on_input_resolved).
     pub hooks: Option<Hooks>,
     /// Method-level hook: runs after inputs are resolved, before PSET is built.
@@ -554,31 +551,6 @@ fn json_value_display(v: &serde_json::Value) -> String {
         serde_json::Value::Object(_) => "[conditional]".to_string(),
         other => other.to_string(),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Validations
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Validation {
-    pub id: String,
-    pub description: Option<String>,
-    pub rule: ValidationRule,
-    pub error_code: Option<u16>,
-    /// Legacy / new error format: {"code": "...", "message": "..."} or just a string
-    pub error: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ValidationRule {
-    #[serde(rename = "type")]
-    pub type_: String,
-    pub expr: Option<String>,
-    /// For utxo_exists validations
-    pub utxo_type: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -884,6 +856,21 @@ mod tests {
             "compile_debug_symbols": true
         }"#;
 
+        // `errors` — a code→description lookup table nothing ever read.
+        let errors = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "errors": { "1": "something went wrong" }
+        }"#;
+        // `validations` — deferred to a future addition. Of the 11 entries the
+        // examples carried, only 3 were enforced (all `!=` asset-distinctness); the
+        // rest printed [TODO] and passed.
+        let validations = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "actions": { "A": { "validations": [
+                { "id": "v", "rule": { "type": "arithmetic", "expr": "1 != 2" } }
+            ] } }
+        }"#;
+
         for (name, json) in [
             ("deploy", deploy),
             ("compile_params", compile_params),
@@ -892,6 +879,8 @@ mod tests {
             ("lifecycle", lifecycle),
             ("simplicity_hl_version", hl_version),
             ("compile_debug_symbols", debug_symbols),
+            ("errors", errors),
+            ("validations", validations),
         ] {
             let err =
                 Manifest::from_json_str(json).expect_err("removed field '{name}' must not parse");

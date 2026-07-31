@@ -312,7 +312,6 @@
               }
             }
           ],
-          "validations": [],
           "ui": {
             "action": "create a reusable issuance factory — the minter you will create lending offers from"
           }
@@ -935,7 +934,6 @@
               }
             }
           ],
-          "validations": [],
           "ui": {
             "action": "create an offer to borrow {instance.PRINCIPAL_AMOUNT} {instance.PRINCIPAL_ASSET_ID:symbol} by locking {instance.COLLATERAL_AMOUNT} {instance.COLLATERAL_ASSET_ID:symbol} as collateral"
           }
@@ -1079,7 +1077,6 @@
               }
             }
           ],
-          "validations": [],
           "ui": {
             "action": "lend {instance.PRINCIPAL_AMOUNT} {instance.PRINCIPAL_ASSET_ID:symbol} against {instance.COLLATERAL_AMOUNT} {instance.COLLATERAL_ASSET_ID:symbol} of collateral"
           }
@@ -1208,7 +1205,6 @@
               }
             }
           ],
-          "validations": [],
           "ui": {
             "action": "cancel your offer and take back the {instance.COLLATERAL_AMOUNT} {instance.COLLATERAL_ASSET_ID:symbol} collateral"
           }
@@ -1308,8 +1304,7 @@
                 "role": "change"
               }
             }
-          ],
-          "validations": []
+          ]
         },
         "RepayLoan": {
           "ui": {
@@ -1469,8 +1464,7 @@
                 "role": "change"
               }
             }
-          ],
-          "validations": []
+          ]
         }
       }
     }

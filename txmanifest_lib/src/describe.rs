@@ -1,8 +1,8 @@
 //! Interactive explorer for a manifest file.
 //!
 //! `describe` presents a menu of the contract's classes and actions so you can
-//! drill into any one and see its params, inputs, outputs, witnesses, and
-//! validations without reading the raw JSON. When stdout is not a terminal
+//! drill into any one and see its params, inputs, outputs, and witnesses
+//! without reading the raw JSON. When stdout is not a terminal
 //! (e.g. piped to a file), it prints a full non-interactive dump instead.
 
 use anyhow::Result;
@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::manifest::{
-    Action, ClassDef, Manifest, InstanceCreate, Input, Output, ParamDef, Validation,
+    Action, ClassDef, Manifest, InstanceCreate, Input, Output, ParamDef,
 };
 
 /// Entry point: explore the contract interactively, or dump it if non-interactive.
@@ -236,7 +236,6 @@ fn print_action(title: &str, action: &Action) {
     print_inputs(&action.inputs);
     print_outputs(&action.outputs);
     print_witnesses("Witnesses", &action.witnesses);
-    print_validations(&action.validations);
     print_create_instance(&action.create_instance);
 }
 
@@ -338,21 +337,6 @@ fn print_witnesses(label: &str, witnesses: &Option<Value>) {
     }
 }
 
-fn print_validations(validations: &Option<Vec<Validation>>) {
-    let Some(validations) = validations else { return };
-    if validations.is_empty() {
-        return;
-    }
-    println!("  {}", style("Validations").bold());
-    for v in validations {
-        let detail = match v.rule.type_.as_str() {
-            "arithmetic" => v.rule.expr.clone().unwrap_or_default(),
-            "utxo_exists" => format!("utxo_type {}", v.rule.utxo_type.clone().unwrap_or_default()),
-            _ => String::new(),
-        };
-        println!("    {} [{}] {}", style(&v.id).green(), v.rule.type_, style(detail).dim());
-    }
-}
 
 fn print_create_instance(create_instance: &Option<InstanceCreate>) {
     let Some(ci) = create_instance else { return };

@@ -174,41 +174,6 @@
               }
             }
           ],
-          "validations": [
-            {
-              "id": "offer_amount_nonzero",
-              "rule": {
-                "type": "arithmetic",
-                "expr": "params.OFFER_AMOUNT > 0"
-              },
-              "error": {
-                "code": "INVALID_AMOUNT",
-                "message": "Offer amount must be greater than zero"
-              }
-            },
-            {
-              "id": "price_nonzero",
-              "rule": {
-                "type": "arithmetic",
-                "expr": "params.AMOUNT_B > 0"
-              },
-              "error": {
-                "code": "INVALID_PRICE",
-                "message": "Asked amount must be greater than zero"
-              }
-            },
-            {
-              "id": "assets_differ",
-              "rule": {
-                "type": "arithmetic",
-                "expr": "params.OFFER_ASSET_ID != params.ASSET_B"
-              },
-              "error": {
-                "code": "INVALID_PAIR",
-                "message": "Cannot swap an asset for itself"
-              }
-            }
-          ],
           "create_instance": {
             "class": "tessera_offer_contract",
             "fields": {

@@ -114,15 +114,6 @@
           ],
           "description": "\"Clear signing\" UI metadata driving the pre-broadcast confirmation screens (see `preview.rs`). Author-supplied, so only as trustworthy as the manifest's own signature chain — never a substitute for what a hardware device verifies."
         },
-        "validations": {
-          "items": {
-            "$ref": "#/definitions/Validation"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
         "witnesses": true
       },
       "type": "object"
@@ -882,72 +873,6 @@
         "description"
       ],
       "type": "object"
-    },
-    "Validation": {
-      "additionalProperties": false,
-      "properties": {
-        "$comment": {
-          "description": "Documentation only; ignored by the engine.",
-          "type": "string"
-        },
-        "description": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "error": {
-          "description": "Legacy / new error format: {\"code\": \"...\", \"message\": \"...\"} or just a string"
-        },
-        "error_code": {
-          "format": "uint16",
-          "minimum": 0.0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "id": {
-          "type": "string"
-        },
-        "rule": {
-          "$ref": "#/definitions/ValidationRule"
-        }
-      },
-      "required": [
-        "id",
-        "rule"
-      ],
-      "type": "object"
-    },
-    "ValidationRule": {
-      "additionalProperties": false,
-      "properties": {
-        "$comment": {
-          "description": "Documentation only; ignored by the engine.",
-          "type": "string"
-        },
-        "expr": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "type": {
-          "type": "string"
-        },
-        "utxo_type": {
-          "description": "For utxo_exists validations",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "type"
-      ],
-      "type": "object"
     }
   },
   "properties": {
@@ -985,16 +910,6 @@
     "description": {
       "type": [
         "string",
-        "null"
-      ]
-    },
-    "errors": {
-      "additionalProperties": {
-        "type": "string"
-      },
-      "description": "u16 error code (as string key) -> English description",
-      "type": [
-        "object",
         "null"
       ]
     },

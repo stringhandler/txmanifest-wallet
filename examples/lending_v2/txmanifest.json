@@ -575,20 +575,6 @@
               "asset": "lbtc",
               "optional": true
             }
-          ],
-          "validations": [
-            {
-              "id": "collateral_principal_distinct",
-              "description": "Collateral and principal must be different assets.",
-              "rule": {
-                "type": "arithmetic",
-                "expr": "params.COLLATERAL_ASSET_ID != params.PRINCIPAL_ASSET_ID"
-              },
-              "error": {
-                "code": "ASSET_COLLISION",
-                "message": "COLLATERAL_ASSET_ID and PRINCIPAL_ASSET_ID must be different assets."
-              }
-            }
           ]
         },
         "LockCollateral": {
@@ -710,20 +696,6 @@
               "destination": "change",
               "asset": "lbtc",
               "optional": true
-            }
-          ],
-          "validations": [
-            {
-              "id": "collateral_amount_matches",
-              "description": "Collateral input must exactly match COLLATERAL_AMOUNT.",
-              "rule": {
-                "type": "arithmetic",
-                "expr": "collateral_in.amount_sat == instance.COLLATERAL_AMOUNT"
-              },
-              "error": {
-                "code": "AMOUNT_MISMATCH",
-                "message": "Collateral input amount does not match COLLATERAL_AMOUNT"
-              }
             }
           ]
         },
@@ -1306,20 +1278,6 @@
               "destination": "change",
               "asset": "lbtc",
               "optional": true
-            }
-          ],
-          "validations": [
-            {
-              "id": "expiry_reached",
-              "description": "Current block height must be >= LOAN_EXPIRATION_TIME.",
-              "rule": {
-                "type": "arithmetic",
-                "expr": "current_block_height >= instance.LOAN_EXPIRATION_TIME"
-              },
-              "error": {
-                "code": "TIMELOCK_NOT_ELAPSED",
-                "message": "Loan has not yet expired. Cannot liquidate before LOAN_EXPIRATION_TIME."
-              }
             }
           ]
         },

@@ -59,19 +59,6 @@
                     "asset": "lbtc",
                     "optional": true
                 }
-            ],
-            "validations": [
-                {
-                    "id": "amount_nonzero",
-                    "rule": {
-                        "type": "arithmetic",
-                        "expr": "params.amount_sat > 0"
-                    },
-                    "error": {
-                        "code": "INVALID_AMOUNT",
-                        "message": "Amount must be greater than zero"
-                    }
-                }
             ]
         },
         "Receive": {
