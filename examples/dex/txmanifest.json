@@ -35,7 +35,7 @@
       "confidential": false
     }
   },
-  "classes": {
+  "contract_templates": {
     "tessera_offer_contract": {
       "description": "One Tessera swap offer. Created by MakeOffer, then consumed by exactly one of Settle (a taker fills it) or Refund (it expired). ClaimPayout is the maker's follow-up sweep of their proceeds.",
       "fields": {
@@ -175,7 +175,7 @@
             }
           ],
           "create_instance": {
-            "class": "tessera_offer_contract",
+            "template": "tessera_offer_contract",
             "fields": {
               "OFFER_ASSET_ID": "$params.OFFER_ASSET_ID",
               "OFFER_AMOUNT": "$params.OFFER_AMOUNT",

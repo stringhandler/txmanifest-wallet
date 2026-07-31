@@ -132,7 +132,7 @@
       ]
     }
   },
-  "classes": {
+  "contract_templates": {
     "lending_contract": {
       "description": "P2P collateralised lending contract. One instance per loan offer. Created by IssueUtilityNFTs; advanced through LockCollateral, SetupLending, RepayLoan / LiquidateAfterExpiry, and ClaimPrincipalWithInterest.",
       "fields": {
@@ -259,7 +259,7 @@
             }
           },
           "create_instance": {
-            "class": "lending_contract",
+            "template": "lending_contract",
             "fields": {
               "BORROWER_NFT_ASSET_ID": "$compile_params.BORROWER_NFT_ASSET_ID",
               "BORROWER_NFT_OUTPUT_SCRIPT_HASH": {

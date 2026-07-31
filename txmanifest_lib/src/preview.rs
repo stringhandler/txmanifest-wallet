@@ -689,7 +689,7 @@ mod tests {
 
     fn create_offer(manifest: &Manifest) -> &Action {
         manifest
-            .classes
+            .contract_templates
             .as_ref()
             .and_then(|c| c.get("lending_contract"))
             .and_then(|c| c.methods.get("CreateOffer"))
@@ -707,7 +707,7 @@ mod tests {
         let manifest: Manifest = Manifest::from_json_str(src).expect("parse example manifest");
 
         let mut missing: Vec<String> = Vec::new();
-        for (cname, class) in manifest.classes.as_ref().expect("classes") {
+        for (cname, class) in manifest.contract_templates.as_ref().expect("contract_templates") {
             for (mname, method) in &class.methods {
                 // A one-line summary of intent, shown as the first clear-signing screen.
                 if method.ui.as_ref().and_then(|u| u.action.as_deref()).is_none() {
@@ -891,7 +891,7 @@ mod tests {
                 amount_sat: amount, asset: asset.into(), issuance_entropy: None,
             });
         }
-        let action = manifest.classes.as_ref().unwrap().get("lending_contract").unwrap()
+        let action = manifest.contract_templates.as_ref().unwrap().get("lending_contract").unwrap()
             .methods.get("ClaimPrincipal").unwrap();
         let buckets = build_net_effect(action, &ctx, Some(195));
         let nets = wallet_nets(&buckets, None);

@@ -20,12 +20,12 @@ pub struct Manifest {
     /// SimplicityHL toolchain settings for this manifest's `.simf` programs.
     pub simplicity_hl: Option<SimplicityHl>,
     pub utxo_types: Option<BTreeMap<String, UtxoType>>,
-    /// Standalone actions that require no class instance (e.g. Prepare).
+    /// Standalone actions that require no template instance (e.g. Prepare).
     #[serde(default)]
     pub actions: BTreeMap<String, Action>,
-    /// Class definitions. Each class has typed fields and methods.
+    /// Contract template definitions. Each template has typed fields and methods.
     /// Constructors (`is_constructor: true`) create new instances via `create_instance`.
-    pub classes: Option<BTreeMap<String, ClassDef>>,
+    pub contract_templates: Option<BTreeMap<String, ContractTemplate>>,
 }
 
 /// SimplicityHL toolchain settings — how the `.simf` programs are compiled, as
@@ -100,14 +100,14 @@ impl Manifest {
         serde_json::from_value(value)
     }
 
-    /// Find a method by name across all classes.
-    /// Returns `(class_id, class_def, action)` for the first match.
+    /// Find a method by name across all contract templates.
+    /// Returns `(template_id, template_def, action)` for the first match.
     /// `MethodDef` is a type alias for `Action`, so the return is `&Action`.
-    pub fn find_class_and_method(&self, name: &str) -> Option<(&str, &ClassDef, &Action)> {
-        let classes = self.classes.as_ref()?;
-        for (class_id, class_def) in classes {
-            if let Some(method) = class_def.methods.get(name) {
-                return Some((class_id.as_str(), class_def, method));
+    pub fn find_template_and_method(&self, name: &str) -> Option<(&str, &ContractTemplate, &Action)> {
+        let contract_templates = self.contract_templates.as_ref()?;
+        for (template_id, template_def) in contract_templates {
+            if let Some(method) = template_def.methods.get(name) {
+                return Some((template_id.as_str(), template_def, method));
             }
         }
         None
@@ -348,7 +348,7 @@ impl UiSpec {
     }
 }
 
-/// Methods inside a class are structurally identical to standalone actions.
+/// Methods inside a contract template are structurally identical to standalone actions.
 pub type MethodDef = Action;
 
 // ---------------------------------------------------------------------------
@@ -545,10 +545,10 @@ pub struct InputHook {
 // Class / Instance model
 // ---------------------------------------------------------------------------
 
-/// A class definition: typed field declarations and named methods.
+/// A contract template: typed field declarations and named methods.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ClassDef {
+pub struct ContractTemplate {
     pub description: Option<String>,
     /// Field declarations — names and types only.  Values are set by constructors.
     #[serde(default)]
@@ -558,7 +558,7 @@ pub struct ClassDef {
     pub methods: BTreeMap<String, MethodDef>,
 }
 
-/// A field declaration inside a class.  Just a name and type; no compute here.
+/// A field declaration inside a contract template.  Just a name and type; no compute here.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FieldDef {
@@ -583,8 +583,8 @@ pub struct HookBlock {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InstanceCreate {
-    /// Must match a key in `manifest.classes`.
-    pub class: String,
+    /// Must match a key in `manifest.contract_templates`.
+    pub template: String,
     /// Maps field names to their initial values.
     /// Each value is either a string expression (`"$params.FOO"`)
     /// or a compute spec (`{ "compute": "tapleaf", ... }`).
@@ -838,7 +838,7 @@ mod tests {
             ] } }
         }"#;
 
-        // Top-level `params` — no example ever used it; class `fields` is the live
+        // Top-level `params` — no example ever used it; template `fields` is the live
         // path. Action-level `params` is a different field and still exists.
         let params = r#"{
             "manifest_version": "1", "protocol": "test",
@@ -851,7 +851,15 @@ mod tests {
             "source": "./covenant.simf"
         }"#;
 
+        // `classes` — renamed to `contract_templates` to match tx_manifest_spec
+        // (2026-07-06). `create_instance.class` became `template` in the same pass.
+        let classes = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "classes": { "C": { "fields": {}, "methods": {} } }
+        }"#;
+
         for (name, json) in [
+            ("classes", classes),
             ("params", params),
             ("source", source),
             ("deploy", deploy),

@@ -84,8 +84,8 @@ pub fn validate(manifest: &Manifest) -> Report {
         .map(|m| m.keys().map(String::as_str).collect())
         .unwrap_or_default();
 
-    let class_names: BTreeSet<&str> = manifest
-        .classes
+    let template_names: BTreeSet<&str> = manifest
+        .contract_templates
         .as_ref()
         .map(|m| m.keys().map(String::as_str).collect())
         .unwrap_or_default();
@@ -96,13 +96,13 @@ pub fn validate(manifest: &Manifest) -> Report {
     for (name, action) in &manifest.actions {
         actions.push((format!("actions.{name}"), name.clone(), action));
     }
-    if let Some(classes) = &manifest.classes {
-        for (cname, cdef) in classes {
+    if let Some(contract_templates) = &manifest.contract_templates {
+        for (cname, cdef) in contract_templates {
             for (mname, method) in &cdef.methods {
-                actions.push((format!("classes.{cname}.methods.{mname}"), mname.clone(), method));
+                actions.push((format!("contract_templates.{cname}.methods.{mname}"), mname.clone(), method));
             }
             for (fname, fdef) in &cdef.fields {
-                let floc = format!("classes.{cname}.fields.{fname}");
+                let floc = format!("contract_templates.{cname}.fields.{fname}");
                 if let Some(desc) = &fdef.description {
                     if desc.trim().is_empty() {
                         report.warn(&floc, "description is present but empty");
@@ -138,7 +138,7 @@ pub fn validate(manifest: &Manifest) -> Report {
     let mut referenced: BTreeSet<String> = BTreeSet::new();
 
     for (loc, _bare, action) in &actions {
-        check_action(&mut report, &utxo_types, &class_names, &mut referenced, loc, action);
+        check_action(&mut report, &utxo_types, &template_names, &mut referenced, loc, action);
     }
 
     // --- Unreferenced UTXO types -----------------------------------------
@@ -157,7 +157,7 @@ pub fn validate(manifest: &Manifest) -> Report {
 fn check_action(
     report: &mut Report,
     utxo_types: &BTreeSet<&str>,
-    class_names: &BTreeSet<&str>,
+    template_names: &BTreeSet<&str>,
     referenced: &mut BTreeSet<String>,
     loc: &str,
     action: &Action,
@@ -214,10 +214,10 @@ fn check_action(
         report.warn(loc.to_string(), "is_constructor is true but there is no create_instance block");
     }
     if let Some(ci) = &action.create_instance {
-        if !class_names.contains(ci.class.as_str()) {
+        if !template_names.contains(ci.template.as_str()) {
             report.error(
                 format!("{loc}.create_instance"),
-                format!("references unknown class '{}'", ci.class),
+                format!("references unknown contract template '{}'", ci.template),
             );
         }
     }

@@ -124,7 +124,7 @@ enum Commands {
         manifest_file: PathBuf,
     },
 
-    /// Interactively explore a manifest file's classes and actions
+    /// Interactively explore a manifest file's contract_templates and actions
     Describe {
         /// Path to the manifest (txmanifest.json) file
         manifest_file: PathBuf,

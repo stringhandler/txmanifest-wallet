@@ -256,15 +256,15 @@ pub fn run(
         _ => vec![],
     };
 
-    // Dispatch: standalone actions first, then class methods.
+    // Dispatch: standalone actions first, then contract-template methods.
     let action = if let Some(a) = manifest.actions.get(action_name) {
         a
-    } else if let Some((_class_id, _class_def, method)) = manifest.find_class_and_method(action_name) {
+    } else if let Some((_class_id, _class_def, method)) = manifest.find_template_and_method(action_name) {
         method
     } else {
         let mut available: Vec<String> = manifest.actions.keys().cloned().collect();
-        if let Some(classes) = &manifest.classes {
-            for cls in classes.values() {
+        if let Some(contract_templates) = &manifest.contract_templates {
+            for cls in contract_templates.values() {
                 available.extend(cls.methods.keys().cloned());
             }
         }
@@ -313,10 +313,10 @@ pub fn run(
     println!();
     println!("{}", step_header("Step 1: Parameters"));
 
-    // Load all class field values from the instance file as compile params.
-    if let Some((_, class_def, _)) = manifest.find_class_and_method(action_name) {
-        let mut loaded_class = 0usize;
-        for (field_name, field_def) in &class_def.fields {
+    // Load all template field values from the instance file as compile params.
+    if let Some((_, template_def, _)) = manifest.find_template_and_method(action_name) {
+        let mut loaded_fields = 0usize;
+        for (field_name, field_def) in &template_def.fields {
             if ctx.get_compile_param(field_name).is_some() {
                 continue;
             }
@@ -325,7 +325,7 @@ pub fn run(
                 .or_else(|| overrides.get(field_name))
             {
                 ctx.set_compile_param(field_name, v);
-                loaded_class += 1;
+                loaded_fields += 1;
             } else if !action.is_constructor {
                 // Not in instance or overrides — prompt, pre-filling with default if set.
                 // Skipped for constructors: every field is an output computed by create_instance.
@@ -338,10 +338,10 @@ pub fn run(
                 ctx.set_compile_param(field_name, value);
             }
         }
-        if loaded_class > 0 {
+        if loaded_fields > 0 {
             println!(
-                "  {} {} class field(s) loaded from instance.",
-                style("✓").green(), loaded_class
+                "  {} {} template field(s) loaded from instance.",
+                style("✓").green(), loaded_fields
             );
         }
     }
@@ -350,9 +350,9 @@ pub fn run(
     let mut compile_param_type_hints: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
 
-    // Extend type hints with class field types for class methods.
-    if let Some((_, class_def, _)) = manifest.find_class_and_method(action_name) {
-        for (field_name, field_def) in &class_def.fields {
+    // Extend type hints with template field types for template methods.
+    if let Some((_, template_def, _)) = manifest.find_template_and_method(action_name) {
+        for (field_name, field_def) in &template_def.fields {
             compile_param_type_hints
                 .entry(field_name.clone())
                 .or_insert_with(|| field_def.type_.clone());
@@ -964,7 +964,7 @@ pub fn run(
 
     // For constructor actions: pre-compute create_instance tapleaf fields (e.g.
     // FUNDING_SCRIPT_HASH) so they are present in compile_params_map for Step 7.
-    // Without this, missing class fields fall back to the literal param name as a
+    // Without this, missing template fields fall back to the literal param name as a
     // value, which later fails `Value::parse_from_str` with non-hex characters.
     if action.is_constructor {
         if let Some(ci) = &action.create_instance {
@@ -988,9 +988,9 @@ pub fn run(
 
     let compile_params_map: std::collections::HashMap<String, String> = {
         let mut m = std::collections::HashMap::new();
-        // For class methods: also expose class field values (loaded into ctx in Step 1).
-        if let Some((_, class_def, _)) = manifest.find_class_and_method(action_name) {
-            for field_name in class_def.fields.keys() {
+        // For template methods: also expose template field values (loaded into ctx in Step 1).
+        if let Some((_, template_def, _)) = manifest.find_template_and_method(action_name) {
+            for field_name in template_def.fields.keys() {
                 if !m.contains_key(field_name.as_str()) {
                     if let Some(v) = ctx.get_compile_param(field_name) {
                         m.insert(field_name.clone(), v.to_string());
@@ -2075,7 +2075,7 @@ pub fn run(
             );
             let inst = crate::instance::InstanceFile {
                 instance: Some(crate::instance::InstanceData {
-                    class: ci.class.clone(),
+                    template: ci.template.clone(),
                     fields: fields.into_iter().collect(),
                 }),
                 instance_params: std::collections::HashMap::new(),
@@ -2838,7 +2838,7 @@ fn amount_uses_fee_keyword(v: &serde_json::Value) -> bool {
 /// Supports `params.NAME` (an action param — used when a covenant is keyed by a
 /// runtime value), plus the `$params.NAME` / `instance.NAME` forms (and the
 /// deprecated `compile_params.NAME` alias) that resolve against compile params /
-/// class fields. Anything else is returned verbatim and treated as a literal
+/// template fields. Anything else is returned verbatim and treated as a literal
 /// pubkey hex.
 fn resolve_witness_signing_key<'a>(
     key_ref: &'a str,
@@ -3454,7 +3454,7 @@ mod tests {
     fn wallet_key_action_param_overwrites_stale_compile_param() {
         let mut ctx = ExecutionContext::new();
 
-        // Simulate class-fields loading from a previous instance file.
+        // Simulate template-fields loading from a previous instance file.
         ctx.set_compile_param("BORROWER_PUB_KEY", "1d4c354f5f91613f50ba8f59361bc5fb0d0e01fbb90495b7fbfc744e8f5d2253");
 
         // Simulate the fixed action-params handler: both writes now happen.
@@ -3611,7 +3611,7 @@ mod tests {
             FieldValue::Expr("$params.MY_KEY".to_string()),
         );
         let ci = InstanceCreate {
-            class: "test".to_string(),
+            template: "test".to_string(),
             fields,
         };
 
@@ -3649,7 +3649,7 @@ mod tests {
         let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
 
         let (_class, _class_def, action) = manifest
-            .find_class_and_method("CreateOffer")
+            .find_template_and_method("CreateOffer")
             .expect("CreateOffer method exists");
         let ci = action.create_instance.as_ref().expect("CreateOffer has create_instance");
 
@@ -3680,10 +3680,10 @@ mod tests {
         ctx.set_compile_param("BORROWER_NFT_ASSET_ID", borrower_nft);
         ctx.set_compile_param("LENDER_NFT_ASSET_ID", lender_nft);
 
-        // Type hints from the class field + method param declarations.
+        // Type hints from the template field + method param declarations.
         let mut hints: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        if let Some((_, class_def, _)) = manifest.find_class_and_method("CreateOffer") {
-            for (fname, fdef) in &class_def.fields {
+        if let Some((_, template_def, _)) = manifest.find_template_and_method("CreateOffer") {
+            for (fname, fdef) in &template_def.fields {
                 hints.insert(fname.clone(), fdef.type_.clone());
             }
         }
@@ -3848,7 +3848,7 @@ mod tests {
         let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
 
         let (_class, _class_def, create) = manifest
-            .find_class_and_method("CreateOffer")
+            .find_template_and_method("CreateOffer")
             .expect("CreateOffer method exists");
         let ci = create.create_instance.as_ref().expect("CreateOffer has create_instance");
 
@@ -3869,8 +3869,8 @@ mod tests {
         ctx.set_compile_param("LENDER_NFT_ASSET_ID", "213462821a5cdb96f435f5ea6597e8937359d6fd5a64b6ac8ef4262bc279fcfb");
 
         let mut hints: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        if let Some((_, class_def, _)) = manifest.find_class_and_method("CreateOffer") {
-            for (fname, fdef) in &class_def.fields {
+        if let Some((_, template_def, _)) = manifest.find_template_and_method("CreateOffer") {
+            for (fname, fdef) in &template_def.fields {
                 hints.insert(fname.clone(), fdef.type_.clone());
             }
         }
@@ -3926,7 +3926,7 @@ mod tests {
         //   protocol_fee  = 1000 * 1000/10000        =  100   (10% of the interest)
         //   lender share  = CURRENT_DEBT(2000) - 100 = 1900
         // Sum must be exactly the debt — the covenant's split_repayment_by_fees leaves no dust.
-        let (_, _, repay) = manifest.find_class_and_method("RepayLoan").expect("RepayLoan method exists");
+        let (_, _, repay) = manifest.find_template_and_method("RepayLoan").expect("RepayLoan method exists");
         let rp = repay.params.as_ref().expect("RepayLoan has params");
         let formula_of = |name: &str| rp.get(name).and_then(|p| p.formula.clone())
             .unwrap_or_else(|| panic!("{name} has a formula"));
@@ -4004,8 +4004,8 @@ mod tests {
         let manifest: Manifest = Manifest::from_json_str(&raw).expect("parse dex manifest");
         let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
 
-        let (_class, class_def, action) = manifest
-            .find_class_and_method("MakeOffer")
+        let (_class, template_def, action) = manifest
+            .find_template_and_method("MakeOffer")
             .expect("MakeOffer method exists");
         let ci = action.create_instance.as_ref().expect("MakeOffer has create_instance");
 
@@ -4026,9 +4026,9 @@ mod tests {
         ctx.set_param("TIMEOUT", "2000000");
         ctx.set_param("MAX_FEE", "5000");
 
-        // Type hints from the class field + method param declarations (mirrors Step 7's pre-pass).
+        // Type hints from the template field + method param declarations (mirrors Step 7's pre-pass).
         let mut hints: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        for (fname, fdef) in &class_def.fields {
+        for (fname, fdef) in &template_def.fields {
             hints.insert(fname.clone(), fdef.type_.clone());
         }
         if let Some(params) = &action.params {

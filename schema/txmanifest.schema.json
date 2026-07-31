@@ -136,9 +136,9 @@
       },
       "type": "object"
     },
-    "ClassDef": {
+    "ContractTemplate": {
       "additionalProperties": false,
-      "description": "A class definition: typed field declarations and named methods.",
+      "description": "A contract template: typed field declarations and named methods.",
       "properties": {
         "$comment": {
           "description": "Documentation only; ignored by the engine.",
@@ -169,7 +169,7 @@
     },
     "FieldDef": {
       "additionalProperties": false,
-      "description": "A field declaration inside a class.  Just a name and type; no compute here.",
+      "description": "A field declaration inside a contract template.  Just a name and type; no compute here.",
       "properties": {
         "$comment": {
           "description": "Documentation only; ignored by the engine.",
@@ -391,21 +391,21 @@
           "description": "Documentation only; ignored by the engine.",
           "type": "string"
         },
-        "class": {
-          "description": "Must match a key in `manifest.classes`.",
-          "type": "string"
-        },
         "fields": {
           "additionalProperties": {
             "$ref": "#/definitions/FieldValue"
           },
           "description": "Maps field names to their initial values. Each value is either a string expression (`\"$params.FOO\"`) or a compute spec (`{ \"compute\": \"tapleaf\", ... }`).",
           "type": "object"
+        },
+        "template": {
+          "description": "Must match a key in `manifest.contract_templates`.",
+          "type": "string"
         }
       },
       "required": [
-        "class",
-        "fields"
+        "fields",
+        "template"
       ],
       "type": "object"
     },
@@ -888,7 +888,7 @@
       "additionalProperties": {
         "$ref": "#/definitions/Action"
       },
-      "description": "Standalone actions that require no class instance (e.g. Prepare).",
+      "description": "Standalone actions that require no template instance (e.g. Prepare).",
       "type": "object"
     },
     "chain": {
@@ -897,11 +897,11 @@
         "null"
       ]
     },
-    "classes": {
+    "contract_templates": {
       "additionalProperties": {
-        "$ref": "#/definitions/ClassDef"
+        "$ref": "#/definitions/ContractTemplate"
       },
-      "description": "Class definitions. Each class has typed fields and methods. Constructors (`is_constructor: true`) create new instances via `create_instance`.",
+      "description": "Contract template definitions. Each template has typed fields and methods. Constructors (`is_constructor: true`) create new instances via `create_instance`.",
       "type": [
         "object",
         "null"

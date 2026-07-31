@@ -21,7 +21,7 @@
             "confidential": false
         }
     },
-    "classes": {
+    "contract_templates": {
         "last_will_contract": {
             "description": "A last-will covenant. One instance per will: created by Fund, then spent via ColdBreak, Refresh, or Inherit.",
             "fields": {
@@ -95,7 +95,7 @@
                         }
                     ],
                     "create_instance": {
-                        "class": "last_will_contract",
+                        "template": "last_will_contract",
                         "fields": {
                             "INHERITOR_PUB_KEY": "$params.INHERITOR_PUB_KEY",
                             "HOT_PUB_KEY": "$params.HOT_PUB_KEY",

@@ -1,6 +1,6 @@
 //! Interactive explorer for a manifest file.
 //!
-//! `describe` presents a menu of the contract's classes and actions so you can
+//! `describe` presents a menu of the contract's templates and actions so you can
 //! drill into any one and see its params, inputs, outputs, and witnesses
 //! without reading the raw JSON. When stdout is not a terminal
 //! (e.g. piped to a file), it prints a full non-interactive dump instead.
@@ -12,12 +12,12 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::manifest::{
-    Action, ClassDef, Manifest, InstanceCreate, Input, Output, ParamDef,
+    Action, ContractTemplate, Manifest, InstanceCreate, Input, Output, ParamDef,
 };
 
 /// Entry point: explore the contract interactively, or dump it if non-interactive.
 ///
-/// When `action` names a standalone action or a class method, its docs are printed
+/// When `action` names a standalone action or a template method, its docs are printed
 /// directly and no menu is shown.
 pub fn describe(manifest: &Manifest, action: Option<&str>) -> Result<()> {
     if let Some(name) = action {
@@ -29,21 +29,21 @@ pub fn describe(manifest: &Manifest, action: Option<&str>) -> Result<()> {
     main_menu(manifest)
 }
 
-/// Print one action's docs: a standalone action, or a `Class.method`.
+/// Print one action's docs: a standalone action, or a `Template.method`.
 fn describe_action(manifest: &Manifest, name: &str) -> Result<()> {
     if let Some(action) = manifest.actions.get(name) {
         print_action(name, action);
         return Ok(());
     }
-    if let Some((class_id, _class_def, method)) = manifest.find_class_and_method(name) {
-        print_action(&format!("{class_id}.{name}"), method);
+    if let Some((template_id, _class_def, method)) = manifest.find_template_and_method(name) {
+        print_action(&format!("{template_id}.{name}"), method);
         return Ok(());
     }
 
     let mut available: Vec<String> = manifest.actions.keys().cloned().collect();
-    if let Some(classes) = &manifest.classes {
-        for (class_id, cls) in classes {
-            available.extend(cls.methods.keys().map(|m| format!("{class_id}.{m}")));
+    if let Some(contract_templates) = &manifest.contract_templates {
+        for (template_id, cls) in contract_templates {
+            available.extend(cls.methods.keys().map(|m| format!("{template_id}.{m}")));
         }
     }
     anyhow::bail!(
@@ -55,7 +55,7 @@ fn describe_action(manifest: &Manifest, name: &str) -> Result<()> {
 /// What a top-level menu entry maps to.
 enum Target {
     Overview,
-    Class(String),
+    Template(String),
     Action(String),
     Quit,
 }
@@ -68,10 +68,10 @@ fn main_menu(manifest: &Manifest) -> Result<()> {
         labels.push("Overview".to_string());
         targets.push(Target::Overview);
 
-        if let Some(classes) = &manifest.classes {
-            for (cname, cdef) in classes {
-                labels.push(format!("class   {cname}  ({} methods)", cdef.methods.len()));
-                targets.push(Target::Class(cname.clone()));
+        if let Some(contract_templates) = &manifest.contract_templates {
+            for (cname, cdef) in contract_templates {
+                labels.push(format!("template  {cname}  ({} methods)", cdef.methods.len()));
+                targets.push(Target::Template(cname.clone()));
             }
         }
         for aname in manifest.actions.keys() {
@@ -91,7 +91,7 @@ fn main_menu(manifest: &Manifest) -> Result<()> {
         let Some(idx) = selection else { break };
         match &targets[idx] {
             Target::Overview => print_overview(manifest),
-            Target::Class(name) => class_menu(manifest, name)?,
+            Target::Template(name) => template_menu(manifest, name)?,
             Target::Action(name) => {
                 if let Some(action) = manifest.actions.get(name) {
                     print_action(name, action);
@@ -103,23 +103,23 @@ fn main_menu(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn class_menu(manifest: &Manifest, class_name: &str) -> Result<()> {
-    let class = match manifest.classes.as_ref().and_then(|c| c.get(class_name)) {
+fn template_menu(manifest: &Manifest, template_name: &str) -> Result<()> {
+    let template = match manifest.contract_templates.as_ref().and_then(|c| c.get(template_name)) {
         Some(c) => c,
         None => return Ok(()),
     };
-    print_class_header(class_name, class);
+    print_template_header(template_name, template);
 
     loop {
         let mut labels: Vec<String> = Vec::new();
-        let method_names: Vec<&String> = class.methods.keys().collect();
+        let method_names: Vec<&String> = template.methods.keys().collect();
         for mname in &method_names {
             labels.push(format!("method  {mname}"));
         }
         labels.push("← Back".to_string());
 
         let selection = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt(format!("class {class_name}"))
+            .with_prompt(format!("template {template_name}"))
             .items(&labels)
             .default(0)
             .interact_opt()?;
@@ -129,8 +129,8 @@ fn class_menu(manifest: &Manifest, class_name: &str) -> Result<()> {
             break; // "← Back"
         }
         let mname = method_names[idx];
-        if let Some(method) = class.methods.get(mname) {
-            print_action(&format!("{class_name}.{mname}"), method);
+        if let Some(method) = template.methods.get(mname) {
+            print_action(&format!("{template_name}.{mname}"), method);
         }
     }
     Ok(())
@@ -139,9 +139,9 @@ fn class_menu(manifest: &Manifest, class_name: &str) -> Result<()> {
 /// Full non-interactive listing (used when stdout is not a TTY).
 fn dump_all(manifest: &Manifest) -> Result<()> {
     print_overview(manifest);
-    if let Some(classes) = &manifest.classes {
-        for (cname, cdef) in classes {
-            print_class_header(cname, cdef);
+    if let Some(contract_templates) = &manifest.contract_templates {
+        for (cname, cdef) in contract_templates {
+            print_template_header(cname, cdef);
             for (mname, method) in &cdef.methods {
                 print_action(&format!("{cname}.{mname}"), method);
             }
@@ -176,10 +176,10 @@ fn print_overview(manifest: &Manifest) {
         }
     }
 
-    if let Some(classes) = &manifest.classes {
-        if !classes.is_empty() {
-            let names: Vec<&str> = classes.keys().map(String::as_str).collect();
-            println!("  {}: {}", style("Classes").bold(), names.join(", "));
+    if let Some(contract_templates) = &manifest.contract_templates {
+        if !contract_templates.is_empty() {
+            let names: Vec<&str> = contract_templates.keys().map(String::as_str).collect();
+            println!("  {}: {}", style("Contract templates").bold(), names.join(", "));
         }
     }
     if !manifest.actions.is_empty() {
@@ -188,21 +188,21 @@ fn print_overview(manifest: &Manifest) {
     }
 }
 
-fn print_class_header(name: &str, class: &ClassDef) {
+fn print_template_header(name: &str, template: &ContractTemplate) {
     println!();
-    println!("{}", style(format!("══ class {name}")).bold().magenta());
-    if let Some(d) = &class.description {
+    println!("{}", style(format!("══ template {name}")).bold().magenta());
+    if let Some(d) = &template.description {
         println!("  {}", style(d).italic());
     }
-    if !class.fields.is_empty() {
+    if !template.fields.is_empty() {
         println!("  {}", style("Fields").bold());
-        for (fname, def) in &class.fields {
+        for (fname, def) in &template.fields {
             let desc = def.description.as_deref().map(|d| format!(" — {d}")).unwrap_or_default();
             let default = def.default.as_deref().map(|d| format!("  [default: {d}]")).unwrap_or_default();
             println!("    {} : {}{}{}", style(fname).green(), def.type_, style(desc).dim(), style(default).yellow());
         }
     }
-    println!("  {}: {}", style("Methods").bold(), class.methods.keys().cloned().collect::<Vec<_>>().join(", "));
+    println!("  {}: {}", style("Methods").bold(), template.methods.keys().cloned().collect::<Vec<_>>().join(", "));
 }
 
 fn print_action(title: &str, action: &Action) {
@@ -330,7 +330,7 @@ fn print_witnesses(label: &str, witnesses: &Option<Value>) {
 fn print_create_instance(create_instance: &Option<InstanceCreate>) {
     let Some(ci) = create_instance else { return };
     println!("  {}", style("Creates instance").bold());
-    println!("    class: {}", style(&ci.class).green());
+    println!("    template: {}", style(&ci.template).green());
     let fields: Vec<&str> = ci.fields.keys().map(String::as_str).collect();
     if !fields.is_empty() {
         println!("    fields: {}", style(fields.join(", ")).dim());

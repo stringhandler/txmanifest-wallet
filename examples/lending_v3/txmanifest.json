@@ -173,7 +173,7 @@
     }
   },
   "actions": {},
-  "classes": {
+  "contract_templates": {
     "issuance_factory": {
       "description": "A persistent issuance factory. Created once (CreateFactory); the owner holds the auth NFT and reuses the factory covenant to mint many lending offers. The deployed indexer's FactoryCreationsTracker is seeded with hardcoded (issuing_utxos_count=2, reissuance_flags=0) — offers minted from a factory with any other parameters will not be detected.",
       "fields": {
@@ -212,7 +212,7 @@
             }
           },
           "create_instance": {
-            "class": "issuance_factory",
+            "template": "issuance_factory",
             "fields": {
               "FACTORY_ASSET_ID": "$instance.FACTORY_ASSET_ID",
               "ISSUING_UTXOS_COUNT": "$params.ISSUING_UTXOS_COUNT",
@@ -452,7 +452,7 @@
             }
           },
           "create_instance": {
-            "class": "lending_contract",
+            "template": "lending_contract",
             "fields": {
               "FACTORY_ASSET_ID": "$params.FACTORY_ASSET_ID",
               "ISSUING_UTXOS_COUNT": "2",

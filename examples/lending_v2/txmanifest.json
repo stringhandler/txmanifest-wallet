@@ -128,7 +128,7 @@
       ]
     }
   },
-  "classes": {
+  "contract_templates": {
     "lending_contract": {
       "description": "P2P collateralised lending contract, wire-compatible with simplicity-lending. One instance per loan offer. Created by IssueUtilityNFTs; advanced through LockCollateral, SetupLending, RepayLoan / LiquidateAfterExpiry, and ClaimPrincipalWithInterest.",
       "fields": {
@@ -268,7 +268,7 @@
             }
           },
           "create_instance": {
-            "class": "lending_contract",
+            "template": "lending_contract",
             "fields": {
               "AMOUNTS_DECIMALS": "$params.AMOUNTS_DECIMALS",
               "BORROWER_ADDRESS": "$params.BORROWER_ADDRESS",
