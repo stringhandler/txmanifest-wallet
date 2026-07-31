@@ -973,13 +973,6 @@
         "null"
       ]
     },
-    "confidential_outputs": {
-      "description": "File-level default for output confidentiality (blinding). When absent, the chain default applies: false for \"bitcoin\", true for \"elements\". Overridden per output.",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
     "description": {
       "type": [
         "string",
@@ -996,9 +989,8 @@
         "null"
       ]
     },
-    "lifecycle": true,
     "manifest_version": {
-      "description": "Manifest schema version. `compose_version` is accepted as a legacy alias.",
+      "description": "Manifest schema version.",
       "type": "string"
     },
     "params": {

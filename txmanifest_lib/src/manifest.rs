@@ -15,8 +15,7 @@ pub type ParamRefs<'a> = Vec<(&'a str, &'a ParamDef)>;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
-    /// Manifest schema version. `compose_version` is accepted as a legacy alias.
-    #[serde(alias = "compose_version")]
+    /// Manifest schema version.
     pub manifest_version: String,
     pub protocol: String,
     pub description: Option<String>,
@@ -29,9 +28,6 @@ pub struct Manifest {
     pub simplicity_hl_version: Option<String>,
     /// Top-level SimplicityHL source file (relative to the manifest file).
     pub source: Option<String>,
-    /// File-level default for output confidentiality (blinding). When absent, the chain
-    /// default applies: false for "bitcoin", true for "elements". Overridden per output.
-    pub confidential_outputs: Option<bool>,
     /// Whether covenant `.simf` programs are compiled with SimplicityHL debug symbols
     /// included. This changes the program's CMR (and therefore every covenant address),
     /// because `assert!`/`panic!` embed source info into `fail`-node commitments. Set it
@@ -51,7 +47,6 @@ pub struct Manifest {
     pub classes: Option<BTreeMap<String, ClassDef>>,
     /// u16 error code (as string key) -> English description
     pub errors: Option<BTreeMap<String, String>>,
-    pub lifecycle: Option<serde_json::Value>,
 }
 
 /// Structural keys an author may place in a manifest that carry no protocol meaning
@@ -174,7 +169,9 @@ pub struct ParamDef {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, tag = "compute", rename_all = "snake_case")]
 pub enum ParamCompute {
-    Expr { expr: String },
+    Expr {
+        expr: String,
+    },
     Tapleaf {
         simf: String,
         /// Explicit param map for the simf. Each entry combines the value (a compile-param
@@ -466,9 +463,10 @@ impl Input {
     /// Returns the utxo_type name if this input comes from a protocol UTXO.
     pub fn utxo_type_name(&self) -> Option<String> {
         match &self.utxo_source {
-            serde_json::Value::Object(map) => {
-                map.get("utxo_type").and_then(|v| v.as_str()).map(String::from)
-            }
+            serde_json::Value::Object(map) => map
+                .get("utxo_type")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             _ => None,
         }
     }
@@ -724,7 +722,10 @@ impl UtxoType {
                         );
                         for i in (0..hex.len()).step_by(2) {
                             let byte = u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| {
-                                anyhow::anyhow!("Invalid hex byte '{}' in taproot payload", &hex[i..i + 2])
+                                anyhow::anyhow!(
+                                    "Invalid hex byte '{}' in taproot payload",
+                                    &hex[i..i + 2]
+                                )
                             })?;
                             bytes.push(byte);
                         }
@@ -735,10 +736,8 @@ impl UtxoType {
                         bytes.extend_from_slice(&crate::eval::encode_leaf_value(item, ctx)?);
                     }
                     serde_json::Value::Object(m) => {
-                        let var_name = m
-                            .get("state_var")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| {
+                        let var_name =
+                            m.get("state_var").and_then(|v| v.as_str()).ok_or_else(|| {
                                 anyhow::anyhow!(
                                     "Unsupported payload object: {}",
                                     serde_json::to_string(m).unwrap_or_default()
@@ -759,7 +758,8 @@ impl UtxoType {
                         let byte = val.parse::<u8>().map_err(|_| {
                             anyhow::anyhow!(
                                 "state_var '{}' = '{}' is not a valid u8",
-                                var_name, val
+                                var_name,
+                                val
                             )
                         })?;
                         bytes.push(byte);
@@ -847,14 +847,29 @@ mod tests {
             "manifest_version": "1", "protocol": "test",
             "attestation_version": "1"
         }"#;
+        // `confidential_outputs` — a file-level default no manifest ever set, so it
+        // only ever passed through to the chain default. Set it per output instead.
+        let confidential = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "confidential_outputs": true
+        }"#;
+
+        // `lifecycle` — a free-form state/transition block nothing enforced; removed
+        // for now, so it must not silently reappear as an ignored key.
+        let lifecycle = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "lifecycle": { "states": ["a"], "transitions": {} }
+        }"#;
 
         for (name, json) in [
             ("deploy", deploy),
             ("compile_params", compile_params),
             ("attestation_version", attestation),
+            ("confidential_outputs", confidential),
+            ("lifecycle", lifecycle),
         ] {
-            let err = Manifest::from_json_str(json)
-                .expect_err("removed field '{name}' must not parse");
+            let err =
+                Manifest::from_json_str(json).expect_err("removed field '{name}' must not parse");
             assert!(
                 err.to_string().contains(name),
                 "error for '{name}' should name the key, got: {err}"
@@ -888,7 +903,10 @@ mod tests {
             }
         }"#;
         let manifest = Manifest::from_json_str(json).expect("sibling compile_params should parse");
-        let script = manifest.utxo_types.as_ref().unwrap()["t"].script.as_ref().unwrap();
+        let script = manifest.utxo_types.as_ref().unwrap()["t"]
+            .script
+            .as_ref()
+            .unwrap();
         assert_eq!(script.compile_params["SCRIPT_HASH"], "LENDING_COV_HASH");
     }
 
@@ -914,13 +932,19 @@ mod tests {
     #[test]
     fn compute_key_dispatches_tapleaf() {
         let fv = parse_field_value(r#"{ "compute": "tapleaf", "simf": "./a.simf" }"#);
-        assert!(matches!(fv, FieldValue::Compute(ParamCompute::Tapleaf { .. })));
+        assert!(matches!(
+            fv,
+            FieldValue::Compute(ParamCompute::Tapleaf { .. })
+        ));
     }
 
     #[test]
     fn legacy_lang_key_is_accepted_as_alias() {
         let fv = parse_field_value(r#"{ "lang": "tapleaf", "simf": "./a.simf" }"#);
-        assert!(matches!(fv, FieldValue::Compute(ParamCompute::Tapleaf { .. })));
+        assert!(matches!(
+            fv,
+            FieldValue::Compute(ParamCompute::Tapleaf { .. })
+        ));
     }
 
     #[test]

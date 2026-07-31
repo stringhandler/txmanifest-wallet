@@ -197,15 +197,6 @@ fn print_overview(manifest: &Manifest) {
         let names: Vec<&str> = manifest.actions.keys().map(String::as_str).collect();
         println!("  {}: {}", style("Standalone actions").bold(), names.join(", "));
     }
-
-    if let Some(lifecycle) = &manifest.lifecycle {
-        if let Some(states) = lifecycle.get("states").and_then(Value::as_array) {
-            let s: Vec<String> = states.iter().filter_map(|v| v.as_str().map(String::from)).collect();
-            if !s.is_empty() {
-                println!("  {}: {}", style("Lifecycle states").bold(), s.join(" → "));
-            }
-        }
-    }
 }
 
 fn print_class_header(name: &str, class: &ClassDef) {

@@ -1527,50 +1527,5 @@
         }
       }
     }
-  },
-  "lifecycle": {
-    "states": [
-      "nfts_issued",
-      "offer_open",
-      "loan_active",
-      "repaid",
-      "liquidated",
-      "cancelled"
-    ],
-    "entry_actions": [
-      "IssueUtilityNFTs"
-    ],
-    "transitions": {
-      "IssueUtilityNFTs": {
-        "to": "nfts_issued"
-      },
-      "LockCollateral": {
-        "from": "nfts_issued",
-        "to": "offer_open"
-      },
-      "CancelOffer": {
-        "from": "offer_open",
-        "to": "cancelled",
-        "unilateral": true
-      },
-      "SetupLending": {
-        "from": "offer_open",
-        "to": "loan_active"
-      },
-      "RepayLoan": {
-        "from": "loan_active",
-        "to": "repaid",
-        "cooperative": true
-      },
-      "LiquidateAfterExpiry": {
-        "from": "loan_active",
-        "to": "liquidated",
-        "unilateral": true
-      },
-      "ClaimPrincipalWithInterest": {
-        "from": "repaid",
-        "to": "settled"
-      }
-    }
   }
 }

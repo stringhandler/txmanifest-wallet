@@ -1743,12 +1743,10 @@ pub fn run(
                         };
                         next_wallet_addr_idx = Some(addr_result.index() + 1);
                         let addr = addr_result.address().clone();
-                        // Resolution order: per-output → file-level default → chain default.
+                        // Resolution order: per-output → chain default.
                         // Bitcoin does not support confidential outputs; Liquid defaults to confidential.
                         let chain_default = matches!(net, ElementsNetwork::Liquid | ElementsNetwork::LiquidTestnet);
-                        let is_confidential = output.confidential
-                            .or(manifest.confidential_outputs)
-                            .unwrap_or(chain_default);
+                        let is_confidential = output.confidential.unwrap_or(chain_default);
                         let bpk = if is_confidential {
                             addr.blinding_pubkey.map(|pk| lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true })
                         } else {

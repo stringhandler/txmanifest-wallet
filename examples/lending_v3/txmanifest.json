@@ -1475,45 +1475,5 @@
         }
       }
     }
-  },
-  "lifecycle": {
-    "states": [
-      "factory_created",
-      "offer_open",
-      "loan_active",
-      "cancelled",
-      "repaid"
-    ],
-    "entry_actions": [
-      "CreateFactory",
-      "CreateOffer"
-    ],
-    "transitions": {
-      "CreateFactory": {
-        "to": "factory_created"
-      },
-      "CreateOffer": {
-        "to": "offer_open"
-      },
-      "AcceptOffer": {
-        "from": "offer_open",
-        "to": "loan_active"
-      },
-      "CancelOffer": {
-        "from": "offer_open",
-        "to": "cancelled",
-        "unilateral": true
-      },
-      "ClaimPrincipal": {
-        "from": "loan_active",
-        "to": "loan_active",
-        "unilateral": true
-      },
-      "RepayLoan": {
-        "from": "loan_active",
-        "to": "repaid",
-        "unilateral": true
-      }
-    }
   }
 }

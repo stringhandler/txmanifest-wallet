@@ -151,21 +151,6 @@ pub fn validate(manifest: &Manifest) -> Report {
         }
     }
 
-    // --- Lifecycle transitions reference real actions --------------------
-    if let Some(lifecycle) = &manifest.lifecycle {
-        let action_names: BTreeSet<&str> = actions.iter().map(|(_, bare, _)| bare.as_str()).collect();
-        if let Some(transitions) = lifecycle.get("transitions").and_then(Value::as_object) {
-            for key in transitions.keys() {
-                if !action_names.contains(key.as_str()) {
-                    report.warn(
-                        "lifecycle.transitions",
-                        format!("transition '{key}' does not match any action"),
-                    );
-                }
-            }
-        }
-    }
-
     report
 }
 
