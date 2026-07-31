@@ -167,17 +167,6 @@ fn print_overview(manifest: &Manifest) {
     println!("  chain    : {}", manifest.chain.as_deref().unwrap_or("elements (default)"));
     println!("  version  : {}", manifest.manifest_version);
 
-    let (user, derived) = manifest.compile_param_sets();
-    if !user.is_empty() || !derived.is_empty() {
-        println!("  {}", style("Compile params").bold());
-        for (name, def) in &user {
-            println!("    {} : {}", style(name).green(), def.type_);
-        }
-        for (name, def) in &derived {
-            println!("    {} : {} {}", style(name).green(), def.type_, style("(derived)").dim());
-        }
-    }
-
     if let Some(utxo_types) = &manifest.utxo_types {
         if !utxo_types.is_empty() {
             println!("  {}", style("UTXO types").bold());

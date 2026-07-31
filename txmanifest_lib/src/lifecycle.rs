@@ -313,137 +313,7 @@ pub fn run(
     println!();
     println!("{}", step_header("Step 1: Parameters"));
 
-    {
-        let (user_provided, derived) = manifest.compile_param_sets();
-
-        if !user_provided.is_empty() {
-            println!("  {}", style("Compile params:").bold());
-            for (name, def) in &user_provided {
-                let is_wallet_key = def.source.as_ref().map(|s| s.type_ == "wallet_key").unwrap_or(false);
-                // wallet_key params always derive from the current wallet — the instance file
-                // must not override them, since that would use a stale key from a previous run.
-                if !is_wallet_key {
-                    if let Some(inst_val) = instance.and_then(|i| i.get_field(name)) {
-                        println!(
-                            "  {} {} = {}  {}",
-                            style("✓").green(),
-                            style(name).bold().cyan(),
-                            style(inst_val).yellow(),
-                            style("[from instance]").dim(),
-                        );
-                        ctx.set_compile_param(*name, inst_val);
-                        continue;
-                    }
-                }
-                if is_wallet_key {
-                    let info = loaded_wallet.as_ref()
-                        .map(wallet::wallet_info)
-                        .transpose()?;
-                    if let Some(info) = info {
-                        println!(
-                            "  {} {} = {}  {}",
-                            style("✓").green(),
-                            style(name).bold().cyan(),
-                            style(&info.wallet_pubkey).yellow(),
-                            style(format!("[wallet key, path: {}]", info.wallet_key_path)).dim(),
-                        );
-                        ctx.set_compile_param(*name, &info.wallet_pubkey);
-                    } else if let Some(ov) = overrides.get(name) {
-                        println!(
-                            "  {} {} = {}  {}",
-                            style("✓").green(),
-                            style(name).bold().cyan(),
-                            style(ov).yellow(),
-                            style("[from --params]").dim(),
-                        );
-                        ctx.set_compile_param(*name, ov);
-                    } else {
-                        let default = def.default.as_deref();
-                        let value = prompt::prompt_param(name, &def.type_, def.description.as_deref(), default)?;
-                        ctx.set_compile_param(*name, value);
-                    }
-                } else if let Some(ov) = overrides.get(name) {
-                    println!(
-                        "  {} {} = {}  {}",
-                        style("✓").green(),
-                        style(name).bold().cyan(),
-                        style(ov).yellow(),
-                        style("[from --params]").dim(),
-                    );
-                    ctx.set_compile_param(*name, ov);
-                } else {
-                    let default = def.default.as_deref();
-                    let value = prompt::prompt_param(name, &def.type_, def.description.as_deref(), default)?;
-                    ctx.set_compile_param(*name, value);
-                }
-            }
-        }
-
-        // Load derived params: instance file first (authoritative), then --params overrides.
-        let mut loaded_inst = 0usize;
-        let mut loaded_ovr = 0usize;
-        for (name, _) in &derived {
-            if let Some(inst_val) = instance.and_then(|i| i.get_field(name)) {
-                ctx.set_compile_param(*name, inst_val);
-                loaded_inst += 1;
-            } else if let Some(ovr_val) = overrides.get(name) {
-                // Derived params with no instance file (e.g. carry-over from a previous action)
-                // can be supplied via --params.
-                ctx.set_compile_param(*name, ovr_val);
-                println!(
-                    "  {} {} = {}  {}",
-                    style("✓").green(),
-                    style(name).bold().cyan(),
-                    style(ovr_val).yellow(),
-                    style("[from --params]").dim(),
-                );
-                loaded_ovr += 1;
-            }
-        }
-        if loaded_inst > 0 {
-            println!(
-                "  {} {} derived param(s) loaded from instance file.",
-                style("✓").green(), loaded_inst
-            );
-        }
-        if loaded_ovr > 0 {
-            println!(
-                "  {} {} derived param(s) loaded from --params.",
-                style("✓").green(), loaded_ovr
-            );
-        }
-
-        // Evaluate expr-based derived params (arithmetic). Tapleaf params run after Step 3.
-        for (name, def) in &derived {
-            if ctx.get_compile_param(name).is_some() {
-                continue; // already set from instance, --params, or a prior compute
-            }
-            let Some(crate::manifest::ParamCompute::Expr { expr }) = &def.compute else { continue };
-            match eval::eval_param_compute_expr(expr, &ctx) {
-                Ok(v) => {
-                    let vs = v.to_string();
-                    ctx.set_compile_param(*name, &vs);
-                    println!(
-                        "  {} {} = {}  {}",
-                        style("✓").green(),
-                        style(*name).bold().cyan(),
-                        style(&vs).yellow(),
-                        style("[compute: expr]").dim(),
-                    );
-                }
-                Err(e) => {
-                    println!(
-                        "  {} Derived param '{}' compute failed: {e}",
-                        style("[warn]").yellow(),
-                        name
-                    );
-                }
-            }
-        }
-    }
-
-    // For class methods: load all class field values from the instance file as compile params.
-    // compile_param_sets() only iterates top-level params/compile_params, not class fields.
+    // Load all class field values from the instance file as compile params.
     if let Some((_, class_def, _)) = manifest.find_class_and_method(action_name) {
         let mut loaded_class = 0usize;
         for (field_name, field_def) in &class_def.fields {
@@ -477,12 +347,8 @@ pub fn run(
     }
 
     // Type hints from manifest spec — needed for tapleaf computes (and later for covenant address).
-    let mut compile_param_type_hints: std::collections::HashMap<String, String> = {
-        let (user, derived) = manifest.compile_param_sets();
-        user.into_iter().chain(derived)
-            .map(|(name, def)| (name.to_string(), def.type_.clone()))
-            .collect()
-    };
+    let mut compile_param_type_hints: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     // Extend type hints with class field types for class methods.
     if let Some((_, class_def, _)) = manifest.find_class_and_method(action_name) {
@@ -799,21 +665,6 @@ pub fn run(
         println!("  (no on_input_resolved hooks for this action)");
     }
 
-    {
-        let (_, derived) = manifest.compile_param_sets();
-        if !derived.is_empty() {
-            println!();
-            println!("  {}", style("Derived params (set by hooks):").bold());
-            for (name, def) in derived {
-                println!(
-                    "  {} {} — {}",
-                    style(name).cyan(),
-                    style(format!("({})", def.type_)).dim(),
-                    def.description.as_deref().unwrap_or("")
-                );
-            }
-        }
-    }
 
     // ------------------------------------------------------------------
     // Step 3a — Issuance asset IDs + on_resolved compile-param hooks
@@ -905,115 +756,6 @@ pub fn run(
     let net_for_hash = loaded_wallet.as_ref()
         .map(wallet::elements_network)
         .unwrap_or(ElementsNetwork::LiquidTestnet);
-    {
-        let (_, derived_defs) = manifest.compile_param_sets();
-        let mut failed: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut any_new = true;
-        while any_new {
-            any_new = false;
-            for (name, def) in &derived_defs {
-                if ctx.get_compile_param(name).is_some() || failed.contains(*name) { continue; }
-                let Some(crate::manifest::ParamCompute::Tapleaf { simf, params, depends_on, .. }) = &def.compute else { continue };
-
-                // Resolve the params map for this simf compilation.
-                // When no explicit params override is given, auto-populate:
-                //   • if `depends_on` is set, wait only for those params (and pass only them)
-                //   • otherwise wait for ALL compile params (legacy behaviour)
-                let simf_params: std::collections::HashMap<String, String> = if params.is_empty() {
-                    let mut resolved = std::collections::HashMap::new();
-                    let mut all_ready = true;
-                    let gate: Box<dyn Iterator<Item = &str>> = match depends_on {
-                        Some(deps) => Box::new(deps.iter().map(String::as_str)),
-                        None => Box::new(manifest.all_compile_param_names().into_iter()),
-                    };
-                    for cp_name in gate {
-                        match ctx.get_compile_param(cp_name) {
-                            Some(v) => { resolved.insert(cp_name.to_string(), v.to_string()); }
-                            None => { all_ready = false; break; }
-                        }
-                    }
-                    if !all_ready { continue; }
-                    resolved
-                } else {
-                    let mut resolved = std::collections::HashMap::new();
-                    let mut all_ready = true;
-                    for (k, p) in params {
-                        let v = p.value.as_str();
-                        // v is either a compile-param reference or a string/bool literal
-                        let is_param_ref = ctx.get_compile_param(v).is_some();
-                        let is_literal = v.parse::<u64>().is_ok() || v == "true" || v == "false";
-                        if !is_param_ref && !is_literal {
-                            all_ready = false; // dependency not computed yet
-                            break;
-                        }
-                        let value = ctx.get_compile_param(v)
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| p.value.clone());
-                        resolved.insert(k.clone(), value);
-                    }
-                    if !all_ready { continue; }
-                    resolved
-                };
-
-                // Build type hints: inherit from compile param types (same-name mapping),
-                // then override with any explicit inline types from the params map.
-                let simf_type_hints: std::collections::HashMap<String, String> = {
-                    let mut hints: std::collections::HashMap<String, String> = simf_params.keys()
-                        .filter_map(|k| compile_param_type_hints.get(k).map(|t| (k.clone(), t.clone())))
-                        .collect();
-                    if !params.is_empty() {
-                        // For explicit params, inherit type from the *referenced* compile param name.
-                        for (k, p) in params {
-                            if let Some(ty) = compile_param_type_hints.get(p.value.as_str()) {
-                                hints.insert(k.clone(), ty.clone());
-                            }
-                        }
-                        // Then apply inline type overrides.
-                        for (k, p) in params {
-                            if let Some(ty) = &p.type_ {
-                                hints.insert(k.clone(), ty.clone());
-                            }
-                        }
-                    }
-                    hints
-                };
-
-                let simf_path = manifest_file.parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .join(simf);
-
-                match covenant::compute_covenant_script_hash(&simf_path, &simf_params, &simf_type_hints, net_for_hash, include_debug_symbols) {
-                    Ok(hash_bytes) => {
-                        let hex: String = hash_bytes.iter().map(|b| format!("{b:02x}")).collect();
-                        ctx.set_compile_param(*name, &hex);
-                        println!(
-                            "  {} {} = {}  {}",
-                            style("✓").green(),
-                            style(*name).bold().cyan(),
-                            style(&hex[..16]).yellow(),
-                            style("[compute: script_hash]").dim(),
-                        );
-                        any_new = true;
-                    }
-                    Err(e) => {
-                        println!(
-                            "  {} Script hash compute '{}' failed: {e}",
-                            style("[error]").red(), name
-                        );
-                        failed.insert(name.to_string());
-                    }
-                }
-            }
-        }
-
-        if !failed.is_empty() {
-            let names: Vec<&str> = failed.iter().map(String::as_str).collect();
-            anyhow::bail!(
-                "Cannot proceed: tapleaf compute failed for: {}",
-                names.join(", ")
-            );
-        }
-    }
 
     // ------------------------------------------------------------------
     // Step 3c — SimfFn computed action params
@@ -1218,7 +960,7 @@ pub fn run(
     let simf_path = manifest_file
         .parent()
         .unwrap_or(std::path::Path::new("."))
-        .join(manifest.source.as_deref().unwrap_or("covenant.simf"));
+        .join("covenant.simf");
 
     // For constructor actions: pre-compute create_instance tapleaf fields (e.g.
     // FUNDING_SCRIPT_HASH) so they are present in compile_params_map for Step 7.
@@ -1246,11 +988,6 @@ pub fn run(
 
     let compile_params_map: std::collections::HashMap<String, String> = {
         let mut m = std::collections::HashMap::new();
-        for name in manifest.all_compile_param_names() {
-            if let Some(v) = ctx.get_compile_param(name) {
-                m.insert(name.to_string(), v.to_string());
-            }
-        }
         // For class methods: also expose class field values (loaded into ctx in Step 1).
         if let Some((_, class_def, _)) = manifest.find_class_and_method(action_name) {
             for field_name in class_def.fields.keys() {

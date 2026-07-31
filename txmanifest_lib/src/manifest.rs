@@ -5,9 +5,6 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-/// A borrowed list of `(param_name, definition)` pairs.
-pub type ParamRefs<'a> = Vec<(&'a str, &'a ParamDef)>;
-
 // ---------------------------------------------------------------------------
 // Top-level file
 // ---------------------------------------------------------------------------
@@ -22,11 +19,6 @@ pub struct Manifest {
     pub chain: Option<String>,
     /// SimplicityHL toolchain settings for this manifest's `.simf` programs.
     pub simplicity_hl: Option<SimplicityHl>,
-    /// Top-level SimplicityHL source file (relative to the manifest file).
-    pub source: Option<String>,
-    /// Flat compile-parameter map per spec §5.  Derived params carry `derived: true`.
-    /// Kept for backward compatibility; prefer class `fields` in new files.
-    pub params: Option<BTreeMap<String, ParamDef>>,
     pub utxo_types: Option<BTreeMap<String, UtxoType>>,
     /// Standalone actions that require no class instance (e.g. Prepare).
     #[serde(default)]
@@ -106,31 +98,6 @@ impl Manifest {
         let mut value: serde_json::Value = serde_json::from_str(raw)?;
         strip_authoring_keys(&mut value);
         serde_json::from_value(value)
-    }
-
-    /// Return all compile params as (name, def) pairs split into
-    /// (user-provided, derived).
-    pub fn compile_param_sets(&self) -> (ParamRefs<'_>, ParamRefs<'_>) {
-        let Some(flat) = &self.params else {
-            return (vec![], vec![]);
-        };
-        let user: Vec<_> = flat
-            .iter()
-            .filter(|(_, d)| !d.derived.unwrap_or(false))
-            .map(|(k, d)| (k.as_str(), d))
-            .collect();
-        let derived: Vec<_> = flat
-            .iter()
-            .filter(|(_, d)| d.derived.unwrap_or(false))
-            .map(|(k, d)| (k.as_str(), d))
-            .collect();
-        (user, derived)
-    }
-
-    /// Iterate all compile param names regardless of format.
-    pub fn all_compile_param_names(&self) -> Vec<&str> {
-        let (u, d) = self.compile_param_sets();
-        u.into_iter().chain(d).map(|(k, _)| k).collect()
     }
 
     /// Find a method by name across all classes.
@@ -871,7 +838,22 @@ mod tests {
             ] } }
         }"#;
 
+        // Top-level `params` — no example ever used it; class `fields` is the live
+        // path. Action-level `params` is a different field and still exists.
+        let params = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "params": { "P": { "type": "u64" } }
+        }"#;
+        // Top-level `source` — never set by any manifest; the engine now always
+        // falls back to "covenant.simf". Per-utxo_type `script.source` is unaffected.
+        let source = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "source": "./covenant.simf"
+        }"#;
+
         for (name, json) in [
+            ("params", params),
+            ("source", source),
             ("deploy", deploy),
             ("compile_params", compile_params),
             ("attestation_version", attestation),
@@ -935,11 +917,15 @@ mod tests {
         let json = r#"{
             "manifest_version": "1",
             "protocol": "test",
-            "params": {
-                "P": {
-                    "type": "u64", "derived": true,
-                    "compute": {
-                        "compute": "simf_fn", "simf": "./a.simf", "compile_params": ["X"]
+            "actions": {
+                "A": {
+                    "params": {
+                        "P": {
+                            "type": "u64", "derived": true,
+                            "compute": {
+                                "compute": "simf_fn", "simf": "./a.simf", "compile_params": ["X"]
+                            }
+                        }
                     }
                 }
             },

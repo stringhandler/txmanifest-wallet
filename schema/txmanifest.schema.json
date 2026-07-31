@@ -917,16 +917,6 @@
       "description": "Manifest schema version.",
       "type": "string"
     },
-    "params": {
-      "additionalProperties": {
-        "$ref": "#/definitions/ParamDef"
-      },
-      "description": "Flat compile-parameter map per spec §5.  Derived params carry `derived: true`. Kept for backward compatibility; prefer class `fields` in new files.",
-      "type": [
-        "object",
-        "null"
-      ]
-    },
     "protocol": {
       "type": "string"
     },
@@ -940,13 +930,6 @@
         }
       ],
       "description": "SimplicityHL toolchain settings for this manifest's `.simf` programs."
-    },
-    "source": {
-      "description": "Top-level SimplicityHL source file (relative to the manifest file).",
-      "type": [
-        "string",
-        "null"
-      ]
     },
     "utxo_types": {
       "additionalProperties": {
