@@ -1,7 +1,6 @@
 {
     "$schema": "../../schema/txmanifest.schema.json",
     "manifest_version": "0.1.0",
-    "attestation_version": "1",
     "protocol": "last-will",
     "description": "Last Will — a recursive covenant with three spending paths: inherit (after a 180-day timelock), cold-key break-out, and hot-key refresh. Modelled as a class: one instance per will.",
     "chain": "liquid",

@@ -27,9 +27,6 @@ pub struct Manifest {
     /// Undocumented in `tx_manifest_spec` as of Spec rev 0.4.0 — see also
     /// [`Manifest::compile_debug_symbols`], which has the same status but real teeth.
     pub simplicity_hl_version: Option<String>,
-    /// Version of the attestation format this manifest is signed under. Informational;
-    /// also undocumented in `tx_manifest_spec` as of rev 0.4.0.
-    pub attestation_version: Option<String>,
     /// Top-level SimplicityHL source file (relative to the manifest file).
     pub source: Option<String>,
     /// File-level default for output confidentiality (blinding). When absent, the chain
@@ -45,8 +42,6 @@ pub struct Manifest {
     /// Flat compile-parameter map per spec §5.  Derived params carry `derived: true`.
     /// Kept for backward compatibility; prefer class `fields` in new files.
     pub params: Option<BTreeMap<String, ParamDef>>,
-    /// Legacy nested format (prediction_market).  Prefer `params` when present.
-    pub compile_params: Option<CompileParams>,
     pub utxo_types: Option<BTreeMap<String, UtxoType>>,
     /// Standalone actions that require no class instance (e.g. Prepare).
     #[serde(default)]
@@ -108,29 +103,22 @@ impl Manifest {
     }
 
     /// Return all compile params as (name, def) pairs split into
-    /// (user-provided, derived) regardless of which on-disk format is used.
+    /// (user-provided, derived).
     pub fn compile_param_sets(&self) -> (ParamRefs<'_>, ParamRefs<'_>) {
-        if let Some(flat) = &self.params {
-            let user: Vec<_> = flat.iter()
-                .filter(|(_, d)| !d.derived.unwrap_or(false))
-                .map(|(k, d)| (k.as_str(), d))
-                .collect();
-            let derived: Vec<_> = flat.iter()
-                .filter(|(_, d)| d.derived.unwrap_or(false))
-                .map(|(k, d)| (k.as_str(), d))
-                .collect();
-            return (user, derived);
-        }
-        if let Some(cp) = &self.compile_params {
-            let user: Vec<_> = cp.user_provided.as_ref()
-                .map(|m| m.iter().map(|(k, d)| (k.as_str(), d)).collect())
-                .unwrap_or_default();
-            let derived: Vec<_> = cp.derived.as_ref()
-                .map(|m| m.iter().map(|(k, d)| (k.as_str(), d)).collect())
-                .unwrap_or_default();
-            return (user, derived);
-        }
-        (vec![], vec![])
+        let Some(flat) = &self.params else {
+            return (vec![], vec![]);
+        };
+        let user: Vec<_> = flat
+            .iter()
+            .filter(|(_, d)| !d.derived.unwrap_or(false))
+            .map(|(k, d)| (k.as_str(), d))
+            .collect();
+        let derived: Vec<_> = flat
+            .iter()
+            .filter(|(_, d)| d.derived.unwrap_or(false))
+            .map(|(k, d)| (k.as_str(), d))
+            .collect();
+        (user, derived)
     }
 
     /// Iterate all compile param names regardless of format.
@@ -156,13 +144,6 @@ impl Manifest {
 // ---------------------------------------------------------------------------
 // Compile params
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CompileParams {
-    pub user_provided: Option<BTreeMap<String, ParamDef>>,
-    pub derived: Option<BTreeMap<String, ParamDef>>,
-}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -300,9 +281,6 @@ pub struct ParamSource {
 #[serde(deny_unknown_fields)]
 pub struct Action {
     pub description: Option<String>,
-    /// Legacy deploy flag — writes instance_params on broadcast. Prefer `is_constructor`.
-    #[serde(default)]
-    pub deploy: bool,
     /// New-style constructor: runs `create_instance` after broadcast.
     #[serde(default)]
     pub is_constructor: bool,
@@ -847,6 +825,71 @@ mod tests {
             err.to_string().contains("from_addres"),
             "error should name the offending key, got: {err}"
         );
+    }
+
+    /// Legacy keys that were deliberately dropped from the model. Each must now be a
+    /// hard parse error — the point of removing them is that a file still carrying one
+    /// gets told, rather than having it silently ignored as before.
+    #[test]
+    fn removed_legacy_fields_are_rejected() {
+        // `deploy` — superseded by `is_constructor`.
+        let deploy = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "actions": { "A": { "deploy": true } }
+        }"#;
+        // Top-level `compile_params` — superseded by the flat `params` map.
+        let compile_params = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "compile_params": { "user_provided": {}, "derived": {} }
+        }"#;
+        // `attestation_version` — never read by anything.
+        let attestation = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "attestation_version": "1"
+        }"#;
+
+        for (name, json) in [
+            ("deploy", deploy),
+            ("compile_params", compile_params),
+            ("attestation_version", attestation),
+        ] {
+            let err = Manifest::from_json_str(json)
+                .expect_err("removed field '{name}' must not parse");
+            assert!(
+                err.to_string().contains(name),
+                "error for '{name}' should name the key, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn sibling_compile_params_still_parse() {
+        // Two *other* fields share the name and must be unaffected by the removal of
+        // the top-level one: the per-utxo-type simf wiring, and the simf_fn list.
+        let json = r#"{
+            "manifest_version": "1",
+            "protocol": "test",
+            "params": {
+                "P": {
+                    "type": "u64", "derived": true,
+                    "compute": {
+                        "compute": "simf_fn", "simf": "./a.simf", "compile_params": ["X"]
+                    }
+                }
+            },
+            "utxo_types": {
+                "t": {
+                    "description": "d",
+                    "script": {
+                        "type": "simplicity", "source": "./a.simf",
+                        "compile_params": { "SCRIPT_HASH": "LENDING_COV_HASH" }
+                    }
+                }
+            }
+        }"#;
+        let manifest = Manifest::from_json_str(json).expect("sibling compile_params should parse");
+        let script = manifest.utxo_types.as_ref().unwrap()["t"].script.as_ref().unwrap();
+        assert_eq!(script.compile_params["SCRIPT_HASH"], "LENDING_COV_HASH");
     }
 
     #[test]

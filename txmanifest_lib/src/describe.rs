@@ -236,9 +236,6 @@ fn print_action(title: &str, action: &Action) {
     if action.is_constructor {
         flags.push("constructor");
     }
-    if action.deploy {
-        flags.push("deploy");
-    }
     if !flags.is_empty() {
         println!("  {}", style(format!("[{}]", flags.join(", "))).yellow());
     }

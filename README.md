@@ -51,9 +51,10 @@ A manifest is a JSON document describing a protocol. The key sections:
   program and its compile parameters.
 - **`actions`** / **`classes`** — the operations a user can perform. Each declares
   `params`, `args`, `inputs`, `outputs`, `validations`, and lifecycle hooks.
-- **`params`** / **`compile_params`** — values baked into covenant programs at
-  compile time. Derived params can be auto-computed (arithmetic expressions,
-  tapleaf hashes, or — with the `simplicity_eval` feature — standalone function calls).
+- **`params`** — values baked into covenant programs at compile time. Derived params
+  can be auto-computed (arithmetic expressions, tapleaf hashes, or — with the
+  `simplicity_eval` feature — standalone function calls). A `utxo_type`'s
+  `script.compile_params` then wires these onto the `.simf`'s own parameter names.
 
 See [`examples/p2pk/txmanifest.json`](examples/p2pk/txmanifest.json) for a minimal
 example, or [`examples/lending/txmanifest.json`](examples/lending/txmanifest.json)

@@ -31,11 +31,6 @@
           ],
           "description": "Constructor-only: defines the new instance written to the instance file."
         },
-        "deploy": {
-          "default": false,
-          "description": "Legacy deploy flag — writes instance_params on broadcast. Prefer `is_constructor`.",
-          "type": "boolean"
-        },
         "description": {
           "type": [
             "string",
@@ -177,34 +172,6 @@
           },
           "description": "Named methods.  Constructors carry `is_constructor: true`.",
           "type": "object"
-        }
-      },
-      "type": "object"
-    },
-    "CompileParams": {
-      "additionalProperties": false,
-      "properties": {
-        "$comment": {
-          "description": "Documentation only; ignored by the engine.",
-          "type": "string"
-        },
-        "derived": {
-          "additionalProperties": {
-            "$ref": "#/definitions/ParamDef"
-          },
-          "type": [
-            "object",
-            "null"
-          ]
-        },
-        "user_provided": {
-          "additionalProperties": {
-            "$ref": "#/definitions/ParamDef"
-          },
-          "type": [
-            "object",
-            "null"
-          ]
         }
       },
       "type": "object"
@@ -983,13 +950,6 @@
       "description": "Standalone actions that require no class instance (e.g. Prepare).",
       "type": "object"
     },
-    "attestation_version": {
-      "description": "Version of the attestation format this manifest is signed under. Informational; also undocumented in `tx_manifest_spec` as of rev 0.4.0.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "chain": {
       "type": [
         "string",
@@ -1012,17 +972,6 @@
         "boolean",
         "null"
       ]
-    },
-    "compile_params": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/CompileParams"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "Legacy nested format (prediction_market).  Prefer `params` when present."
     },
     "confidential_outputs": {
       "description": "File-level default for output confidentiality (blinding). When absent, the chain default applies: false for \"bitcoin\", true for \"elements\". Overridden per output.",
