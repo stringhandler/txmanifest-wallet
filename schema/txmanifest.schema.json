@@ -10,16 +10,6 @@
           "description": "Documentation only; ignored by the engine.",
           "type": "string"
         },
-        "args": {
-          "additionalProperties": {
-            "$ref": "#/definitions/ParamDef"
-          },
-          "description": "Action-level args (witness/script arguments)",
-          "type": [
-            "object",
-            "null"
-          ]
-        },
         "create_instance": {
           "anyOf": [
             {
@@ -86,7 +76,7 @@
           "additionalProperties": {
             "$ref": "#/definitions/ParamDef"
           },
-          "description": "Action-level params (runtime values, often displayed / computed)",
+          "description": "Runtime action parameters (Spec §5). Prompted, or set by hooks.",
           "type": [
             "object",
             "null"

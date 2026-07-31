@@ -259,10 +259,8 @@ pub struct Action {
     /// New-style constructor: runs `create_instance` after broadcast.
     #[serde(default)]
     pub is_constructor: bool,
-    /// Action-level params (runtime values, often displayed / computed)
+    /// Runtime action parameters (Spec §5). Prompted, or set by hooks.
     pub params: Option<BTreeMap<String, ParamDef>>,
-    /// Action-level args (witness/script arguments)
-    pub args: Option<BTreeMap<String, ParamDef>>,
     pub inputs: Option<Vec<Input>>,
     pub outputs: Option<Vec<Output>>,
     /// Method-level hook: runs after inputs are resolved, before PSET is built.
@@ -844,7 +842,19 @@ mod tests {
             "actions": { "A": { "hooks": { "on_validate": "assert!(true)" } } }
         }"#;
 
+        // `args` — never declared by any example, never referenced by one, and not an
+        // action field in Spec.md §5. The `args.NAME` namespace went with it: the
+        // whole parallel namespace (ctx storage, formula resolution, hook write
+        // target) is gone, so `params` is now the only runtime value namespace.
+        // NOTE: this puts the repo *ahead* of tx_manifest_spec, whose Hooks extension
+        // still lists `args.NAME` as an assignment target.
+        let args = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "actions": { "A": { "args": { "SIG": { "type": "bytes32" } } } }
+        }"#;
+
         for (name, json) in [
+            ("args", args),
             ("hooks", hooks),
             ("classes", classes),
             ("params", params),

@@ -288,7 +288,7 @@ fn resolve_operand(s: &str, ctx: &ExecutionContext) -> Option<String> {
 /// Resolve a per-site covenant `compile_params` value.
 ///
 /// The value may be a reference into the execution context — `params.X`,
-/// `args.X`, `instance.X`, a resolved `input.field`, a bare action
+/// `instance.X`, a resolved `input.field`, a bare action
 /// param/arg name, or a bare compile-param name — in which case its current
 /// value is returned. Anything that matches no reference is returned verbatim
 /// as a literal (e.g. `"1"`, `"true"`, a raw hex value).
@@ -297,7 +297,7 @@ pub fn resolve_compile_param_value(value: &str, ctx: &ExecutionContext) -> Strin
     if let Some(resolved) = resolve_ref(v, ctx) {
         return resolved;
     }
-    // `resolve_ref` checks params/args (not compile_params) for a bare name;
+    // `resolve_ref` checks params (not compile_params) for a bare name;
     // fall back to a bare compile-param reference for parity with the
     // utxo_type `script.compile_params` form.
     if !v.contains('.') {
@@ -395,16 +395,10 @@ fn resolve_ref(name: &str, ctx: &ExecutionContext) -> Option<String> {
     if let Some(k) = name.strip_prefix("params.") {
         return ctx.get_param(k).map(str::to_string);
     }
-    if let Some(k) = name.strip_prefix("args.") {
-        return ctx.get_arg(k).map(str::to_string);
-    }
-    // Bare param/arg name without namespace prefix (e.g. "pairs" in a formula for the "pairs"
-    // action param).  Check params then args as fallback.
+    // Bare param name without a namespace prefix (e.g. "pairs" in a formula for the
+    // "pairs" action param).
     if !name.contains('.') {
         if let Some(v) = ctx.get_param(name) {
-            return Some(v.to_string());
-        }
-        if let Some(v) = ctx.get_arg(name) {
             return Some(v.to_string());
         }
     }
@@ -599,8 +593,7 @@ fn resolve_pow(expr: &str, ctx: &ExecutionContext) -> String {
             .parse()
             .ok()
             .or_else(|| ctx.get_compile_param(exp_s).and_then(|v| v.parse().ok()))
-            .or_else(|| ctx.get_param(exp_s).and_then(|v| v.parse().ok()))
-            .or_else(|| ctx.get_arg(exp_s).and_then(|v| v.parse().ok()));
+            .or_else(|| ctx.get_param(exp_s).and_then(|v| v.parse().ok()));
         match (base, exp) {
             (Some(b), Some(e)) if e >= 0 => {
                 let computed = b.pow(e as u32).to_string();
@@ -648,7 +641,6 @@ fn substitute_vars(expr: &str, ctx: &ExecutionContext) -> String {
                     // `compile_params` is the deprecated alias for `instance`.
                     "instance" | "compile_params" => ctx.get_compile_param(key).map(str::to_string),
                     "params" => ctx.get_param(key).map(str::to_string),
-                    "args" => ctx.get_arg(key).map(str::to_string),
                     input_id => {
                         let from_input = ctx.get_input(input_id).and_then(|inp| match key {
                             "amount_sat" => Some(inp.amount_sat.to_string()),
@@ -671,10 +663,10 @@ fn substitute_vars(expr: &str, ctx: &ExecutionContext) -> String {
                 // Reserved keyword: the estimated network fee.
                 result.push_str(&ctx.fee().to_string());
             } else {
-                // No dot: bare identifier. Try resolving as a param or arg (allows formulas
+                // No dot: bare identifier. Try resolving as a param (allows formulas
                 // like "pairs * 2 * instance.COLLATERAL_PER_TOKEN" where "pairs" is an
                 // action param).
-                if let Some(v) = ctx.get_param(namespace).or_else(|| ctx.get_arg(namespace)) {
+                if let Some(v) = ctx.get_param(namespace) {
                     result.push_str(v);
                 } else {
                     result.push_str(namespace);

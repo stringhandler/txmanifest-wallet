@@ -221,7 +221,6 @@ fn print_action(title: &str, action: &Action) {
     }
 
     print_param_map("Params", &action.params);
-    print_param_map("Args", &action.args);
     print_inputs(&action.inputs);
     print_outputs(&action.outputs);
     print_witnesses("Witnesses", &action.witnesses);

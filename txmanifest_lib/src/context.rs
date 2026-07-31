@@ -28,8 +28,6 @@ pub struct ResolvedInput {
 pub struct ExecutionContext {
     /// compile_params values (both user_provided and derived once resolved)
     compile_params: BTreeMap<String, String>,
-    /// Action-level args
-    args: BTreeMap<String, String>,
     /// Action-level params
     params: BTreeMap<String, String>,
     /// Resolved inputs keyed by input id
@@ -61,16 +59,6 @@ impl ExecutionContext {
     pub fn require_compile_param(&self, name: &str) -> Result<&str> {
         self.get_compile_param(name)
             .with_context(|| format!("compile_param '{name}' not set in context"))
-    }
-
-    // -- args ----------------------------------------------------------------
-
-    pub fn set_arg(&mut self, name: impl Into<String>, value: impl Into<String>) {
-        self.args.insert(name.into(), value.into());
-    }
-
-    pub fn get_arg(&self, name: &str) -> Option<&str> {
-        self.args.get(name).map(|s| s.as_str())
     }
 
     // -- params --------------------------------------------------------------
@@ -137,10 +125,6 @@ impl ExecutionContext {
 
     pub fn all_params(&self) -> &BTreeMap<String, String> {
         &self.params
-    }
-
-    pub fn all_args(&self) -> &BTreeMap<String, String> {
-        &self.args
     }
 
     pub fn all_inputs(&self) -> impl Iterator<Item = &ResolvedInput> {

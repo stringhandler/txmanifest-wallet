@@ -85,7 +85,6 @@ struct RunOutput<'a> {
     action: &'a str,
     compile_params: &'a BTreeMap<String, String>,
     params: &'a BTreeMap<String, String>,
-    args: &'a BTreeMap<String, String>,
     inputs: Vec<RunOutputInput>,
     fee_rate_sat_per_vb: f64,
     txid: Option<String>,
@@ -448,29 +447,6 @@ pub fn run(
         }
     }
 
-    if let Some(args) = &action.args {
-        if !args.is_empty() {
-            println!();
-            println!("  {}", style("Action args:").bold());
-            for (name, def) in args {
-                let value = if let Some(ov) = overrides.get(name) {
-                    println!(
-                        "  {} {} = {}  {}",
-                        style("✓").green(),
-                        style(name).bold().cyan(),
-                        style(ov).yellow(),
-                        style("[from --params]").dim(),
-                    );
-                    ov.to_string()
-                } else {
-                    let default = def.default.as_deref();
-                    prompt::prompt_param(name, &def.type_, def.description.as_deref(), default)?
-                };
-                ctx.set_arg(name, value);
-            }
-        }
-    }
-
     // ------------------------------------------------------------------
     // Step 2 — Input Selection
     // ------------------------------------------------------------------
@@ -667,8 +643,6 @@ pub fn run(
                         ctx.set_compile_param(name, &v);
                     } else if let Some(name) = target.strip_prefix("params.") {
                         ctx.set_param(name, &v);
-                    } else if let Some(name) = target.strip_prefix("args.") {
-                        ctx.set_arg(name, &v);
                     }
                     let short = &v[..v.len().min(16)];
                     println!(
@@ -1003,11 +977,9 @@ pub fn run(
                             ctx.set_compile_param(name, &v);
                         } else if let Some(name) = target.strip_prefix("params.") {
                             ctx.set_param(name, &v);
-                        } else if let Some(name) = target.strip_prefix("args.") {
-                            ctx.set_arg(name, &v);
                         } else {
                             println!(
-                                "  {} on_resolved set '{}' — unknown namespace (expected instance./params./args.).",
+                                "  {} on_resolved set '{}' — unknown namespace (expected instance./params.).",
                                 style("[warn]").yellow(), target
                             );
                             continue;
@@ -1156,7 +1128,7 @@ pub fn run(
                     .unwrap_or_else(|| simf_path.clone());
                 let (inp_params, inp_hints) = apply_utxo_compile_params(&compile_params_map, &compile_param_type_hints, inp_ut);
                 // Per-input `utxo_source.compile_params` overrides (resolved against action
-                // params/args), mirroring the output `destination.compile_params` form.
+                // params), mirroring the output `destination.compile_params` form.
                 let (inp_params, inp_hints) = apply_site_compile_param_overrides(
                     inp_params, inp_hints, inp.utxo_source.get("compile_params"),
                     action, &compile_param_type_hints, &ctx,
@@ -1345,7 +1317,7 @@ pub fn run(
                             .unwrap_or_else(|| simf_path.clone());
                         let (out_params, out_hints) = apply_utxo_compile_params(&compile_params_map, &compile_param_type_hints, ut);
                         // Per-output `destination.compile_params` overrides (resolved against
-                        // action params/args), so a covenant can be keyed by a runtime value.
+                        // action params), so a covenant can be keyed by a runtime value.
                         let (out_params, out_hints) = apply_site_compile_param_overrides(
                             out_params, out_hints, m.get("compile_params"),
                             action, &compile_param_type_hints, &ctx,
@@ -2092,7 +2064,6 @@ pub fn run(
             action: action_name,
             compile_params: ctx.all_compile_params(),
             params: ctx.all_params(),
-            args: ctx.all_args(),
             inputs: ctx.all_inputs().map(|i| RunOutputInput {
                 id: i.id.clone(),
                 txid: i.txid.clone(),
@@ -2382,7 +2353,6 @@ pub fn run(
         action: action_name,
         compile_params: ctx.all_compile_params(),
         params: ctx.all_params(),
-        args: ctx.all_args(),
         inputs: ctx.all_inputs().map(|i| RunOutputInput {
             id: i.id.clone(),
             txid: i.txid.clone(),
@@ -2819,8 +2789,6 @@ fn apply_site_compile_param_overrides(
         };
         let hint = if let Some(k) = raw.strip_prefix("params.") {
             param_type(&action.params, k)
-        } else if let Some(k) = raw.strip_prefix("args.") {
-            param_type(&action.args, k)
         } else if let Some(k) = raw
             .strip_prefix("instance.")
             .or_else(|| raw.strip_prefix("compile_params."))
@@ -2831,7 +2799,6 @@ fn apply_site_compile_param_overrides(
                 .get(raw)
                 .cloned()
                 .or_else(|| param_type(&action.params, raw))
-                .or_else(|| param_type(&action.args, raw))
         } else {
             None
         };
@@ -2909,7 +2876,6 @@ fn broadcast_finalized_tx(
 /// current execution context.  Setter targets use dot-path notation:
 ///   `"params.FOO"`    → ctx.set_param
 ///   `"instance.FOO"`  → ctx.set_compile_param (deprecated alias: `"compile_params.FOO"`)
-///   `"args.FOO"`      → ctx.set_arg
 fn run_hook_block(
     hook: &crate::manifest::HookBlock,
     ctx: &mut ExecutionContext,
@@ -2933,8 +2899,6 @@ fn run_hook_block(
             ctx.set_compile_param(name, &value);
         } else if let Some(name) = target.strip_prefix("params.") {
             ctx.set_param(name, &value);
-        } else if let Some(name) = target.strip_prefix("args.") {
-            ctx.set_arg(name, &value);
         } else {
             ctx.set_param(target, &value);
         }
