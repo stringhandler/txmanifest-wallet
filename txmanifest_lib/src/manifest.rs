@@ -223,7 +223,9 @@ pub enum ParamCompute {
     /// wallet-derived?" is a single check on `compute` before dispatching on
     /// `wallet` — and so adding a new wallet-derived value does not grow the
     /// top-level variant list.
-    Wallet { wallet: WalletValue },
+    Wallet {
+        wallet: WalletValue,
+    },
     /// Call a named function in a `.simf` file after inputs are resolved.
     /// The function is compiled with `compile_params` as param:: constants.
     /// Its runtime input is read from `input` (a dot-path into ctx, e.g. `"params.STATE_BYTES"`).
@@ -471,7 +473,6 @@ pub struct Input {
     /// Clear-signing UI hint for this input (net-effect debit line).
     pub ui: Option<UiSpec>,
 }
-
 
 impl Input {
     /// This input's short human-readable label, if it declares one.
@@ -1122,7 +1123,11 @@ mod tests {
         for n in ["K", "H", "A"] {
             // A wallet value is not reproducible from the manifest, so it must never
             // be mistaken for an expression the engine could evaluate itself.
-            assert_eq!(spec(n).as_expr(), None, "{n} must not read as an expression");
+            assert_eq!(
+                spec(n).as_expr(),
+                None,
+                "{n} must not read as an expression"
+            );
         }
         assert!(spec("E").as_wallet().is_none());
         assert_eq!(spec("E").as_expr(), Some("1 + 1"));
@@ -1237,7 +1242,10 @@ mod tests {
         // (compute spec, the substring the error must contain)
         for (compute, needle) in [
             // An unknown key inside an otherwise well-formed spec.
-            (r#"{ "type": "tapleaf", "simf": "./a.simf", "bogus": 1 }"#, "bogus"),
+            (
+                r#"{ "type": "tapleaf", "simf": "./a.simf", "bogus": 1 }"#,
+                "bogus",
+            ),
             // An unknown discriminator.
             (r#"{ "type": "no_such_kind" }"#, "no_such_kind"),
             // A required field missing from a known variant.
@@ -1323,6 +1331,9 @@ mod tests {
     fn type_wins_when_both_keys_present() {
         // `type` is canonical; a stray `lang` must not override it.
         let fv = parse_field_value(r#"{ "type": "expr", "lang": "tapleaf", "expr": "1 + 1" }"#);
-        assert!(matches!(fv, ComputeSpec::Compute(ParamCompute::Expr { .. })));
+        assert!(matches!(
+            fv,
+            ComputeSpec::Compute(ParamCompute::Expr { .. })
+        ));
     }
 }

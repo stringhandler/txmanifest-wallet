@@ -25,20 +25,27 @@ pub struct PrepareOpts<'a> {
 }
 
 pub fn prepare(opts: PrepareOpts<'_>) -> Result<()> {
-    let action = opts.manifest.actions.get(opts.action_name).with_context(|| {
-        let available: Vec<&str> = opts.manifest.actions.keys().map(String::as_str).collect();
-        format!(
-            "Action '{}' not found. Available: {}",
-            opts.action_name,
-            available.join(", ")
-        )
-    })?;
+    let action = opts
+        .manifest
+        .actions
+        .get(opts.action_name)
+        .with_context(|| {
+            let available: Vec<&str> = opts.manifest.actions.keys().map(String::as_str).collect();
+            format!(
+                "Action '{}' not found. Available: {}",
+                opts.action_name,
+                available.join(", ")
+            )
+        })?;
 
     // Step 1 — analyse what wallet inputs the action needs
     let needed = needed_wallet_inputs(action, opts.manifest)?;
 
     if needed.is_empty() {
-        println!("  No wallet inputs required for '{}' — nothing to prepare.", opts.action_name);
+        println!(
+            "  No wallet inputs required for '{}' — nothing to prepare.",
+            opts.action_name
+        );
         return Ok(());
     }
 
@@ -62,13 +69,12 @@ pub fn prepare(opts: PrepareOpts<'_>) -> Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("Cannot open wallet: {e}"))?;
 
-    let utxos = wollet.utxos()
+    let utxos = wollet
+        .utxos()
         .map_err(|e| anyhow::anyhow!("Cannot read UTXOs: {e}"))?;
 
     if utxos.is_empty() {
-        bail!(
-            "Wallet has no UTXOs. Fund the address shown by `info` then run `sync` first."
-        );
+        bail!("Wallet has no UTXOs. Fund the address shown by `info` then run `sync` first.");
     }
 
     // Step 3 — for each required asset, count how many UTXOs we already have
@@ -78,7 +84,10 @@ pub fn prepare(opts: PrepareOpts<'_>) -> Result<()> {
     use std::collections::BTreeMap;
     let mut needed_by_asset: BTreeMap<String, Vec<&NeededInput>> = BTreeMap::new();
     for ni in &needed {
-        needed_by_asset.entry(ni.asset_label.clone()).or_default().push(ni);
+        needed_by_asset
+            .entry(ni.asset_label.clone())
+            .or_default()
+            .push(ni);
     }
 
     let mut splits_required: Vec<(String, usize)> = Vec::new(); // (asset_label, extra needed)
@@ -86,7 +95,8 @@ pub fn prepare(opts: PrepareOpts<'_>) -> Result<()> {
     for (asset_label, inputs) in &needed_by_asset {
         let required_count = inputs.len();
         let asset_id = resolve_asset(asset_label, network)?;
-        let available_count = utxos.iter()
+        let available_count = utxos
+            .iter()
             .filter(|u| u.unblinded.asset == asset_id)
             .count();
 
@@ -122,15 +132,16 @@ pub fn prepare(opts: PrepareOpts<'_>) -> Result<()> {
             bail!(
                 "Splitting non-L-BTC assets is not yet supported. \
                  Please manually send {} {} UTXO(s) to your wallet address.",
-                extra, asset_label
+                extra,
+                asset_label
             );
         }
 
-        let receive_addr = wollet.address(None)
+        let receive_addr = wollet
+            .address(None)
             .map_err(|e| anyhow::anyhow!("Cannot derive address: {e}"))?;
 
-        let mut builder = wollet.tx_builder()
-            .fee_rate(Some(100.0)); // 0.1 sat/vb
+        let mut builder = wollet.tx_builder().fee_rate(Some(100.0)); // 0.1 sat/vb
 
         for _ in 0..*extra {
             builder = builder
@@ -138,7 +149,8 @@ pub fn prepare(opts: PrepareOpts<'_>) -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("Failed to add recipient: {e}"))?;
         }
 
-        let mut pset = builder.finish()
+        let mut pset = builder
+            .finish()
             .map_err(|e| anyhow::anyhow!("Failed to build PSET: {e}"))?;
 
         // Preview — extract fee from the built PSET before signing
@@ -146,10 +158,17 @@ pub fn prepare(opts: PrepareOpts<'_>) -> Result<()> {
 
         println!();
         println!("{}", style("  Transaction preview:").bold());
-        println!("    Outputs : {} × {} sats {} each", extra, opts.split_amount, asset_label);
+        println!(
+            "    Outputs : {} × {} sats {} each",
+            extra, opts.split_amount, asset_label
+        );
         println!("    Total   : {} sats", (*extra as u64) * opts.split_amount);
         println!("    Fee     : {} sats", fee);
-        println!("    To      : {} (your wallet, index {})", receive_addr.address(), receive_addr.index());
+        println!(
+            "    To      : {} (your wallet, index {})",
+            receive_addr.address(),
+            receive_addr.index()
+        );
         println!();
 
         let confirmed = Confirm::new()
@@ -169,7 +188,8 @@ pub fn prepare(opts: PrepareOpts<'_>) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to sign PSET: {e}"))?;
 
         // Finalize
-        let tx = wollet.finalize(&mut pset)
+        let tx = wollet
+            .finalize(&mut pset)
             .map_err(|e| anyhow::anyhow!("Failed to finalize PSET: {e}"))?;
 
         // Broadcast
@@ -207,7 +227,10 @@ fn needed_wallet_inputs(action: &Action, manifest: &Manifest) -> Result<Vec<Need
                 .and_then(|v| v.as_str())
                 .unwrap_or("lbtc")
                 .to_string();
-            out.push(NeededInput { input_id: input.id.clone(), asset_label });
+            out.push(NeededInput {
+                input_id: input.id.clone(),
+                asset_label,
+            });
         } else if let Some(utxo_type_name) = input.utxo_type_name() {
             // Protocol UTXO — check if it has a Simplicity script
             let has_simplicity = manifest
@@ -236,21 +259,21 @@ fn needed_wallet_inputs(action: &Action, manifest: &Manifest) -> Result<Vec<Need
 /// Extract the explicit fee from the outputs of a built PSET.
 /// LWK places the fee output last; it is an explicit value with empty script.
 pub fn pset_fee(pset: &lwk_wollet::elements::pset::PartiallySignedTransaction) -> u64 {
-    pset.outputs().iter().filter_map(|o| {
-        // Fee output has no script (empty scriptpubkey in the PSET output)
-        if o.script_pubkey.is_empty() {
-            o.amount
-        } else {
-            None
-        }
-    }).sum()
+    pset.outputs()
+        .iter()
+        .filter_map(|o| {
+            // Fee output has no script (empty scriptpubkey in the PSET output)
+            if o.script_pubkey.is_empty() {
+                o.amount
+            } else {
+                None
+            }
+        })
+        .sum()
 }
 
 /// Resolve an asset label ("lbtc" or a hex asset ID) to an `AssetId`.
-fn resolve_asset(
-    label: &str,
-    network: ElementsNetwork,
-) -> Result<lwk_wollet::elements::AssetId> {
+fn resolve_asset(label: &str, network: ElementsNetwork) -> Result<lwk_wollet::elements::AssetId> {
     use std::str::FromStr;
     match label {
         "lbtc" | "bitcoin" => Ok(network.policy_asset()),

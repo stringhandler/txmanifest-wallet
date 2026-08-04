@@ -1,0 +1,82 @@
+name: CI
+
+# Build and test on every push to main and every pull request.
+#
+# The `simplicityhl` git dependency dominates build time, so both jobs lean on
+# `Swatinem/rust-cache` and run with `--locked`: the lock file pins that dependency to
+# an exact rev, and a build that silently updated it would no longer be testing what a
+# release builds.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to a PR makes the in-flight run obsolete; don't pay to finish it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux is the reference platform; Windows is what the project is developed on
+        # and what `tests/cli_parses_examples.rs` exercises path handling against.
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Plain `cargo test` (not `--all-targets`) so doc-tests run too. This also
+      # compiles `examples/`, which is what keeps `gen_schema` from bit-rotting.
+      #
+      # Deliberately NOT `--all-features`: the `simplicity_eval` feature needs the
+      # `compile_function` fork of SimplicityHL, and does not compile against the
+      # upstream master rev this workspace pins. See txmanifest_lib/Cargo.toml.
+      - name: Test
+        run: cargo test --workspace --locked
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # NON-BLOCKING for now: the tree is not yet rustfmt-clean and clippy reports 22
+    # warnings (all warnings, no errors). This job exists to make both visible on a PR
+    # without gating merges on a cleanup nobody has done yet.
+    #
+    # To turn it into a real gate: run `cargo fmt --all`, clear the clippy warnings
+    # (`cargo clippy --fix` handles most), then delete this line and add
+    # `-- -D warnings` to the clippy step.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        # `--all-targets` so tests and examples are linted too — that is where the
+        # shadowed-binding and unused-variable classes of bug actually show up.
+        run: cargo clippy --workspace --all-targets --locked

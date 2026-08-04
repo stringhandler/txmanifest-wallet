@@ -22,15 +22,17 @@ pub fn eval_expr_str(expr: &str, ctx: &ExecutionContext) -> Result<String> {
 pub fn eval_amount(value: &serde_json::Value, ctx: &ExecutionContext) -> Result<u64> {
     match value {
         serde_json::Value::Null => Ok(0),
-        serde_json::Value::Number(n) => {
-            n.as_u64()
-                .ok_or_else(|| anyhow::anyhow!("amount_sat number is not a valid u64: {n}"))
-        }
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("amount_sat number is not a valid u64: {n}")),
         serde_json::Value::String(s) => eval_expr(s.trim(), ctx),
         // { "value": "<expr>", "description": "..." } — documented amount field
         serde_json::Value::Object(m) => match m.get("value") {
             Some(v) => eval_amount(v, ctx),
-            None => bail!("Unsupported amount_sat object (no 'value' field): {}", serde_json::Value::Object(m.clone())),
+            None => bail!(
+                "Unsupported amount_sat object (no 'value' field): {}",
+                serde_json::Value::Object(m.clone())
+            ),
         },
         other => bail!("Unsupported amount_sat value: {other}"),
     }
@@ -86,10 +88,9 @@ pub fn eval_op_return_data(
     match data {
         serde_json::Value::String(expr) => eval_op_return_concat(expr, ctx, type_hints),
         serde_json::Value::Object(m) => {
-            let parts = m
-                .get("parts")
-                .and_then(|v| v.as_array())
-                .ok_or_else(|| anyhow::anyhow!("OP_RETURN data object must have a 'parts' array"))?;
+            let parts = m.get("parts").and_then(|v| v.as_array()).ok_or_else(|| {
+                anyhow::anyhow!("OP_RETURN data object must have a 'parts' array")
+            })?;
             let mut out = Vec::new();
             for part in parts {
                 out.extend_from_slice(&eval_op_return_part(part, ctx)?);
@@ -101,25 +102,34 @@ pub fn eval_op_return_data(
 }
 
 /// Encode a single typed OP_RETURN `parts` entry (see [`eval_op_return_data`]).
-fn eval_op_return_part(
-    part: &serde_json::Value,
-    ctx: &ExecutionContext,
-) -> Result<Vec<u8>> {
-    let ty = part.get("type").and_then(|v| v.as_str())
+fn eval_op_return_part(part: &serde_json::Value, ctx: &ExecutionContext) -> Result<Vec<u8>> {
+    let ty = part
+        .get("type")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("OP_RETURN part missing 'type': {part}"))?;
-    let value_ref = part.get("value").and_then(|v| v.as_str())
+    let value_ref = part
+        .get("value")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("OP_RETURN part needs 'value': {part}"))?;
     let resolved = resolve_ref(value_ref, ctx)
         .unwrap_or_else(|| value_ref.trim_matches(['"', '\'']).to_string());
     match ty {
         "u8" | "u16" | "u32" | "u64" => {
-            let n: u64 = resolved.trim().parse()
-                .map_err(|_| anyhow::anyhow!("OP_RETURN '{value_ref}' = '{resolved}' is not an integer"))?;
-            let width = match ty { "u8" => 1, "u16" => 2, "u32" => 4, _ => 8 };
+            let n: u64 = resolved.trim().parse().map_err(|_| {
+                anyhow::anyhow!("OP_RETURN '{value_ref}' = '{resolved}' is not an integer")
+            })?;
+            let width = match ty {
+                "u8" => 1,
+                "u16" => 2,
+                "u32" => 4,
+                _ => 8,
+            };
             let le = part.get("endian").and_then(|v| v.as_str()) != Some("be");
             let full = n.to_le_bytes();
             let mut bytes = full[..width].to_vec();
-            if !le { bytes.reverse(); }
+            if !le {
+                bytes.reverse();
+            }
             Ok(bytes)
         }
         "liquid.asset_id" => {
@@ -145,11 +155,10 @@ fn eval_op_return_part(
 /// of a 32-byte slot) or on the right when `align: "left"`.
 ///
 /// Used for dynamic storage slots such as the lending covenant's `current_debt` leaf.
-pub fn encode_leaf_value(
-    item: &serde_json::Value,
-    ctx: &ExecutionContext,
-) -> Result<Vec<u8>> {
-    let value_ref = item.get("value").and_then(|v| v.as_str())
+pub fn encode_leaf_value(item: &serde_json::Value, ctx: &ExecutionContext) -> Result<Vec<u8>> {
+    let value_ref = item
+        .get("value")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("taproot leaf value item needs 'value': {item}"))?;
     let resolved = resolve_ref(value_ref, ctx)
         .unwrap_or_else(|| value_ref.trim_matches(['"', '\'']).to_string());
@@ -160,27 +169,44 @@ pub fn encode_leaf_value(
 /// Split from [`encode_leaf_value`] so callers that resolve `value` themselves (e.g.
 /// against an in-progress `create_instance` field map) can reuse the typed encoding.
 pub fn encode_leaf_bytes(item: &serde_json::Value, resolved: &str) -> Result<Vec<u8>> {
-    let ty = item.get("type").and_then(|v| v.as_str())
+    let ty = item
+        .get("type")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("taproot leaf value item needs 'type': {item}"))?;
 
     let mut bytes = match ty {
         "u8" | "u16" | "u32" | "u64" => {
-            let n: u64 = resolved.trim().parse()
-                .map_err(|_| anyhow::anyhow!("taproot leaf value '{resolved}' is not an integer"))?;
-            let width = match ty { "u8" => 1, "u16" => 2, "u32" => 4, _ => 8 };
+            let n: u64 = resolved.trim().parse().map_err(|_| {
+                anyhow::anyhow!("taproot leaf value '{resolved}' is not an integer")
+            })?;
+            let width = match ty {
+                "u8" => 1,
+                "u16" => 2,
+                "u32" => 4,
+                _ => 8,
+            };
             let le = item.get("endian").and_then(|v| v.as_str()) != Some("be");
             let full = n.to_le_bytes();
             let mut b = full[..width].to_vec();
-            if !le { b.reverse(); }
+            if !le {
+                b.reverse();
+            }
             b
         }
         "bytes32" | "bytes" | "pubkey" => hex_to_bytes(&resolved)?,
         other => bail!("Unsupported taproot leaf value type '{other}'"),
     };
 
-    if let Some(pad_to) = item.get("pad_to").and_then(|v| v.as_u64()).map(|n| n as usize) {
+    if let Some(pad_to) = item
+        .get("pad_to")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+    {
         if bytes.len() > pad_to {
-            bail!("taproot leaf value '{resolved}' encodes to {} bytes, exceeds pad_to {pad_to}", bytes.len());
+            bail!(
+                "taproot leaf value '{resolved}' encodes to {} bytes, exceeds pad_to {pad_to}",
+                bytes.len()
+            );
         }
         let pad = pad_to - bytes.len();
         // Default align for a padded value is "right" (value occupies the trailing bytes).
@@ -229,9 +255,16 @@ fn eval_op_return_concat(
         // Byte-reversal is driven ONLY by the declared `liquid.asset_id` type of the
         // referenced key — never by its name. An asset ref must be a typed compile param.
         let key = arg.rsplit('.').next().unwrap_or(arg);
-        let is_asset = type_hints.get(key).map(|t| t == "liquid.asset_id").unwrap_or(false);
-        let resolved = resolve_ref(arg, ctx).unwrap_or_else(|| arg.trim_matches(['"', '\'']).to_string());
-        let hex = resolved.trim().trim_start_matches("0x").trim_start_matches("0X");
+        let is_asset = type_hints
+            .get(key)
+            .map(|t| t == "liquid.asset_id")
+            .unwrap_or(false);
+        let resolved =
+            resolve_ref(arg, ctx).unwrap_or_else(|| arg.trim_matches(['"', '\'']).to_string());
+        let hex = resolved
+            .trim()
+            .trim_start_matches("0x")
+            .trim_start_matches("0X");
         if hex.len() % 2 != 0 {
             bail!("OP_RETURN data part '{arg}' resolved to odd-length hex '{hex}'");
         }
@@ -239,7 +272,9 @@ fn eval_op_return_concat(
             .step_by(2)
             .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
             .collect::<Result<Vec<u8>, _>>()
-            .map_err(|_| anyhow::anyhow!("OP_RETURN data part '{arg}' is not valid hex: '{hex}'"))?;
+            .map_err(|_| {
+                anyhow::anyhow!("OP_RETURN data part '{arg}' is not valid hex: '{hex}'")
+            })?;
         if is_asset {
             bytes.reverse();
         }
@@ -451,9 +486,9 @@ pub fn eval_simplicityhl_hook(
     hook_input_id: &str,
     ctx: &ExecutionContext,
 ) -> Result<String> {
-    let resolved = ctx.get_input(hook_input_id).ok_or_else(|| {
-        anyhow::anyhow!("Input '{}' not found in context", hook_input_id)
-    })?;
+    let resolved = ctx
+        .get_input(hook_input_id)
+        .ok_or_else(|| anyhow::anyhow!("Input '{}' not found in context", hook_input_id))?;
 
     let txid = Txid::from_str(&resolved.txid)
         .map_err(|e| anyhow::anyhow!("Cannot parse txid '{}': {e}", resolved.txid))?;
@@ -493,7 +528,10 @@ pub fn eval_simplicityhl_hook(
             Ok(reversed)
         }
         Err(simplicityhl::EvalError::RequiresTransactionContext(jets)) => {
-            bail!("Expression requires transaction context: {}", jets.join(", "))
+            bail!(
+                "Expression requires transaction context: {}",
+                jets.join(", ")
+            )
         }
         Err(e) => bail!("SimplicityHL eval failed: {e}"),
     }
@@ -529,7 +567,9 @@ pub fn eval_param_compute_expr(expr: &str, ctx: &ExecutionContext) -> Result<u64
     let val = evalexpr::eval_int(&substituted).map_err(|e| {
         anyhow::anyhow!(
             "Cannot evaluate compute expr '{}' (substituted: '{}'): {}",
-            expr, substituted, e
+            expr,
+            substituted,
+            e
         )
     })?;
     if val < 0 {
@@ -592,7 +632,9 @@ fn resolve_pow(expr: &str, ctx: &ExecutionContext) -> String {
     let mut s = expr.to_string();
     while let Some(pos) = s.find("pow(") {
         let inner_start = pos + 4;
-        let Some(rel_close) = s[inner_start..].find(')') else { break };
+        let Some(rel_close) = s[inner_start..].find(')') else {
+            break;
+        };
         let inner = s[inner_start..inner_start + rel_close].to_string();
         let Some(comma) = inner.find(',') else { break };
         let base_s = inner[..comma].trim();
@@ -639,9 +681,7 @@ fn substitute_vars(expr: &str, ctx: &ExecutionContext) -> String {
             {
                 i += 1; // consume the dot
                 let key_start = i;
-                while i < bytes.len()
-                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-                {
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i += 1;
                 }
                 let key = &expr[key_start..i];
@@ -699,10 +739,16 @@ mod fee_keyword_tests {
         let mut ctx = ExecutionContext::new();
         ctx.set_param("amount", "100000");
         // Default fee is 0.
-        assert_eq!(eval_amount(&serde_json::json!("amount - fee"), &ctx).unwrap(), 100000);
+        assert_eq!(
+            eval_amount(&serde_json::json!("amount - fee"), &ctx).unwrap(),
+            100000
+        );
         // After estimation, `fee` reflects the set value.
         ctx.set_fee(250);
-        assert_eq!(eval_amount(&serde_json::json!("amount - fee"), &ctx).unwrap(), 99750);
+        assert_eq!(
+            eval_amount(&serde_json::json!("amount - fee"), &ctx).unwrap(),
+            99750
+        );
         // Bare `fee` resolves directly.
         assert_eq!(eval_amount(&serde_json::json!("fee"), &ctx).unwrap(), 250);
     }
@@ -780,7 +826,10 @@ mod op_return_data_tests {
         ctx.set_compile_param("PRINCIPAL_ASSET_ID", asset_display);
 
         let mut hints = HashMap::new();
-        hints.insert("PRINCIPAL_ASSET_ID".to_string(), "liquid.asset_id".to_string());
+        hints.insert(
+            "PRINCIPAL_ASSET_ID".to_string(),
+            "liquid.asset_id".to_string(),
+        );
         hints.insert("BORROWER_PUB_KEY".to_string(), "pubkey".to_string());
 
         let bytes = eval_op_return_data(
@@ -804,7 +853,10 @@ mod op_return_data_tests {
     #[test]
     fn parts_form_encodes_typed_50_byte_metadata() {
         let mut ctx = ExecutionContext::new();
-        ctx.set_compile_param("PRINCIPAL_ASSET_ID", "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5");
+        ctx.set_compile_param(
+            "PRINCIPAL_ASSET_ID",
+            "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5",
+        );
         ctx.set_compile_param("PRINCIPAL_AMOUNT", "1000");
         ctx.set_compile_param("LOAN_EXPIRATION_TIME", "2536857");
         ctx.set_compile_param("PRINCIPAL_INTEREST_RATE", "10000");

@@ -81,19 +81,29 @@ impl InstanceFile {
                             .map(str::to_string);
                         Some((
                             id.clone(),
-                            ResolvedInput { id: id.clone(), txid, vout, amount_sat, asset, issuance_entropy },
+                            ResolvedInput {
+                                id: id.clone(),
+                                txid,
+                                vout,
+                                amount_sat,
+                                asset,
+                                issuance_entropy,
+                            },
                         ))
                     })
                     .collect()
             })
             .unwrap_or_default();
 
-        Ok(Self { instance, instance_params, provided_inputs })
+        Ok(Self {
+            instance,
+            instance_params,
+            provided_inputs,
+        })
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
-        let json = serde_json::to_string_pretty(self)
-            .context("Cannot serialise instance file")?;
+        let json = serde_json::to_string_pretty(self).context("Cannot serialise instance file")?;
         std::fs::write(path, json)
             .with_context(|| format!("Cannot write instance file: {}", path.display()))
     }

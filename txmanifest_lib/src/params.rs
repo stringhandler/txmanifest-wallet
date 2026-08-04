@@ -54,7 +54,11 @@ impl ParamOverrides {
         // Instance fields are authoritative (locked at deploy time from chain data).
         // Legacy flat instance_params loaded first; new instance.fields takes precedence.
         if let Some(inst) = instance {
-            values.extend(inst.instance_params.iter().map(|(k, v)| (k.clone(), v.clone())));
+            values.extend(
+                inst.instance_params
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone())),
+            );
             if let Some(idata) = &inst.instance {
                 values.extend(idata.fields.iter().map(|(k, v)| (k.clone(), v.clone())));
             }
@@ -85,6 +89,10 @@ fn network_params_path(manifest_file: &Path, network: &str) -> PathBuf {
 fn load_params_file(path: &Path) -> Result<BTreeMap<String, String>> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("Cannot read params file: {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("Cannot parse params file (expected flat string→string JSON object): {}", path.display()))
+    serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "Cannot parse params file (expected flat string→string JSON object): {}",
+            path.display()
+        )
+    })
 }

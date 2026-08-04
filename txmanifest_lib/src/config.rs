@@ -100,6 +100,5 @@ pub fn save(config: &Config) -> Result<()> {
             .with_context(|| format!("Cannot create config dir: {}", parent.display()))?;
     }
     let raw = serde_json::to_string_pretty(config)?;
-    std::fs::write(&path, raw)
-        .with_context(|| format!("Cannot write config: {}", path.display()))
+    std::fs::write(&path, raw).with_context(|| format!("Cannot write config: {}", path.display()))
 }
