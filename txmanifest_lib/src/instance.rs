@@ -12,8 +12,8 @@ use crate::context::ResolvedInput;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InstanceFile {
-    /// Class instance state — class name + field values.
-    /// Written by a constructor (`is_constructor: true`) after broadcast.
+    /// Template instance state — template name + field values.
+    /// Written by a constructor (an action with `create_instance`) after broadcast.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance: Option<InstanceData>,
 
@@ -30,8 +30,8 @@ pub struct InstanceFile {
 /// The instance state stored in the instance file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceData {
-    /// Matches a key in `manifest.classes`.
-    pub class: String,
+    /// Matches a key in `manifest.contract_templates`.
+    pub template: String,
     /// Field values set by the constructor (BTreeMap → alphabetical JSON output).
     pub fields: BTreeMap<String, String>,
 }
@@ -49,7 +49,7 @@ impl InstanceFile {
         let v: serde_json::Value = serde_json::from_str(&raw)
             .with_context(|| format!("Cannot parse instance file: {}", path.display()))?;
 
-        // New format: instance: { class, fields }
+        // New format: instance: { template, fields }
         let instance: Option<InstanceData> = v
             .get("instance")
             .and_then(|i| serde_json::from_value(i.clone()).ok());
@@ -109,8 +109,8 @@ impl InstanceFile {
         self.instance_params.get(name).map(String::as_str)
     }
 
-    /// Class name if an instance is present.
-    pub fn class_name(&self) -> Option<&str> {
-        self.instance.as_ref().map(|i| i.class.as_str())
+    /// Template name if an instance is present.
+    pub fn template_name(&self) -> Option<&str> {
+        self.instance.as_ref().map(|i| i.template.as_str())
     }
 }

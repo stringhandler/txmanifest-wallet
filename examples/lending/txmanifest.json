@@ -1,8 +1,8 @@
 {
+  "$schema": "../../schema/txmanifest.schema.json",
   "manifest_version": "0.1.0",
   "protocol": "simplicity-lending",
   "description": "P2P collateralised lending protocol on Liquid using SimplicityHL covenants. Borrower locks collateral in a PreLockCovenant and advertises terms via bit-packed Parameter NFTs. A Lender accepts by providing the principal, activating the LendingCovenant. Settlement is either repayment (borrower returns principal+interest, reclaims collateral) or liquidation (lender claims collateral after loan expiry). All covenants are enforced on-chain via Simplicity programs; no trusted backend is required.",
-  "simplicity_hl_version": "0.6.0",
   "utxo_types": {
     "p2pk": {
       "description": "Simple Schnorr-signature covenant (p2pk.simf) keyed to BORROWER_PUB_KEY. Used as the borrower's principal-payment and NFT-release address.",
@@ -132,7 +132,7 @@
       ]
     }
   },
-  "classes": {
+  "contract_templates": {
     "lending_contract": {
       "description": "P2P collateralised lending contract. One instance per loan offer. Created by IssueUtilityNFTs; advanced through LockCollateral, SetupLending, RepayLoan / LiquidateAfterExpiry, and ClaimPrincipalWithInterest.",
       "fields": {
@@ -206,15 +206,14 @@
           "type": "liquid.asset_id"
         }
       },
-      "methods": {
+      "actions": {
         "IssueUtilityNFTs": {
-          "is_constructor": true,
           "description": "Borrower issues four Liquid NFTs (Borrower NFT, Lender NFT, First/Second Parameters NFTs). Computes all covenant hashes and writes the instance file.",
           "params": {
             "BORROWER_PUB_KEY": {
               "type": "pubkey",
-              "source": {
-                "type": "wallet_key"
+              "compute": {
+                "type": "wallet", "wallet": "key"
               },
               "description": "Borrower's BIP340 Schnorr public key. Used for cancellation authorization and as the destination for the principal output."
             },
@@ -259,11 +258,10 @@
             }
           },
           "create_instance": {
-            "class": "lending_contract",
             "fields": {
               "BORROWER_NFT_ASSET_ID": "$compile_params.BORROWER_NFT_ASSET_ID",
               "BORROWER_NFT_OUTPUT_SCRIPT_HASH": {
-                "compute": "tapleaf",
+                "type": "tapleaf",
                 "simf": "./script_auth.simf",
                 "params": {
                   "SCRIPT_HASH": {
@@ -280,7 +278,7 @@
               "FIRST_PARAMETERS_NFT_ASSET_ID": "$compile_params.FIRST_PARAMETERS_NFT_ASSET_ID",
               "LENDER_NFT_ASSET_ID": "$compile_params.LENDER_NFT_ASSET_ID",
               "LENDER_PRINCIPAL_COV_HASH": {
-                "compute": "tapleaf",
+                "type": "tapleaf",
                 "simf": "./asset_auth.simf",
                 "params": {
                   "ASSET_ID": {
@@ -298,7 +296,7 @@
                 }
               },
               "LENDING_COV_HASH": {
-                "compute": "tapleaf",
+                "type": "tapleaf",
                 "simf": "./lending.simf",
                 "params": {
                   "COLLATERAL_AMOUNT": {
@@ -349,7 +347,7 @@
               },
               "LOAN_EXPIRATION_TIME": "$params.LOAN_EXPIRATION_TIME",
               "PARAMETERS_NFT_OUTPUT_SCRIPT_HASH": {
-                "compute": "tapleaf",
+                "type": "tapleaf",
                 "simf": "./script_auth.simf",
                 "params": {
                   "SCRIPT_HASH": {
@@ -359,7 +357,7 @@
                 }
               },
               "PRE_LOCK_COV_HASH": {
-                "compute": "tapleaf",
+                "type": "tapleaf",
                 "simf": "./pre_lock.simf",
                 "params": {
                   "COLLATERAL_AMOUNT": {
@@ -425,7 +423,7 @@
                 }
               },
               "PRELOCK_PARAMETERS_NFT_SCRIPT_HASH": {
-                "compute": "tapleaf",
+                "type": "tapleaf",
                 "simf": "./script_auth.simf",
                 "params": {
                   "SCRIPT_HASH": {
@@ -440,7 +438,7 @@
               "PRINCIPAL_INTEREST_AMOUNT": "params.PRINCIPAL_AMOUNT * params.PRINCIPAL_INTEREST_RATE / 10000",
               "PRINCIPAL_INTEREST_RATE": "$params.PRINCIPAL_INTEREST_RATE",
               "PRINCIPAL_OUTPUT_SCRIPT_HASH": {
-                "compute": "tapleaf",
+                "type": "tapleaf",
                 "simf": "./p2pk.simf",
                 "params": {
                   "PUB_KEY": {
@@ -559,20 +557,6 @@
               "asset": "lbtc",
               "optional": true
             }
-          ],
-          "validations": [
-            {
-              "id": "collateral_principal_distinct",
-              "description": "Collateral and principal must be different assets.",
-              "rule": {
-                "type": "arithmetic",
-                "expr": "params.COLLATERAL_ASSET_ID != params.PRINCIPAL_ASSET_ID"
-              },
-              "error": {
-                "code": "ASSET_COLLISION",
-                "message": "COLLATERAL_ASSET_ID and PRINCIPAL_ASSET_ID must be different assets."
-              }
-            }
           ]
         },
         "LockCollateral": {
@@ -689,20 +673,6 @@
               "destination": "change",
               "asset": "lbtc",
               "optional": true
-            }
-          ],
-          "validations": [
-            {
-              "id": "collateral_amount_matches",
-              "description": "Collateral input must exactly match COLLATERAL_AMOUNT.",
-              "rule": {
-                "type": "arithmetic",
-                "expr": "collateral_in.amount_sat == compile_params.COLLATERAL_AMOUNT"
-              },
-              "error": {
-                "code": "AMOUNT_MISMATCH",
-                "message": "Collateral input amount does not match COLLATERAL_AMOUNT"
-              }
             }
           ]
         },
@@ -1438,20 +1408,6 @@
               "asset": "lbtc",
               "optional": true
             }
-          ],
-          "validations": [
-            {
-              "id": "expiry_reached",
-              "description": "Current block height must be >= LOAN_EXPIRATION_TIME.",
-              "rule": {
-                "type": "arithmetic",
-                "expr": "current_block_height >= compile_params.LOAN_EXPIRATION_TIME"
-              },
-              "error": {
-                "code": "TIMELOCK_NOT_ELAPSED",
-                "message": "Loan has not yet expired. Cannot liquidate before LOAN_EXPIRATION_TIME."
-              }
-            }
           ]
         },
         "ClaimPrincipalWithInterest": {
@@ -1524,51 +1480,6 @@
             }
           ]
         }
-      }
-    }
-  },
-  "lifecycle": {
-    "states": [
-      "nfts_issued",
-      "offer_open",
-      "loan_active",
-      "repaid",
-      "liquidated",
-      "cancelled"
-    ],
-    "entry_actions": [
-      "IssueUtilityNFTs"
-    ],
-    "transitions": {
-      "IssueUtilityNFTs": {
-        "to": "nfts_issued"
-      },
-      "LockCollateral": {
-        "from": "nfts_issued",
-        "to": "offer_open"
-      },
-      "CancelOffer": {
-        "from": "offer_open",
-        "to": "cancelled",
-        "unilateral": true
-      },
-      "SetupLending": {
-        "from": "offer_open",
-        "to": "loan_active"
-      },
-      "RepayLoan": {
-        "from": "loan_active",
-        "to": "repaid",
-        "cooperative": true
-      },
-      "LiquidateAfterExpiry": {
-        "from": "loan_active",
-        "to": "liquidated",
-        "unilateral": true
-      },
-      "ClaimPrincipalWithInterest": {
-        "from": "repaid",
-        "to": "settled"
       }
     }
   }

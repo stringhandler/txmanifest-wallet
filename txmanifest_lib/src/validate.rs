@@ -74,6 +74,51 @@ impl Report {
     }
 }
 
+/// Declared manifest types visible to one action's `ui.action` references: the
+/// enclosing contract template's fields (`instance.X`) plus the action's own
+/// params (`params.X`). Keyed by bare name, which is how a token is looked up.
+fn param_types(
+    action: &Action,
+    template: Option<&crate::manifest::ContractTemplate>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut types = std::collections::BTreeMap::new();
+    if let Some(template) = template {
+        for (name, def) in &template.fields {
+            types.insert(name.clone(), def.type_.clone());
+        }
+    }
+    for (name, def) in action.params.iter().flatten() {
+        types.insert(name.clone(), def.type_.clone());
+    }
+    types
+}
+
+/// Check one hook block's `set` values.
+///
+/// `set` is `ComputeSpec`-valued so that every "name → how to produce a value" map in
+/// the format reads alike, but only the expression forms actually run in a hook: a
+/// hook fires at a fixed point in the flow, with no `.simf` path, network or wallet
+/// threaded through it. Rejecting the rest here — rather than at run time — keeps a
+/// manifest from parsing cleanly and then silently skipping an assignment.
+fn check_hook(report: &mut Report, loc: &str, hook: &crate::manifest::HookBlock) {
+    use crate::manifest::ParamCompute;
+    for (target, spec) in &hook.set {
+        let tloc = format!("{loc}.set.{target}");
+        let Some(compute) = spec.as_spec() else { continue }; // bare expression: fine
+        match compute {
+            ParamCompute::Expr { .. } => {}
+            ParamCompute::Wallet { .. } => report.error(
+                tloc,
+                "a hook cannot take a value from the wallet: the value would differ per user, and an `instance.*` field feeds covenant addresses that must be reproducible from the manifest alone",
+            ),
+            ParamCompute::Tapleaf { .. } | ParamCompute::SimfFn { .. } => report.error(
+                tloc,
+                "only expression values run in a hook; compute a tapleaf or simf_fn as an action param or a create_instance field instead",
+            ),
+        }
+    }
+}
+
 /// Run all structural checks against a parsed manifest file.
 pub fn validate(manifest: &Manifest) -> Report {
     let mut report = Report::default();
@@ -84,25 +129,26 @@ pub fn validate(manifest: &Manifest) -> Report {
         .map(|m| m.keys().map(String::as_str).collect())
         .unwrap_or_default();
 
-    let class_names: BTreeSet<&str> = manifest
-        .classes
-        .as_ref()
-        .map(|m| m.keys().map(String::as_str).collect())
-        .unwrap_or_default();
-
     // Collect every action, whether top-level or a class method, tagged with a
     // dot-path location and its bare name (for lifecycle cross-checks).
-    let mut actions: Vec<(String, String, &Action)> = Vec::new();
+    let mut actions: Vec<(String, String, &Action, std::collections::BTreeMap<String, String>, bool)> =
+        Vec::new();
     for (name, action) in &manifest.actions {
-        actions.push((format!("actions.{name}"), name.clone(), action));
+        actions.push((format!("actions.{name}"), name.clone(), action, param_types(action, None), false));
     }
-    if let Some(classes) = &manifest.classes {
-        for (cname, cdef) in classes {
-            for (mname, method) in &cdef.methods {
-                actions.push((format!("classes.{cname}.methods.{mname}"), mname.clone(), method));
+    if let Some(contract_templates) = &manifest.contract_templates {
+        for (cname, cdef) in contract_templates {
+            for (aname, method) in &cdef.actions {
+                actions.push((
+                    format!("contract_templates.{cname}.actions.{aname}"),
+                    aname.clone(),
+                    method,
+                    param_types(method, Some(cdef)),
+                    true,
+                ));
             }
             for (fname, fdef) in &cdef.fields {
-                let floc = format!("classes.{cname}.fields.{fname}");
+                let floc = format!("contract_templates.{cname}.fields.{fname}");
                 if let Some(desc) = &fdef.description {
                     if desc.trim().is_empty() {
                         report.warn(&floc, "description is present but empty");
@@ -137,8 +183,9 @@ pub fn validate(manifest: &Manifest) -> Report {
     // Track which UTXO types get referenced so we can flag dead ones.
     let mut referenced: BTreeSet<String> = BTreeSet::new();
 
-    for (loc, _bare, action) in &actions {
-        check_action(&mut report, &utxo_types, &class_names, &mut referenced, loc, action);
+    for (loc, _bare, action, field_types, in_template) in &actions {
+        check_action(&mut report, &utxo_types, &mut referenced, loc, action, *in_template);
+        check_ui(&mut report, loc, action, field_types);
     }
 
     // --- Unreferenced UTXO types -----------------------------------------
@@ -151,35 +198,17 @@ pub fn validate(manifest: &Manifest) -> Report {
         }
     }
 
-    // --- Lifecycle transitions reference real actions --------------------
-    if let Some(lifecycle) = &manifest.lifecycle {
-        let action_names: BTreeSet<&str> = actions.iter().map(|(_, bare, _)| bare.as_str()).collect();
-        if let Some(transitions) = lifecycle.get("transitions").and_then(Value::as_object) {
-            for key in transitions.keys() {
-                if !action_names.contains(key.as_str()) {
-                    report.warn(
-                        "lifecycle.transitions",
-                        format!("transition '{key}' does not match any action"),
-                    );
-                }
-            }
-        }
-    }
-
     report
 }
 
 fn check_action(
     report: &mut Report,
     utxo_types: &BTreeSet<&str>,
-    class_names: &BTreeSet<&str>,
     referenced: &mut BTreeSet<String>,
     loc: &str,
     action: &Action,
+    in_template: bool,
 ) {
-    // --- Action-level witnesses -----------------------------------------
-    check_witnesses(report, &format!("{loc}.witnesses"), &action.witnesses);
-
     // --- Inputs ----------------------------------------------------------
     if let Some(inputs) = &action.inputs {
         let mut input_ids: BTreeSet<&str> = BTreeSet::new();
@@ -224,45 +253,181 @@ fn check_action(
         }
     }
 
-    // --- Validations -----------------------------------------------------
-    if let Some(validations) = &action.validations {
-        let mut validation_ids: BTreeSet<&str> = BTreeSet::new();
-        for v in validations {
-            if !validation_ids.insert(v.id.as_str()) {
-                report.error(format!("{loc}.validations"), format!("duplicate validation id '{}'", v.id));
-            }
-            let vloc = format!("{loc}.validations.{}", v.id);
-            match v.rule.type_.as_str() {
-                "arithmetic" => {
-                    if v.rule.expr.as_deref().unwrap_or("").trim().is_empty() {
-                        report.error(vloc, "arithmetic rule has no expr");
-                    }
-                }
-                "utxo_exists" => match v.rule.utxo_type.as_deref() {
-                    Some(name) => {
-                        referenced.insert(name.to_string());
-                        if !utxo_types.contains(name) {
-                            report.error(vloc, format!("utxo_exists references unknown utxo_type '{name}'"));
-                        }
-                    }
-                    None => report.error(vloc, "utxo_exists rule is missing utxo_type"),
-                },
-                other => report.warn(vloc, format!("unknown validation rule type '{other}'")),
-            }
+    // --- Hooks ------------------------------------------------------------
+    for (field, hook) in [
+        ("on_pre_broadcast", &action.on_pre_broadcast),
+        ("on_post_broadcast", &action.on_post_broadcast),
+    ] {
+        if let Some(hook) = hook {
+            check_hook(report, &format!("{loc}.{field}"), hook);
+        }
+    }
+    for input in action.inputs.iter().flatten() {
+        if let Some(hook) = &input.on_resolved {
+            check_hook(report, &format!("{loc}.inputs.{}.on_resolved", input.id), hook);
         }
     }
 
-    // --- Constructor / create_instance -----------------------------------
-    if action.is_constructor && action.create_instance.is_none() {
-        report.warn(loc.to_string(), "is_constructor is true but there is no create_instance block");
+    // --- Constructors -----------------------------------------------------
+    // An action carrying `create_instance` is a constructor, and it constructs an
+    // instance of the template it is declared in. A standalone action has no
+    // enclosing template, so there is nothing for it to construct.
+    if action.create_instance.is_some() && !in_template {
+        report.error(
+            format!("{loc}.create_instance"),
+            "create_instance is only legal on an action inside a contract template;              the instance created is always of that template",
+        );
     }
-    if let Some(ci) = &action.create_instance {
-        if !class_names.contains(ci.class.as_str()) {
-            report.error(
-                format!("{loc}.create_instance"),
-                format!("references unknown class '{}'", ci.class),
-            );
+}
+
+// ---------------------------------------------------------------------------
+// Clear-signing UI budget
+// ---------------------------------------------------------------------------
+
+/// Maximum length of a per-leg `ui.label`.
+///
+/// A net-effect row renders as `± <amount> <symbol>  <label>`. On an 80-column
+/// terminal the amount and symbol claim roughly the first 20 columns, so 64 leaves
+/// the label a full line with margin. Labels do not interpolate, so this is a plain
+/// character count.
+pub const MAX_UI_LABEL: usize = 64;
+
+/// Maximum **worst-case rendered** length of an `ui.action` summary.
+///
+/// `ui.action` is a template, so its authored length is not what a signer reads.
+/// The budget is computed by substituting each `{token}` with the widest value it
+/// could resolve to — see [`UI_TOKEN_AMOUNT_WIDTH`] and [`UI_TOKEN_SYMBOL_WIDTH`].
+pub const MAX_UI_ACTION_RENDERED: usize = 160;
+
+/// Widest rendering of a bare `{ref}` that resolves to a number.
+///
+/// `u64::MAX` is 18446744073709551615 — 20 digits. `format_amount` may insert a
+/// decimal point for a non-zero precision (`184467440737.09551615`), so the worst
+/// case is 21 characters. This is the "max number of 0s" bound.
+pub const UI_TOKEN_AMOUNT_WIDTH: usize = 21;
+
+/// Widest rendering of a `{ref:symbol}` token.
+///
+/// A known asset renders its ticker (`tL-BTC`); an unknown one renders an elided
+/// id (`38fca2…50a5`, 11 chars). 12 leaves room for a wallet's own registry to
+/// substitute a slightly longer friendly tag without blowing the budget.
+pub const UI_TOKEN_SYMBOL_WIDTH: usize = 12;
+
+/// Width of an untagged 32-byte value rendered in full: 64 hex characters.
+///
+/// This is why [`check_ui_action`] requires `:symbol` on asset-typed references —
+/// a bare `{instance.SOME_ASSET_ID}` puts all 64 characters on the signer's screen
+/// and defeats any budget.
+pub const UI_RAW_HASH_WIDTH: usize = 64;
+
+/// Manifest types that are 32-byte values and must never be rendered raw.
+const HASHED_TYPES: &[&str] = &["liquid.asset_id", "bytes32", "pubkey", "u256"];
+
+/// Split a `ui.action` template into its literal text and its `{token}` list.
+fn split_template(template: &str) -> (String, Vec<String>) {
+    let mut literal = String::new();
+    let mut tokens = Vec::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        literal.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            literal.push_str(&rest[open..]);
+            return (literal, tokens);
+        };
+        tokens.push(after[..close].to_string());
+        rest = &after[close + 1..];
+    }
+    literal.push_str(rest);
+    (literal, tokens)
+}
+
+/// Check one action's `ui` metadata: label lengths, the rendered-width budget, and
+/// that every asset-typed reference is tagged `:symbol`.
+///
+/// `field_types` maps a reference name (template field or action param) to its
+/// declared manifest type, so `{instance.X}` can be classified.
+fn check_ui(
+    report: &mut Report,
+    loc: &str,
+    action: &Action,
+    field_types: &std::collections::BTreeMap<String, String>,
+) {
+    // -- per-leg labels ---------------------------------------------------
+    let mut check_label = |leg_loc: String, label: Option<&str>| {
+        if let Some(label) = label {
+            let len = label.chars().count();
+            if len > MAX_UI_LABEL {
+                report.error(
+                    leg_loc,
+                    format!(
+                        "ui.label is {len} chars, over the {MAX_UI_LABEL}-char budget \
+                         (it shares a line with the amount and asset symbol)"
+                    ),
+                );
+            }
         }
+    };
+    for input in action.inputs.iter().flatten() {
+        check_label(format!("{loc}.inputs.{}", input.id), input.ui_label());
+    }
+    for output in action.outputs.iter().flatten() {
+        check_label(format!("{loc}.outputs.{}", output.id), output.ui_label());
+    }
+
+    // -- action summary ---------------------------------------------------
+    let Some(template) = action.intent.as_deref() else {
+        return;
+    };
+    let uloc = format!("{loc}.intent");
+    let (literal, tokens) = split_template(template);
+
+    let mut worst = literal.chars().count();
+    for token in &tokens {
+        let (reference, modifier) = match token.split_once(':') {
+            Some((r, m)) => (r.trim(), Some(m.trim())),
+            None => (token.trim(), None),
+        };
+        // `instance.X` / `params.X` → X; a bare name stays as-is.
+        let key = reference.rsplit('.').next().unwrap_or(reference);
+        let declared = field_types.get(key).map(String::as_str);
+        let is_hashed = declared.is_some_and(|t| HASHED_TYPES.contains(&t));
+
+        match modifier {
+            Some("symbol") => worst += UI_TOKEN_SYMBOL_WIDTH,
+            Some(other) => {
+                report.warn(&uloc, format!("unknown token modifier ':{other}' in '{{{token}}}'"));
+                worst += UI_TOKEN_AMOUNT_WIDTH;
+            }
+            None if is_hashed => {
+                // The whole point of the tag: a wallet substitutes a friendly name
+                // for the id. Rendered raw this is 64 characters of hex.
+                report.error(
+                    &uloc,
+                    format!(
+                        "'{{{token}}}' is a {} and must be tagged '{{{reference}:symbol}}' — \
+                         rendered raw it is {UI_RAW_HASH_WIDTH} hex characters, and a wallet \
+                         cannot substitute a friendly asset name",
+                        declared.unwrap_or("32-byte value"),
+                    ),
+                );
+                worst += UI_RAW_HASH_WIDTH;
+            }
+            None => worst += UI_TOKEN_AMOUNT_WIDTH,
+        }
+    }
+
+    if worst > MAX_UI_ACTION_RENDERED {
+        report.error(
+            &uloc,
+            format!(
+                "worst-case rendered length is {worst} chars, over the \
+                 {MAX_UI_ACTION_RENDERED}-char budget ({} literal + {} token(s) at up to \
+                 {UI_TOKEN_AMOUNT_WIDTH} chars each)",
+                literal.chars().count(),
+                tokens.len(),
+            ),
+        );
     }
 }
 
@@ -456,5 +621,209 @@ mod tests {
         }));
         assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
         assert!(report.warnings() >= 1);
+    }
+
+    // -- clear-signing UI budget ------------------------------------------
+
+    /// Build a one-method contract template whose method carries the given `ui`,
+    /// with `PRINCIPAL_ASSET_ID` (an asset) and `AMOUNT` (a u64) declared as fields.
+    fn validate_with_ui(intent: Option<&str>, legs: Value) -> Report {
+        let manifest: Manifest = Manifest::from_json_str(&serde_json::json!({
+            "manifest_version": "1",
+            "protocol": "test",
+            "contract_templates": { "T": {
+                "fields": {
+                    "PRINCIPAL_ASSET_ID": { "type": "liquid.asset_id" },
+                    "AMOUNT": { "type": "u64" }
+                },
+                "actions": { "M": { "intent": intent, "outputs": legs } }
+            }}
+        }).to_string())
+        .expect("test manifest should parse");
+        validate(&manifest)
+    }
+
+    fn errors_at(report: &Report, loc: &str) -> Vec<String> {
+        report
+            .issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error && i.location == loc)
+            .map(|i| i.message.clone())
+            .collect()
+    }
+
+    #[test]
+    fn over_long_ui_label_is_an_error() {
+        let long = "x".repeat(MAX_UI_LABEL + 1);
+        let report = validate_with_ui(
+            None,
+            serde_json::json!([
+                { "id": "o0", "destination": "change", "ui": { "label": long } }
+            ]),
+        );
+        let errs = errors_at(&report, "contract_templates.T.actions.M.outputs.o0");
+        assert!(
+            errs.iter().any(|m| m.contains("over the")),
+            "expected a label-length error, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn label_at_the_budget_is_accepted() {
+        let exact = "x".repeat(MAX_UI_LABEL);
+        let report = validate_with_ui(
+            None,
+            serde_json::json!([
+                { "id": "o0", "destination": "change", "ui": { "label": exact } }
+            ]),
+        );
+        assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn untagged_asset_reference_is_an_error() {
+        // The whole point of `:symbol`: a bare asset ref renders 64 hex characters
+        // and gives a wallet nothing to substitute a friendly name for.
+        let report = validate_with_ui(
+            Some("send {instance.PRINCIPAL_ASSET_ID}"),
+            serde_json::json!([]),
+        );
+        let errs = errors_at(&report, "contract_templates.T.actions.M.intent");
+        assert!(
+            errs.iter().any(|m| m.contains(":symbol")),
+            "expected an untagged-asset error, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn tagged_asset_reference_is_accepted() {
+        let report = validate_with_ui(
+            Some("send {instance.AMOUNT} {instance.PRINCIPAL_ASSET_ID:symbol}"),
+            serde_json::json!([]),
+        );
+        assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn action_budget_counts_worst_case_not_template_length() {
+        // Short template, but each bare numeric token can render 21 chars, so the
+        // worst case is what must be measured.
+        let tokens = "{instance.AMOUNT} ".repeat(8);
+        let report = validate_with_ui(
+            Some(tokens.as_str()),
+            serde_json::json!([]),
+        );
+        let errs = errors_at(&report, "contract_templates.T.actions.M.intent");
+        assert!(
+            errs.iter().any(|m| m.contains("worst-case rendered")),
+            "expected a worst-case budget error, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn create_instance_outside_a_template_is_an_error() {
+        // A standalone action has no enclosing template, so there is nothing for it
+        // to construct — and the old `create_instance.template` let it name any.
+        let manifest: Manifest = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t",
+                 "actions": { "A": { "create_instance": { "fields": {} } } } }"#,
+        )
+        .expect("test manifest should parse");
+        let report = validate(&manifest);
+        assert!(
+            errors_at(&report, "actions.A.create_instance")
+                .iter()
+                .any(|m| m.contains("inside a contract template")),
+            "expected a placement error, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn create_instance_inside_a_template_is_accepted() {
+        let manifest: Manifest = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t",
+                 "contract_templates": { "T": { "fields": {},
+                   "actions": { "A": { "create_instance": { "fields": {} } } } } } }"#,
+        )
+        .expect("test manifest should parse");
+        assert_eq!(validate(&manifest).errors(), 0);
+    }
+
+    // -- hooks -------------------------------------------------------------
+
+    /// Build a manifest whose single action carries `on_pre_broadcast.set`.
+    fn validate_with_hook(set: Value) -> Report {
+        let manifest: Manifest = Manifest::from_json_str(
+            &serde_json::json!({
+                "manifest_version": "1",
+                "protocol": "test",
+                "actions": { "A": { "on_pre_broadcast": { "set": set } } }
+            })
+            .to_string(),
+        )
+        .expect("test manifest should parse");
+        validate(&manifest)
+    }
+
+    #[test]
+    fn hook_accepts_expression_values_in_both_spellings() {
+        // The bare string is what every existing hook already writes; the structured
+        // form must mean the same thing.
+        let report = validate_with_hook(serde_json::json!({
+            "instance.A": "params.X * 2",
+            "params.B": { "type": "expr", "expr": "params.X + 1" }
+        }));
+        assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn hook_rejects_wallet_values() {
+        // A wallet value differs per user; an instance field feeds covenant addresses.
+        let report = validate_with_hook(serde_json::json!({
+            "instance.KEY": { "type": "wallet", "wallet": "key" }
+        }));
+        assert!(
+            errors_at(&report, "actions.A.on_pre_broadcast.set.instance.KEY")
+                .iter()
+                .any(|m| m.contains("wallet")),
+            "expected a wallet rejection, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn hook_rejects_tapleaf_and_simf_fn() {
+        for spec in [
+            serde_json::json!({ "type": "tapleaf", "simf": "./a.simf" }),
+            serde_json::json!({ "type": "simf_fn", "simf": "./a.simf" }),
+        ] {
+            let report = validate_with_hook(serde_json::json!({ "instance.H": spec }));
+            assert!(
+                !errors_at(&report, "actions.A.on_pre_broadcast.set.instance.H").is_empty(),
+                "expected a rejection, got: {:?}",
+                report.issues
+            );
+        }
+    }
+
+    #[test]
+    fn on_resolved_hooks_are_checked_too() {
+        // The input hook and the action hook are one type now, so one rule covers both.
+        let manifest: Manifest = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t", "actions": { "A": { "inputs": [
+                 { "id": "in0", "utxo_source": "wallet", "on_resolved": { "set": {
+                   "instance.K": { "type": "wallet", "wallet": "key" } } } } ] } } }"#,
+        )
+        .expect("test manifest should parse");
+        let report = validate(&manifest);
+        assert!(
+            !errors_at(&report, "actions.A.inputs.in0.on_resolved.set.instance.K").is_empty(),
+            "expected the input hook to be checked, got: {:?}",
+            report.issues
+        );
     }
 }

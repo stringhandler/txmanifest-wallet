@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Declarative transaction-manifest engine and SimplicityHL covenant runtime for Liquid/Elements."
-repository = "https://github.com/stringhandler/manifest-wallet"
+repository = "https://github.com/stringhandler/txmanifest-wallet"
 keywords = ["liquid", "elements", "simplicity", "covenant", "bitcoin"]
 
 [dependencies]
@@ -33,6 +33,10 @@ base64 = "0.22"
 simplicityhl = { git = "https://github.com/BlockstreamResearch/SimplicityHL", features = [
     "serde",
 ] }
+schemars = "0.8"
+
+[dev-dependencies]
+jsonschema = { version = "0.17", default-features = false }
 
 [features]
 default = []

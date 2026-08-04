@@ -1,0 +1,836 @@
+{
+  "$id": "https://raw.githubusercontent.com/stringhandler/txmanifest-wallet/main/schema/txmanifest.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "Action": {
+      "additionalProperties": false,
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "create_instance": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InstanceCreate"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Constructor-only: defines the new instance written to the instance file."
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/definitions/Input"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "intent": {
+          "description": "One-line statement of what this action does, shown as the first clear-signing screen. Supports `{ref}` and `{ref:symbol}` interpolation against the execution context (see `preview::interpolate`); asset-typed refs must carry `:symbol` so a wallet can substitute a friendly name (enforced by `validate::check_ui`).\n\nNamed for the `intent` field in Ethereum's ERC-7730 clear-signing metadata, which plays the same role. Author-supplied, so only as trustworthy as the manifest's own signature chain — never a substitute for what a hardware device verifies. It IS covered by the registry hash (see `crate::canonical`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "on_post_broadcast": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HookBlock"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Method-level hook: runs after broadcast (captures txids, asset IDs)."
+        },
+        "on_pre_broadcast": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HookBlock"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Method-level hook: runs after inputs are resolved, before PSET is built."
+        },
+        "outputs": {
+          "items": {
+            "$ref": "#/definitions/Output"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "params": {
+          "additionalProperties": {
+            "$ref": "#/definitions/ParamDef"
+          },
+          "description": "Runtime action parameters (Spec §5). Prompted, or set by hooks.",
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ComputeSpec": {
+      "anyOf": [
+        {
+          "description": "Simple expression: `\"$params.COLLATERAL_ASSET_ID\"`, `\"instance.DEBT - 1\"`.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ParamCompute"
+            }
+          ],
+          "description": "Structured compute — `tapleaf`, `simf_fn`, or an explicit `expr`."
+        }
+      ],
+      "description": "How a value is computed: either a plain expression string or a structured spec.\n\nUsed in two places, deliberately the same shape: `create_instance.fields` values and [`ParamDef::compute`].\n\nHand-deserialized rather than `#[serde(untagged)]`, for the same reason as [`UiSpec`]: untagged collapses every inner failure into `data did not match any variant of untagged enum ComputeSpec`, which hides the one thing the author needs to know. Dispatching on the JSON shape lets [`ParamCompute`]'s error — naming the offending key or the unknown `type` — reach the surface."
+    },
+    "ContractTemplate": {
+      "additionalProperties": false,
+      "description": "A contract template: typed field declarations and named methods.",
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "actions": {
+          "additionalProperties": {
+            "$ref": "#/definitions/Action"
+          },
+          "description": "Actions callable on an instance of this template. Structurally identical to the top-level `actions` — the only difference is that these run against an instance, so their formulas may reference `instance.*`. An action carrying a `create_instance` block constructs a new instance of this template.",
+          "type": "object"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fields": {
+          "additionalProperties": {
+            "$ref": "#/definitions/FieldDef"
+          },
+          "description": "Field declarations — names and types only.  Values are set by constructors.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "FieldDef": {
+      "additionalProperties": false,
+      "description": "A field declaration inside a contract template.  Just a name and type; no compute here.",
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "default": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "HookBlock": {
+      "additionalProperties": false,
+      "description": "A hook: a flat map of setter targets to the values they take.\n\nOne type serves every hook position — an action's `on_pre_broadcast` / `on_post_broadcast` and an input's `on_resolved` — because they only ever differed in when they run, never in shape.\n\nTargets use dot-path notation: `\"instance.FOO\"` — sets a contract-template field (`compile_params.` is a deprecated alias) `\"params.FOO\"`   — sets an action param\n\nValues are [`ComputeSpec`], the same type `create_instance.fields` uses, so all three \"name → how to produce a value\" maps in the format read alike. In hook position only the expression forms are meaningful; `validate` rejects the rest (see `validate::check_hook`).\n\nWithin an input's own `on_resolved`, two bare keywords are self-referential: `\"asset\"` resolves to that input's computed issuance asset ID (or its UTXO asset for non-issuance inputs), and `\"reissuance_token\"` to the computed reissuance token asset ID.",
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "set": {
+          "additionalProperties": {
+            "$ref": "#/definitions/ComputeSpec"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "set"
+      ],
+      "type": "object"
+    },
+    "Input": {
+      "additionalProperties": false,
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "amount_sat": true,
+        "asset": true,
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from_address": {
+          "description": "For `utxo_source: \"wallet\"` inputs: constrain coin selection to UTXOs whose scriptPubKey equals this address's. A reference (`instance.X` / `params.X`) or a literal address string. Use this to pin an input to a committed address — e.g. so a covenant's collateral is spent from the exact address whose hash it commits to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "issuance": true,
+        "on_resolved": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HookBlock"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Inline hook evaluated after this input's UTXO is resolved and its issuance attrs (asset, reissuance_token) are computed."
+        },
+        "optional": {
+          "description": "When `true`, the transaction proceeds even if this UTXO is not found. Spec §6.\n\n⚠️ **Parsed but NOT enforced** — the engine has no optional-input path, so a missing UTXO fails resolution regardless. `examples/dex` marks its `fee_input` optional and does not get that behaviour.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "required_index": {
+          "description": "Required transaction input index: `0`-based absolute, or negative to count from the end (`-1` = last). Spec §6.\n\n⚠️ **Parsed but NOT enforced.** Nothing in the engine reads this field; inputs land in declaration order and that ordering happens to satisfy the covenants. Manifests assert an index here 106 times and none of it is checked, so a reordering that breaks a covenant's introspection would surface only as an on-chain failure. See `validate.rs` for where a static check belongs.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sequence": {
+          "description": "Per-input `nSequence`. Drives BIP68 relative timelocks (the `check_lock_distance` / `check_lock_duration` Simplicity jets). Accepts: - `{\"relative_blocks\": <expr>}`  — block-based relative lock (≤ 65535 blocks) - `{\"relative_seconds\": <expr>}` — time-based relative lock, rounded up to 512s units - a bare integer / expression    — raw nSequence value\n\nOmitted → the input stays at `Sequence::MAX` (relative locktime disabled)."
+        },
+        "ui": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UiSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Clear-signing UI hint for this input (net-effect debit line)."
+        },
+        "utxo_source": {
+          "description": "\"wallet\" or {\"utxo_type\": \"...\"} or conditional object"
+        },
+        "witnesses": {
+          "description": "Simplicity witnesses for this input: map of witness name → definition."
+        }
+      },
+      "required": [
+        "id",
+        "utxo_source"
+      ],
+      "type": "object"
+    },
+    "InstanceCreate": {
+      "additionalProperties": false,
+      "description": "Describes the new instance written after broadcast.\n\nAn action carrying this block **is** a constructor — there is no separate flag. The instance is always of the contract template the action is declared in, so the template is not named here: `create_instance` is only legal inside `contract_templates.<T>.actions.*`, and always creates a `<T>`.",
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "fields": {
+          "additionalProperties": {
+            "$ref": "#/definitions/ComputeSpec"
+          },
+          "description": "Maps field names to their initial values. Each value is either a string expression (`\"$params.FOO\"`) or a compute spec (`{ \"compute\": \"tapleaf\", ... }`).",
+          "type": "object"
+        }
+      },
+      "required": [
+        "fields"
+      ],
+      "type": "object"
+    },
+    "Output": {
+      "additionalProperties": false,
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "amount_sat": true,
+        "asset": true,
+        "condition": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "confidential": {
+          "description": "When `false`, wallet outputs are built with no blinding key (explicit amount/asset). Defaults to `true` (confidential) for wallet destinations. Has no effect on covenant (`utxo_type`) outputs — those are controlled by the `utxo_type.confidential` flag.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "data": {
+          "description": "OP_RETURN payload, for `destination: {\"type\":\"op_return\"}` outputs. Either a `concat(ref, …)` string, or an object `{\"parts\": [ … ]}` of typed fields (for exact binary layouts — LE integers, `program_id`, asset-internal bytes). Evaluated to raw bytes and embedded after `OP_RETURN`. Omit for a bare data-less OP_RETURN (NFT burns)."
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "destination": {
+          "description": "\"change\" | \"params.<name>\" | {\"utxo_type\": \"...\"} | {\"type\": \"burn\"} | conditional"
+        },
+        "id": {
+          "type": "string"
+        },
+        "optional": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "required_index": {
+          "description": "Required transaction output index; same semantics and same caveat as [`Input::required_index`] (Spec §7) — parsed, never enforced.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ui": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UiSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Clear-signing UI hint for this output (net-effect credit line)."
+        }
+      },
+      "required": [
+        "destination",
+        "id"
+      ],
+      "type": "object"
+    },
+    "ParamCompute": {
+      "description": "Auto-computation spec for a derived compile param or action param.\n\nDispatched by `type`, the same discriminator every other tagged object in the format uses (`script.type`, `destination.type`, a witness's `type`). Note this is the *method* of computation; the value's data type is `ParamDef::type_`, one level up. The legacy key `lang` is still accepted as an alias for the discriminator: - `\"expr\"`: arithmetic expression over other compile params (`pow(base, exp)` supported) - `\"tapleaf\"`: compile a `.simf` file and return its Simplicity tapleaf hash (32 bytes hex) - `\"simf_fn\"`: call a named function in a `.simf` file and use its return value - `\"wallet\"`: take the value from the executing wallet rather than the manifest, with `wallet` selecting which ([`WalletValue`])\n\nThe `wallet` variant differs from the others in kind: `expr`, `tapleaf` and `simf_fn` are reproducible by anyone holding the manifest, whereas a `wallet_*` value depends on who is running the action. They live here anyway because from an author's point of view they answer the same question — where does this value come from, if not the user? — and having two fields for that (the old `source`) meant two things to check and a name that collided with `script.source`, a file path.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "$comment": {
+              "description": "Documentation only; ignored by the engine.",
+              "type": "string"
+            },
+            "expr": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "expr"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "expr",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "$comment": {
+              "description": "Documentation only; ignored by the engine.",
+              "type": "string"
+            },
+            "depends_on": {
+              "default": null,
+              "description": "Subset of compile-param names this simf actually consumes (auto-populate only). When set, the tapleaf is computed as soon as exactly these params are resolved, instead of waiting for ALL compile params. Use this to break apparent circular dependencies when the simf does not use every manifest-level compile param.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "extra_leaves": {
+              "description": "Optional taproot storage leaves to fold into the tap tree BEFORE hashing the scriptPubKey. When present, the computed value is `sha256(spk WITH these leaves)` instead of the storage-less script hash — used to key a `script_auth` covenant to a covenant-with-storage (e.g. the pending lending offer's own script hash, offer out[3]). Leaf payload item value-refs resolve against the in-progress create_instance fields (then ctx), so they may reference sibling computed fields such as `CURRENT_DEBT`.",
+              "items": {
+                "$ref": "#/definitions/TaprootLeafSpec"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "params": {
+              "additionalProperties": {
+                "$ref": "#/definitions/TapleafParam"
+              },
+              "description": "Explicit param map for the simf. Each entry combines the value (a compile-param reference or string literal) with an optional manifest type hint. Omit entirely to pass ALL current compile params (auto-populate mode).",
+              "type": "object"
+            },
+            "simf": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "tapleaf"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "simf",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A value taken from the executing wallet rather than the manifest.\n\nGrouped under one tag rather than spread across three so that \"is this wallet-derived?\" is a single check on `compute` before dispatching on `wallet` — and so adding a new wallet-derived value does not grow the top-level variant list.",
+          "properties": {
+            "$comment": {
+              "description": "Documentation only; ignored by the engine.",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "wallet"
+              ],
+              "type": "string"
+            },
+            "wallet": {
+              "$ref": "#/definitions/WalletValue"
+            }
+          },
+          "required": [
+            "type",
+            "wallet"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Call a named function in a `.simf` file after inputs are resolved. The function is compiled with `compile_params` as param:: constants. Its runtime input is read from `input` (a dot-path into ctx, e.g. `\"params.STATE_BYTES\"`). The return value is stored as the param value.",
+          "properties": {
+            "$comment": {
+              "description": "Documentation only; ignored by the engine.",
+              "type": "string"
+            },
+            "compile_params": {
+              "default": [],
+              "description": "Compile-time param names from ctx to pass as `param::` constants to the function.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "fn": {
+              "default": null,
+              "description": "Name of the function to call. If omitted the file must define exactly one function.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "input": {
+              "description": "Dot-path to the runtime input value, e.g. `\"params.STATE_BYTES\"`. Omit for zero-argument functions.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "simf": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "simf_fn"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "simf",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ParamDef": {
+      "additionalProperties": false,
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "compute": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ComputeSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How this param's value is derived. When present the user is never prompted.\n\nEither a bare expression string — `\"instance.PRINCIPAL_AMOUNT * 2\"` — or a structured spec for the cases an expression cannot express (`tapleaf`, `simf_fn`). The bare form is what `formula` used to be; they were two ways to say \"this value is computed, do not ask\", so they are now one."
+        },
+        "default": {
+          "description": "Default value shown as a pre-fill in the prompt.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "SimplicityHl": {
+      "additionalProperties": false,
+      "description": "SimplicityHL toolchain settings — how the `.simf` programs are compiled, as distinct from what the protocol does.\n\nDeliberately carries **no** compiler-version field. SimplicityHL has its own `simc \"<range>\";` source directive, which the compiler enforces fail-fast before lexing, across the entry file and every reachable dependency — none of which a manifest key can do. Tooling that wants the requirement without compiling can read it via `version::SimcDirective::requirement_of`. Declaring it here as well would only create a second place to disagree.",
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "debug_symbols": {
+          "default": false,
+          "description": "Whether covenant `.simf` programs are compiled with debug symbols included.\n\nThis changes the program's CMR **and therefore every covenant address**, because `assert!`/`panic!` embed source info into `fail`-node commitments. Set it to match the toolchain of any protocol this manifest must interoperate with — e.g. `true` for simplicity-lending / `smplx-sdk`, which compiles with debug symbols on.\n\nDefaults to `false` (production; debug symbols are a transitional feature).",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "TapleafParam": {
+      "additionalProperties": false,
+      "description": "A single entry in a `ParamCompute::Tapleaf` params map. Combines the value reference (compile-param name or literal) with an optional type hint.",
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "type": {
+          "description": "Manifest type, e.g. `\"liquid.asset_id\"`, `\"u64\"`, `\"bool\"`. When absent, the type is inferred from the compile-param of the same name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "description": "A compile-param name reference OR a string literal like `\"1\"`, `\"true\"`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "type": "object"
+    },
+    "TaprootLeafSpec": {
+      "additionalProperties": false,
+      "description": "Describes one additional taproot leaf appended to the Simplicity program leaf.",
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "payload": {
+          "description": "Ordered payload items: each is either a hex literal string (\"0x01\") or a state_var reference ({\"state_var\": \"name\"}).",
+          "items": true,
+          "type": "array"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload",
+        "type"
+      ],
+      "type": "object"
+    },
+    "UiDetail": {
+      "additionalProperties": false,
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "group": {
+          "description": "Override the net-effect account/bucket heading (else derived from source/destination).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hide": {
+          "default": false,
+          "description": "Suppress this leg from the net-effect diff (e.g. pure protocol data).",
+          "type": "boolean"
+        },
+        "label": {
+          "description": "Human-readable one-line description of this leg — the **only** signer-facing text for it (`description` is not a fallback; see `preview::input_label`).\n\nCapped at [`crate::validate::MAX_UI_LABEL`] characters so it fits one net-effect row alongside the amount and asset symbol. The cap reaches the schema as a `maxLength` — injected by `crate::schema` from that constant rather than written here as a literal, so the two cannot drift — and an editor flags an over-long label while typing rather than at validate time.",
+          "maxLength": 64,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "description": "Optional semantic tag (e.g. \"collateral\", \"auth_nft\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "UiSpec": {
+      "anyOf": [
+        {
+          "description": "Shorthand for `{ \"label\": \"...\" }`.",
+          "maxLength": 64,
+          "type": "string"
+        },
+        {
+          "$ref": "#/definitions/UiDetail"
+        }
+      ],
+      "description": "Per-input / per-output UI hint. Accepts either a bare label string (`\"collateral locked\"`) or a detailed object for finer control.\n\nHand-deserialized rather than `#[serde(untagged)]`: an untagged enum reports only `data did not match any variant of untagged enum UiSpec`, swallowing the real reason. Dispatching on the JSON shape lets `UiDetail`'s own error through, so a misspelled key names itself."
+    },
+    "UtxoScript": {
+      "additionalProperties": false,
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "compile_params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Per-utxo-type compile param remappings: simf_param_name → compile_param_reference. e.g. `{ \"SCRIPT_HASH\": \"LENDING_COV_HASH\" }` passes the value of LENDING_COV_HASH to the simf as SCRIPT_HASH.",
+          "type": "object"
+        },
+        "extra_leaves": {
+          "items": {
+            "$ref": "#/definitions/TaprootLeafSpec"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "UtxoType": {
+      "additionalProperties": false,
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "asset": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "confidential": {
+          "default": false,
+          "description": "Whether UTXOs of this type are confidential (blinded). Defaults to false — covenant UTXOs are explicit so the spending Simplicity program can introspect value and asset.",
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        },
+        "script": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UtxoScript"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state_vars": true
+      },
+      "required": [
+        "description"
+      ],
+      "type": "object"
+    },
+    "WalletValue": {
+      "description": "Which wallet-derived value a [`ParamCompute::Wallet`] spec resolves to.",
+      "oneOf": [
+        {
+          "description": "The wallet's x-only BIP340 pubkey. The wallet chooses the derivation path.",
+          "enum": [
+            "key"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`sha256(scriptPubKey)` of the wallet's index-0 explicit output — the committed payout target a covenant checks repayment against.",
+          "enum": [
+            "script_hash"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The explicit address matching [`WalletValue::ScriptHash`]. The two are a pair: the covenant commits to the hash, the wallet receives at the address, so they must be derived together.",
+          "enum": [
+            "address"
+          ],
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "$comment": {
+      "description": "Documentation only; ignored by the engine.",
+      "type": "string"
+    },
+    "$schema": {
+      "description": "Editor hint pointing at this schema; ignored by the engine.",
+      "type": "string"
+    },
+    "actions": {
+      "additionalProperties": {
+        "$ref": "#/definitions/Action"
+      },
+      "description": "Standalone actions that require no template instance (e.g. Prepare).",
+      "type": "object"
+    },
+    "chain": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "contract_templates": {
+      "additionalProperties": {
+        "$ref": "#/definitions/ContractTemplate"
+      },
+      "description": "Contract template definitions. Each template has typed fields and actions. An action carrying a `create_instance` block is a constructor for its template.",
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "manifest_version": {
+      "description": "Manifest schema version.",
+      "type": "string"
+    },
+    "protocol": {
+      "type": "string"
+    },
+    "simplicity_hl": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SimplicityHl"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "SimplicityHL toolchain settings for this manifest's `.simf` programs."
+    },
+    "utxo_types": {
+      "additionalProperties": {
+        "$ref": "#/definitions/UtxoType"
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "manifest_version",
+    "protocol"
+  ],
+  "title": "Transaction Manifest (txmanifest.json)",
+  "type": "object"
+}
