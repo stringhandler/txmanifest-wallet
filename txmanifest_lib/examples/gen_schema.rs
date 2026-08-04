@@ -13,7 +13,9 @@ use tx_manifest_lib::schema::{json_schema_string, SCHEMA_PATH};
 
 fn main() -> anyhow::Result<()> {
     // Examples run with the crate root as CWD; the schema lives at the workspace root.
-    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(SCHEMA_PATH);
+    let out = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(SCHEMA_PATH);
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir)?;
     }

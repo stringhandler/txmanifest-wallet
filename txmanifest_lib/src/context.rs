@@ -104,11 +104,14 @@ impl ExecutionContext {
         attr: impl Into<String>,
         value: impl Into<String>,
     ) {
-        self.input_attrs.insert((input_id.into(), attr.into()), value.into());
+        self.input_attrs
+            .insert((input_id.into(), attr.into()), value.into());
     }
 
     pub fn get_input_attr(&self, input_id: &str, attr: &str) -> Option<&str> {
-        self.input_attrs.get(&(input_id.to_string(), attr.to_string())).map(String::as_str)
+        self.input_attrs
+            .get(&(input_id.to_string(), attr.to_string()))
+            .map(String::as_str)
     }
 
     pub fn set_input_entropy(&mut self, id: &str, entropy_hex: String) {

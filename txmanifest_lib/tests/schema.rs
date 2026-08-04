@@ -94,8 +94,13 @@ fn schema_accepts_the_authoring_keys() {
     let schema = compiled_schema();
     let result = schema.validate(&ok);
     if let Err(errors) = result {
-        let joined: Vec<String> = errors.map(|e| format!("{e} at /{}", e.instance_path)).collect();
-        panic!("authoring keys should validate, got:\n{}", joined.join("\n"));
+        let joined: Vec<String> = errors
+            .map(|e| format!("{e} at /{}", e.instance_path))
+            .collect();
+        panic!(
+            "authoring keys should validate, got:\n{}",
+            joined.join("\n")
+        );
     }
 }
 
@@ -180,7 +185,10 @@ fn both_spellings_of_ui_carry_the_label_cap() {
 fn every_example_manifest_validates_against_the_schema() {
     let compiled = compiled_schema();
     let manifests = example_manifests();
-    assert!(!manifests.is_empty(), "no example manifests were discovered");
+    assert!(
+        !manifests.is_empty(),
+        "no example manifests were discovered"
+    );
 
     let mut failures = Vec::new();
     for path in &manifests {

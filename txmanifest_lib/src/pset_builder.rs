@@ -8,8 +8,8 @@ use lwk_wollet::{
         hashes::{sha256, Hash as _},
         pset::{Input, Output, PartiallySignedTransaction},
         secp256k1_zkp::{RangeProof, SurjectionProof, Tweak},
-        AssetId, ContractHash, OutPoint, Script, Sequence, Txid, TxOut, TxOutWitness,
-        BlindAssetProofs, BlindValueProofs, TxOutSecrets,
+        AssetId, BlindAssetProofs, BlindValueProofs, ContractHash, OutPoint, Script, Sequence,
+        TxOut, TxOutSecrets, TxOutWitness, Txid,
     },
     ElementsNetwork, WalletTxOut, Wollet, EC,
 };
@@ -103,7 +103,11 @@ pub struct BuildPsetResult {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-pub fn build_pset(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRequest) -> Result<BuildPsetResult> {
+pub fn build_pset(
+    wollet: &Wollet,
+    network: ElementsNetwork,
+    req: &BuildPsetRequest,
+) -> Result<BuildPsetResult> {
     let secp = EC.clone();
     let mut rng = thread_rng();
 
@@ -116,8 +120,16 @@ pub fn build_pset(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRequ
     let wallet_blinding_pk_btc = btc_pubkey(wallet_blinding_pk);
 
     // First pass: temp fee=1 to estimate weight.
-    let (temp_pset, temp_sec, _) =
-        build_inner(wollet, &secp, &mut rng, req, 1, wallet_blinding_pk_btc, network, false)?;
+    let (temp_pset, temp_sec, _) = build_inner(
+        wollet,
+        &secp,
+        &mut rng,
+        req,
+        1,
+        wallet_blinding_pk_btc,
+        network,
+        false,
+    )?;
     let fee = {
         let mut tmp = temp_pset.clone();
         let mut tmp_rng = thread_rng();
@@ -135,8 +147,16 @@ pub fn build_pset(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRequ
     };
 
     // Second pass: real fee.
-    let (mut pset, inp_txout_sec, issuances) =
-        build_inner(wollet, &secp, &mut rng, req, fee, wallet_blinding_pk_btc, network, false)?;
+    let (mut pset, inp_txout_sec, issuances) = build_inner(
+        wollet,
+        &secp,
+        &mut rng,
+        req,
+        fee,
+        wallet_blinding_pk_btc,
+        network,
+        false,
+    )?;
 
     wollet
         .add_details(&mut pset)
@@ -168,10 +188,13 @@ fn pset_has_confidential_output(pset: &PartiallySignedTransaction) -> bool {
 fn estimated_input_witness_weight(req: &BuildPsetRequest) -> usize {
     const WALLET_INPUT_WU: usize = 108;
     const COVENANT_INPUT_WU: usize = 800;
-    req.inputs.iter().map(|i| match i {
-        PsetInput::Wallet { .. } => WALLET_INPUT_WU,
-        PsetInput::Covenant { .. } => COVENANT_INPUT_WU,
-    }).sum()
+    req.inputs
+        .iter()
+        .map(|i| match i {
+            PsetInput::Wallet { .. } => WALLET_INPUT_WU,
+            PsetInput::Covenant { .. } => COVENANT_INPUT_WU,
+        })
+        .sum()
 }
 
 /// Estimate the network fee (sats) for `req`, from the resulting transaction's
@@ -182,7 +205,11 @@ fn estimated_input_witness_weight(req: &BuildPsetRequest) -> usize {
 /// Note: like the builder's own estimate, this counts a fixed witness allowance
 /// for wallet inputs but not the (large, variable) Simplicity witness of covenant
 /// inputs — so covenant spends are under-counted, same as elsewhere in the tool.
-pub fn estimate_fee(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRequest) -> Result<u64> {
+pub fn estimate_fee(
+    wollet: &Wollet,
+    network: ElementsNetwork,
+    req: &BuildPsetRequest,
+) -> Result<u64> {
     let secp = EC.clone();
     let mut rng = thread_rng();
 
@@ -194,8 +221,16 @@ pub fn estimate_fee(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRe
         .context("Wallet address has no blinding key — not a CT descriptor")?;
     let wallet_blinding_pk_btc = btc_pubkey(wallet_blinding_pk);
 
-    let (draft_pset, draft_sec, _) =
-        build_inner(wollet, &secp, &mut rng, req, 0, wallet_blinding_pk_btc, network, true)?;
+    let (draft_pset, draft_sec, _) = build_inner(
+        wollet,
+        &secp,
+        &mut rng,
+        req,
+        0,
+        wallet_blinding_pk_btc,
+        network,
+        true,
+    )?;
     let mut tmp = draft_pset;
     if pset_has_confidential_output(&tmp) {
         tmp.blind_last(&mut rng, &secp, &draft_sec)
@@ -226,7 +261,11 @@ fn build_inner(
     // Estimation pass: don't enforce balance or add change — the fee absorbs any
     // surplus (possibly 0). Used only to measure the resulting tx's vsize.
     draft: bool,
-) -> Result<(PartiallySignedTransaction, HashMap<usize, TxOutSecrets>, Vec<IssuanceResult>)> {
+) -> Result<(
+    PartiallySignedTransaction,
+    HashMap<usize, TxOutSecrets>,
+    Vec<IssuanceResult>,
+)> {
     let mut pset = PartiallySignedTransaction::new_v2();
     let mut inp_txout_sec: HashMap<usize, TxOutSecrets> = HashMap::new();
     let mut issuances: Vec<IssuanceResult> = Vec::new();
@@ -237,7 +276,12 @@ fn build_inner(
     // Add inputs
     for pset_input in &req.inputs {
         match pset_input {
-            PsetInput::Wallet { input_id, utxo, issuance, sequence } => {
+            PsetInput::Wallet {
+                input_id,
+                utxo,
+                issuance,
+                sequence,
+            } => {
                 let idx = add_wallet_input(&mut pset, &mut inp_txout_sec, wollet, secp, rng, utxo)?;
                 apply_sequence(&mut pset, idx, *sequence);
                 if let Some(iso) = issuance {
@@ -254,16 +298,37 @@ fn build_inner(
                         }
                         IssuanceKind::Reissue { entropy, .. } => Some(*entropy),
                     };
-                    issuances.push(IssuanceResult { input_id: input_id.clone(), asset_id, token_id, entropy });
+                    issuances.push(IssuanceResult {
+                        input_id: input_id.clone(),
+                        asset_id,
+                        token_id,
+                        entropy,
+                    });
                 }
                 if utxo.unblinded.asset == req.policy_asset {
                     total_lbtc_in += utxo.unblinded.value;
                 } else {
-                    *wallet_asset_in.entry(utxo.unblinded.asset).or_default() += utxo.unblinded.value;
+                    *wallet_asset_in.entry(utxo.unblinded.asset).or_default() +=
+                        utxo.unblinded.value;
                 }
             }
-            PsetInput::Covenant { input_id, outpoint, script_pubkey, asset, amount, issuance, sequence } => {
-                let idx = add_covenant_input(&mut pset, &mut inp_txout_sec, *outpoint, script_pubkey.clone(), *asset, *amount)?;
+            PsetInput::Covenant {
+                input_id,
+                outpoint,
+                script_pubkey,
+                asset,
+                amount,
+                issuance,
+                sequence,
+            } => {
+                let idx = add_covenant_input(
+                    &mut pset,
+                    &mut inp_txout_sec,
+                    *outpoint,
+                    script_pubkey.clone(),
+                    *asset,
+                    *amount,
+                )?;
                 apply_sequence(&mut pset, idx, *sequence);
                 if let Some(iso) = issuance {
                     // A covenant input may carry either a NEW issuance (e.g. an issuance-factory
@@ -283,7 +348,12 @@ fn build_inner(
                         }
                     };
                     let (asset_id, token_id) = pset.inputs()[idx].issuance_ids();
-                    issuances.push(IssuanceResult { input_id: input_id.clone(), asset_id, token_id, entropy });
+                    issuances.push(IssuanceResult {
+                        input_id: input_id.clone(),
+                        asset_id,
+                        token_id,
+                        entropy,
+                    });
                 }
                 if *asset == req.policy_asset {
                     total_lbtc_in += amount;
@@ -293,7 +363,9 @@ fn build_inner(
     }
 
     // L-BTC accounting
-    let total_lbtc_out: u64 = req.outputs.iter()
+    let total_lbtc_out: u64 = req
+        .outputs
+        .iter()
         .filter(|o| o.asset == req.policy_asset)
         .map(|o| o.amount)
         .sum();
@@ -308,7 +380,10 @@ fn build_inner(
         if total_lbtc_in < lbtc_needed {
             anyhow::bail!(
                 "Insufficient L-BTC: have {} sat, need {} sat (outputs {} + fee {})",
-                total_lbtc_in, lbtc_needed, total_lbtc_out, fee
+                total_lbtc_in,
+                lbtc_needed,
+                total_lbtc_out,
+                fee
             );
         }
         (total_lbtc_in - lbtc_needed, fee)
@@ -324,47 +399,78 @@ fn build_inner(
 
     // blinder_index must reference an input whose secrets are in inp_txout_sec (i.e. a wallet
     // input).  Inputs may arrive in any order so we pick the first wallet input by key.
-    let blinder_idx = inp_txout_sec
-        .keys()
-        .copied()
-        .min()
-        .unwrap_or(0) as u32;
+    let blinder_idx = inp_txout_sec.keys().copied().min().unwrap_or(0) as u32;
 
     // Add specified outputs
     for o in &req.outputs {
-        pset.add_output(build_output(o.script_pubkey.clone(), o.amount, o.asset, o.blinding_key, blinder_idx));
+        pset.add_output(build_output(
+            o.script_pubkey.clone(),
+            o.amount,
+            o.asset,
+            o.blinding_key,
+            blinder_idx,
+        ));
     }
 
     // L-BTC change output (if any)
     if change > 0 {
-        let change_addr = wollet.change(None).context("Cannot derive change address")?.address().clone();
+        let change_addr = wollet
+            .change(None)
+            .context("Cannot derive change address")?
+            .address()
+            .clone();
         let change_bpk = change_addr
             .blinding_pubkey
             .map(btc_pubkey)
             .unwrap_or(wallet_blinding_pk);
         pset.add_output(confidential_output(
-            change_addr.script_pubkey(), change, req.policy_asset, change_bpk, blinder_idx
+            change_addr.script_pubkey(),
+            change,
+            req.policy_asset,
+            change_bpk,
+            blinder_idx,
         ));
     }
 
     // Non-LBTC change outputs: for any wallet-input asset where the input exceeds the outputs.
-    let total_non_lbtc_out: HashMap<AssetId, u64> = req.outputs.iter()
+    let total_non_lbtc_out: HashMap<AssetId, u64> = req
+        .outputs
+        .iter()
         .filter(|o| o.asset != req.policy_asset)
-        .fold(HashMap::new(), |mut m, o| { *m.entry(o.asset).or_default() += o.amount; m });
+        .fold(HashMap::new(), |mut m, o| {
+            *m.entry(o.asset).or_default() += o.amount;
+            m
+        });
     for (asset, in_amt) in &wallet_asset_in {
         let out_amt = total_non_lbtc_out.get(asset).copied().unwrap_or(0);
         if *in_amt > out_amt {
             let surplus = in_amt - out_amt;
-            let change_addr = wollet.change(None).context("Cannot derive change address")?.address().clone();
-            let change_bpk = change_addr.blinding_pubkey.map(btc_pubkey).unwrap_or(wallet_blinding_pk);
+            let change_addr = wollet
+                .change(None)
+                .context("Cannot derive change address")?
+                .address()
+                .clone();
+            let change_bpk = change_addr
+                .blinding_pubkey
+                .map(btc_pubkey)
+                .unwrap_or(wallet_blinding_pk);
             pset.add_output(confidential_output(
-                change_addr.script_pubkey(), surplus, *asset, change_bpk, blinder_idx
+                change_addr.script_pubkey(),
+                surplus,
+                *asset,
+                change_bpk,
+                blinder_idx,
             ));
         }
     }
 
     // Fee output
-    pset.add_output(Output::new_explicit(Script::default(), fee, req.policy_asset, None));
+    pset.add_output(Output::new_explicit(
+        Script::default(),
+        fee,
+        req.policy_asset,
+        None,
+    ));
 
     let _ = network; // reserved for future address encoding
     Ok((pset, inp_txout_sec, issuances))
@@ -409,20 +515,32 @@ fn add_wallet_input(
             asset_bf: AssetBlindingFactor::zero(),
         }
     } else {
-        let value_comm = txout.value.commitment()
+        let value_comm = txout
+            .value
+            .commitment()
             .ok_or_else(|| anyhow::anyhow!("Input TxOut value is not a commitment"))?;
-        let asset_gen = txout.asset.commitment()
+        let asset_gen = txout
+            .asset
+            .commitment()
             .ok_or_else(|| anyhow::anyhow!("Input TxOut asset is not a commitment"))?;
         input.in_utxo_rangeproof = txout.witness.rangeproof.take();
         input.witness_utxo = Some(txout);
         input.blind_asset_proof = Some(Box::new(
-            SurjectionProof::blind_asset_proof(rng, secp, utxo.unblinded.asset, utxo.unblinded.asset_bf)
-                .map_err(|e| anyhow::anyhow!("blind_asset_proof failed: {e}"))?,
+            SurjectionProof::blind_asset_proof(
+                rng,
+                secp,
+                utxo.unblinded.asset,
+                utxo.unblinded.asset_bf,
+            )
+            .map_err(|e| anyhow::anyhow!("blind_asset_proof failed: {e}"))?,
         ));
         input.blind_value_proof = Some(Box::new(
             RangeProof::blind_value_proof(
-                rng, secp,
-                utxo.unblinded.value, value_comm, asset_gen,
+                rng,
+                secp,
+                utxo.unblinded.value,
+                value_comm,
+                asset_gen,
                 utxo.unblinded.value_bf,
             )
             .map_err(|e| anyhow::anyhow!("blind_value_proof failed: {e}"))?,
@@ -462,12 +580,15 @@ fn add_covenant_input(
     input.amount = Some(amount);
     pset.add_input(input);
     let idx = pset.inputs().len() - 1;
-    inp_txout_sec.insert(idx, TxOutSecrets {
-        value: amount,
-        value_bf: ValueBlindingFactor::zero(),
-        asset,
-        asset_bf: AssetBlindingFactor::zero(),
-    });
+    inp_txout_sec.insert(
+        idx,
+        TxOutSecrets {
+            value: amount,
+            value_bf: ValueBlindingFactor::zero(),
+            asset,
+            asset_bf: AssetBlindingFactor::zero(),
+        },
+    );
     Ok(idx)
 }
 
@@ -480,8 +601,16 @@ fn apply_sequence(pset: &mut PartiallySignedTransaction, idx: usize, sequence: O
     }
 }
 
-fn apply_new_issuance(pset: &mut PartiallySignedTransaction, idx: usize, iso: &IssuanceKind) -> Result<()> {
-    if let IssuanceKind::New { asset_amount, inflation_amount } = iso {
+fn apply_new_issuance(
+    pset: &mut PartiallySignedTransaction,
+    idx: usize,
+    iso: &IssuanceKind,
+) -> Result<()> {
+    if let IssuanceKind::New {
+        asset_amount,
+        inflation_amount,
+    } = iso
+    {
         let input = &mut pset.inputs_mut()[idx];
         if *asset_amount > 0 {
             input.issuance_value_amount = Some(*asset_amount);
@@ -495,17 +624,25 @@ fn apply_new_issuance(pset: &mut PartiallySignedTransaction, idx: usize, iso: &I
     Ok(())
 }
 
-fn apply_reissuance(pset: &mut PartiallySignedTransaction, idx: usize, iso: &IssuanceKind) -> Result<()> {
-    if let IssuanceKind::Reissue { asset_amount, entropy } = iso {
+fn apply_reissuance(
+    pset: &mut PartiallySignedTransaction,
+    idx: usize,
+    iso: &IssuanceKind,
+) -> Result<()> {
+    if let IssuanceKind::Reissue {
+        asset_amount,
+        entropy,
+    } = iso
+    {
         let input = &mut pset.inputs_mut()[idx];
         input.issuance_value_amount = Some(*asset_amount);
         input.issuance_asset_entropy = Some(*entropy);
         input.blinded_issuance = Some(0x00); // 0x00 = explicit (not confidential)
-        // issuance_blinding_nonce must be non-zero so issuance_ids() takes the re-issuance
-        // code path (entropy used directly) rather than the new-issuance path (entropy derived
-        // from outpoint). For explicit (non-confidential) RT UTXOs the actual asset blinding
-        // factor is zero, but ZERO_TWEAK would be misread as "new issuance". Use the minimal
-        // non-zero scalar [0..0, 1] as a conventional explicit-reissuance marker.
+                                             // issuance_blinding_nonce must be non-zero so issuance_ids() takes the re-issuance
+                                             // code path (entropy used directly) rather than the new-issuance path (entropy derived
+                                             // from outpoint). For explicit (non-confidential) RT UTXOs the actual asset blinding
+                                             // factor is zero, but ZERO_TWEAK would be misread as "new issuance". Use the minimal
+                                             // non-zero scalar [0..0, 1] as a conventional explicit-reissuance marker.
         let mut nonce_bytes = [0u8; 32];
         nonce_bytes[31] = 1;
         input.issuance_blinding_nonce = Some(
@@ -561,7 +698,10 @@ fn confidential_output(
 ///   entropy      = fast_merkle_root([prevout_hash, zero_contract_hash])
 ///   asset        = SHA256(entropy || 0x00) as Midstate
 ///   token        = SHA256(entropy || 0x01) as Midstate  (explicit, confidential=false)
-pub fn compute_asset_ids_from_outpoint(txid_display: &str, vout: u32) -> Result<(AssetId, AssetId)> {
+pub fn compute_asset_ids_from_outpoint(
+    txid_display: &str,
+    vout: u32,
+) -> Result<(AssetId, AssetId)> {
     let txid = Txid::from_str(txid_display)
         .map_err(|e| anyhow::anyhow!("Cannot parse txid '{txid_display}': {e}"))?;
     let outpoint = OutPoint::new(txid, vout);
@@ -581,8 +721,13 @@ pub fn compute_asset_from_entropy(entropy: &[u8; 32]) -> Result<AssetId> {
 // Utility
 // ---------------------------------------------------------------------------
 
-fn btc_pubkey(pk: lwk_wollet::elements::secp256k1_zkp::PublicKey) -> lwk_wollet::elements::bitcoin::PublicKey {
-    lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true }
+fn btc_pubkey(
+    pk: lwk_wollet::elements::secp256k1_zkp::PublicKey,
+) -> lwk_wollet::elements::bitcoin::PublicKey {
+    lwk_wollet::elements::bitcoin::PublicKey {
+        inner: pk,
+        compressed: true,
+    }
 }
 
 /// Resolve the covenant address for a utxo_type and return its script_pubkey.
@@ -594,8 +739,15 @@ pub fn covenant_script_pubkey(
     network: ElementsNetwork,
     include_debug_symbols: bool,
 ) -> Result<Script> {
-    let addr = covenant::compute_covenant_address(simf_path, compile_params, type_hints, extra_leaf_payloads, network, include_debug_symbols)
-        .with_context(|| "Cannot compute covenant address")?;
+    let addr = covenant::compute_covenant_address(
+        simf_path,
+        compile_params,
+        type_hints,
+        extra_leaf_payloads,
+        network,
+        include_debug_symbols,
+    )
+    .with_context(|| "Cannot compute covenant address")?;
     Ok(addr.script_pubkey())
 }
 
