@@ -124,7 +124,7 @@ enum Commands {
         manifest_file: PathBuf,
     },
 
-    /// Interactively explore a manifest file's classes and actions
+    /// Interactively explore a manifest file's contract_templates and actions
     Describe {
         /// Path to the manifest (txmanifest.json) file
         manifest_file: PathBuf,
@@ -245,7 +245,7 @@ fn cmd_prepare(
     use console::style;
     let raw = std::fs::read_to_string(manifest_path)
         .with_context(|| format!("Cannot read manifest file: {}", manifest_path.display()))?;
-    let manifest: manifest::Manifest = serde_json::from_str(&raw)
+    let manifest = manifest::Manifest::from_json_str(&raw)
         .with_context(|| format!("Cannot parse manifest file: {}", manifest_path.display()))?;
     let w = wallet::load_wallet(wallet_path)?;
     let data_dir = data_dir.map(|p| p.to_path_buf()).unwrap_or_else(wallet::default_data_dir);
@@ -624,7 +624,7 @@ fn cmd_validate(manifest_path: &Path) -> Result<()> {
     // Parse first — a malformed file or a missing required field is reported here.
     let raw = std::fs::read_to_string(manifest_path)
         .with_context(|| format!("Cannot read manifest file: {}", manifest_path.display()))?;
-    let manifest: manifest::Manifest = serde_json::from_str(&raw)
+    let manifest = manifest::Manifest::from_json_str(&raw)
         .with_context(|| format!("Cannot parse manifest file: {}", manifest_path.display()))?;
 
     let report = validate::validate(&manifest);
@@ -655,7 +655,7 @@ fn cmd_validate(manifest_path: &Path) -> Result<()> {
 fn cmd_describe(manifest_path: &Path, action_name: Option<&str>) -> Result<()> {
     let raw = std::fs::read_to_string(manifest_path)
         .with_context(|| format!("Cannot read manifest file: {}", manifest_path.display()))?;
-    let manifest: manifest::Manifest = serde_json::from_str(&raw)
+    let manifest = manifest::Manifest::from_json_str(&raw)
         .with_context(|| format!("Cannot parse manifest file: {}", manifest_path.display()))?;
     describe::describe(&manifest, action_name)
 }

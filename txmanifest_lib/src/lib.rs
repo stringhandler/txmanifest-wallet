@@ -1,5 +1,6 @@
 pub mod manifest;
 pub mod backend;
+pub mod canonical;
 pub mod config;
 pub mod describe;
 pub mod context;
@@ -12,6 +13,7 @@ pub mod prepare;
 pub mod preview;
 pub mod prompt;
 pub mod pset_builder;
+pub mod schema;
 pub mod state;
 pub mod validate;
 pub mod wallet;

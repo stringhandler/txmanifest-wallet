@@ -7,7 +7,7 @@ use console::style;
 use lwk_common::Signer;
 use lwk_wollet::{ElementsNetwork, FsPersister, Wollet};
 
-use crate::manifest::{Manifest, Input, Validation};
+use crate::manifest::{Manifest, Input};
 use crate::context::{ExecutionContext, ResolvedInput};
 use crate::instance::InstanceFile;
 use crate::state::{history_path, ContractState, HistoryEntry, StateHistory, StateUtxo};
@@ -85,7 +85,6 @@ struct RunOutput<'a> {
     action: &'a str,
     compile_params: &'a BTreeMap<String, String>,
     params: &'a BTreeMap<String, String>,
-    args: &'a BTreeMap<String, String>,
     inputs: Vec<RunOutputInput>,
     fee_rate_sat_per_vb: f64,
     txid: Option<String>,
@@ -151,7 +150,7 @@ pub fn run(
     params_file: Option<&Path>,
     instance: Option<&InstanceFile>,
     // Path the instance was loaded from (INPUT). Never auto-discovered; recorded into the
-    // state file so methods know which instance they belong to.
+    // state file so template actions know which instance they belong to.
     instance_in_path: Option<&Path>,
     // Path to write the instance file on deploy (OUTPUT). When omitted, a fresh numbered
     // file `<stem>.instance.N.json` is used — never overwriting the input.
@@ -179,7 +178,7 @@ pub fn run(
         format!("Failed to read manifest file: {}", manifest_file.display())
     })?;
 
-    let manifest: Manifest = serde_json::from_str(&raw).with_context(|| {
+    let manifest: Manifest = Manifest::from_json_str(&raw).with_context(|| {
         format!("Failed to parse manifest file: {}", manifest_file.display())
     })?;
     // Whether covenants compile with SimplicityHL debug symbols (affects every CMR/address).
@@ -256,16 +255,18 @@ pub fn run(
         _ => vec![],
     };
 
-    // Dispatch: standalone actions first, then class methods.
+    // Dispatch: standalone actions first, then contract-template actions.
+    let mut enclosing_template: Option<&str> = None;
     let action = if let Some(a) = manifest.actions.get(action_name) {
         a
-    } else if let Some((_class_id, _class_def, method)) = manifest.find_class_and_method(action_name) {
-        method
+    } else if let Some((template_id, _template_def, template_action)) = manifest.find_template_action(action_name) {
+        enclosing_template = Some(template_id);
+        template_action
     } else {
         let mut available: Vec<String> = manifest.actions.keys().cloned().collect();
-        if let Some(classes) = &manifest.classes {
-            for cls in classes.values() {
-                available.extend(cls.methods.keys().cloned());
+        if let Some(contract_templates) = &manifest.contract_templates {
+            for cls in contract_templates.values() {
+                available.extend(cls.actions.keys().cloned());
             }
         }
         anyhow::bail!(
@@ -313,140 +314,10 @@ pub fn run(
     println!();
     println!("{}", step_header("Step 1: Parameters"));
 
-    {
-        let (user_provided, derived) = manifest.compile_param_sets();
-
-        if !user_provided.is_empty() {
-            println!("  {}", style("Compile params:").bold());
-            for (name, def) in &user_provided {
-                let is_wallet_key = def.source.as_ref().map(|s| s.type_ == "wallet_key").unwrap_or(false);
-                // wallet_key params always derive from the current wallet — the instance file
-                // must not override them, since that would use a stale key from a previous run.
-                if !is_wallet_key {
-                    if let Some(inst_val) = instance.and_then(|i| i.get_field(name)) {
-                        println!(
-                            "  {} {} = {}  {}",
-                            style("✓").green(),
-                            style(name).bold().cyan(),
-                            style(inst_val).yellow(),
-                            style("[from instance]").dim(),
-                        );
-                        ctx.set_compile_param(*name, inst_val);
-                        continue;
-                    }
-                }
-                if is_wallet_key {
-                    let info = loaded_wallet.as_ref()
-                        .map(wallet::wallet_info)
-                        .transpose()?;
-                    if let Some(info) = info {
-                        println!(
-                            "  {} {} = {}  {}",
-                            style("✓").green(),
-                            style(name).bold().cyan(),
-                            style(&info.wallet_pubkey).yellow(),
-                            style(format!("[wallet key, path: {}]", info.wallet_key_path)).dim(),
-                        );
-                        ctx.set_compile_param(*name, &info.wallet_pubkey);
-                    } else if let Some(ov) = overrides.get(name) {
-                        println!(
-                            "  {} {} = {}  {}",
-                            style("✓").green(),
-                            style(name).bold().cyan(),
-                            style(ov).yellow(),
-                            style("[from --params]").dim(),
-                        );
-                        ctx.set_compile_param(*name, ov);
-                    } else {
-                        let default = def.default.as_deref();
-                        let value = prompt::prompt_param(name, &def.type_, def.description.as_deref(), default)?;
-                        ctx.set_compile_param(*name, value);
-                    }
-                } else if let Some(ov) = overrides.get(name) {
-                    println!(
-                        "  {} {} = {}  {}",
-                        style("✓").green(),
-                        style(name).bold().cyan(),
-                        style(ov).yellow(),
-                        style("[from --params]").dim(),
-                    );
-                    ctx.set_compile_param(*name, ov);
-                } else {
-                    let default = def.default.as_deref();
-                    let value = prompt::prompt_param(name, &def.type_, def.description.as_deref(), default)?;
-                    ctx.set_compile_param(*name, value);
-                }
-            }
-        }
-
-        // Load derived params: instance file first (authoritative), then --params overrides.
-        let mut loaded_inst = 0usize;
-        let mut loaded_ovr = 0usize;
-        for (name, _) in &derived {
-            if let Some(inst_val) = instance.and_then(|i| i.get_field(name)) {
-                ctx.set_compile_param(*name, inst_val);
-                loaded_inst += 1;
-            } else if let Some(ovr_val) = overrides.get(name) {
-                // Derived params with no instance file (e.g. carry-over from a previous action)
-                // can be supplied via --params.
-                ctx.set_compile_param(*name, ovr_val);
-                println!(
-                    "  {} {} = {}  {}",
-                    style("✓").green(),
-                    style(name).bold().cyan(),
-                    style(ovr_val).yellow(),
-                    style("[from --params]").dim(),
-                );
-                loaded_ovr += 1;
-            }
-        }
-        if loaded_inst > 0 {
-            println!(
-                "  {} {} derived param(s) loaded from instance file.",
-                style("✓").green(), loaded_inst
-            );
-        }
-        if loaded_ovr > 0 {
-            println!(
-                "  {} {} derived param(s) loaded from --params.",
-                style("✓").green(), loaded_ovr
-            );
-        }
-
-        // Evaluate expr-based derived params (arithmetic). Tapleaf params run after Step 3.
-        for (name, def) in &derived {
-            if ctx.get_compile_param(name).is_some() {
-                continue; // already set from instance, --params, or a prior compute
-            }
-            let Some(crate::manifest::ParamCompute::Expr { expr }) = &def.compute else { continue };
-            match eval::eval_param_compute_expr(expr, &ctx) {
-                Ok(v) => {
-                    let vs = v.to_string();
-                    ctx.set_compile_param(*name, &vs);
-                    println!(
-                        "  {} {} = {}  {}",
-                        style("✓").green(),
-                        style(*name).bold().cyan(),
-                        style(&vs).yellow(),
-                        style("[compute: expr]").dim(),
-                    );
-                }
-                Err(e) => {
-                    println!(
-                        "  {} Derived param '{}' compute failed: {e}",
-                        style("[warn]").yellow(),
-                        name
-                    );
-                }
-            }
-        }
-    }
-
-    // For class methods: load all class field values from the instance file as compile params.
-    // compile_param_sets() only iterates top-level params/compile_params, not class fields.
-    if let Some((_, class_def, _)) = manifest.find_class_and_method(action_name) {
-        let mut loaded_class = 0usize;
-        for (field_name, field_def) in &class_def.fields {
+    // Load all template field values from the instance file as compile params.
+    if let Some((_, template_def, _)) = manifest.find_template_action(action_name) {
+        let mut loaded_fields = 0usize;
+        for (field_name, field_def) in &template_def.fields {
             if ctx.get_compile_param(field_name).is_some() {
                 continue;
             }
@@ -455,8 +326,8 @@ pub fn run(
                 .or_else(|| overrides.get(field_name))
             {
                 ctx.set_compile_param(field_name, v);
-                loaded_class += 1;
-            } else if !action.is_constructor {
+                loaded_fields += 1;
+            } else if action.create_instance.is_none() {
                 // Not in instance or overrides — prompt, pre-filling with default if set.
                 // Skipped for constructors: every field is an output computed by create_instance.
                 let value = prompt::prompt_param(
@@ -468,25 +339,21 @@ pub fn run(
                 ctx.set_compile_param(field_name, value);
             }
         }
-        if loaded_class > 0 {
+        if loaded_fields > 0 {
             println!(
-                "  {} {} class field(s) loaded from instance.",
-                style("✓").green(), loaded_class
+                "  {} {} template field(s) loaded from instance.",
+                style("✓").green(), loaded_fields
             );
         }
     }
 
     // Type hints from manifest spec — needed for tapleaf computes (and later for covenant address).
-    let mut compile_param_type_hints: std::collections::HashMap<String, String> = {
-        let (user, derived) = manifest.compile_param_sets();
-        user.into_iter().chain(derived)
-            .map(|(name, def)| (name.to_string(), def.type_.clone()))
-            .collect()
-    };
+    let mut compile_param_type_hints: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
-    // Extend type hints with class field types for class methods.
-    if let Some((_, class_def, _)) = manifest.find_class_and_method(action_name) {
-        for (field_name, field_def) in &class_def.fields {
+    // Extend type hints with template field types for template actions.
+    if let Some((_, template_def, _)) = manifest.find_template_action(action_name) {
+        for (field_name, field_def) in &template_def.fields {
             compile_param_type_hints
                 .entry(field_name.clone())
                 .or_insert_with(|| field_def.type_.clone());
@@ -498,17 +365,17 @@ pub fn run(
             println!();
             println!("  {}", style("Action params:").bold());
             for (name, def) in params {
-                if let Some(formula) = &def.formula {
+                if let Some(expr) = def.compute.as_ref().and_then(|c| c.as_expr()) {
                     println!(
-                        "  {} {} formula: {}",
+                        "  {} {} computed: {}",
                         style(name).bold().cyan(),
                         style(format!("({})", def.type_)).dim(),
-                        style(formula).yellow()
+                        style(expr).yellow()
                     );
                 }
                 // SimfFn params are computed after inputs resolve (Step 3a). Skip here unless
                 // an explicit override is provided via --params.
-                if matches!(&def.compute, Some(crate::manifest::ParamCompute::SimfFn { .. }))
+                if def.compute.as_ref().is_some_and(|c| c.is_simf_fn())
                     && overrides.get(name.as_str()).is_none()
                 {
                     println!(
@@ -520,34 +387,39 @@ pub fn run(
                     continue;
                 }
 
-                // Priority: wallet_* source > --params override > formula auto-eval > interactive prompt.
-                let source_type = def.source.as_ref().map(|s| s.type_.as_str());
-                let value = if source_type == Some("wallet_key") {
-                    let info = loaded_wallet.as_ref()
-                        .map(wallet::wallet_info)
-                        .transpose()?
-                        .ok_or_else(|| anyhow::anyhow!("Param '{name}' requires wallet_key source but no wallet is loaded"))?;
-                    println!(
-                        "  {} {} = {}  {}",
-                        style("✓").green(),
-                        style(name).bold().cyan(),
-                        style(&info.wallet_pubkey).yellow(),
-                        style(format!("[wallet key, path: {}]", info.wallet_key_path)).dim(),
-                    );
-                    info.wallet_pubkey.clone()
-                } else if source_type == Some("wallet_script_hash") || source_type == Some("wallet_address") {
-                    // Committed payout target: sha256(explicit index-0 scriptPubKey) and the
-                    // matching explicit address. Mirrors simplicity-lending's borrower payout.
-                    let w = loaded_wallet.as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("Param '{name}' requires a {} source but no wallet is loaded", source_type.unwrap()))?;
-                    let (addr, hash) = wallet::committed_output(w)?;
-                    let v = if source_type == Some("wallet_script_hash") { hash } else { addr };
+                // Priority: wallet_* compute > --params override > expr compute > prompt.
+                use crate::manifest::WalletValue as WV;
+                let value = if let Some(kind) = def.compute.as_ref().and_then(|c| c.as_wallet()) {
+                    let label = match kind {
+                        WV::Key => "wallet.key",
+                        WV::ScriptHash => "wallet.script_hash",
+                        WV::Address => "wallet.address",
+                    };
+                    let w = loaded_wallet.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("Param '{name}' computes from {label} but no wallet is loaded")
+                    })?;
+                    let (v, detail) = match kind {
+                        WV::Key => {
+                            let info = wallet::wallet_info(w)?;
+                            let d = format!("[wallet key, path: {}]", info.wallet_key_path);
+                            (info.wallet_pubkey.clone(), d)
+                        }
+                        // Committed payout target: sha256(explicit index-0 scriptPubKey) and
+                        // the matching explicit address. Mirrors simplicity-lending's
+                        // borrower payout — the covenant commits to the hash, the wallet
+                        // receives at the address, so the two must agree.
+                        WV::ScriptHash | WV::Address => {
+                            let (addr, hash) = wallet::committed_output(w)?;
+                            let v = if matches!(kind, WV::ScriptHash) { hash } else { addr };
+                            (v, format!("[{label}]"))
+                        }
+                    };
                     println!(
                         "  {} {} = {}  {}",
                         style("✓").green(),
                         style(name).bold().cyan(),
                         style(&v).yellow(),
-                        style(format!("[{}]", source_type.unwrap())).dim(),
+                        style(detail).dim(),
                     );
                     v
                 } else if let Some(ov) = overrides.get(name) {
@@ -559,14 +431,14 @@ pub fn run(
                         style("[from --params]").dim(),
                     );
                     ov.to_string()
-                } else if let Some(formula) = &def.formula {
-                    let computed = eval::eval_expr_str(formula, &ctx)?;
+                } else if let Some(expr) = def.compute.as_ref().and_then(|c| c.as_expr()) {
+                    let computed = eval::eval_expr_str(expr, &ctx)?;
                     println!(
                         "  {} {} = {}  {}",
                         style("✓").green(),
                         style(name).bold().cyan(),
                         style(&computed).yellow(),
-                        style(format!("[auto: {formula}]")).dim(),
+                        style(format!("[auto: {expr}]")).dim(),
                     );
                     computed
                 } else {
@@ -578,29 +450,6 @@ pub fn run(
                 // (step 3b tapleaf derives) see the fresh value, not a stale one
                 // that may have been loaded from a previous instance file.
                 ctx.set_compile_param(name, value);
-            }
-        }
-    }
-
-    if let Some(args) = &action.args {
-        if !args.is_empty() {
-            println!();
-            println!("  {}", style("Action args:").bold());
-            for (name, def) in args {
-                let value = if let Some(ov) = overrides.get(name) {
-                    println!(
-                        "  {} {} = {}  {}",
-                        style("✓").green(),
-                        style(name).bold().cyan(),
-                        style(ov).yellow(),
-                        style("[from --params]").dim(),
-                    );
-                    ov.to_string()
-                } else {
-                    let default = def.default.as_deref();
-                    prompt::prompt_param(name, &def.type_, def.description.as_deref(), default)?
-                };
-                ctx.set_arg(name, value);
             }
         }
     }
@@ -740,80 +589,6 @@ pub fn run(
         println!("  (no inputs defined for this action)");
     }
 
-    // ------------------------------------------------------------------
-    // Step 3 — Resolving Derived Parameters (on_input_resolved hooks)
-    // ------------------------------------------------------------------
-    println!();
-    println!("{}", step_header("Step 3: Resolving Derived Parameters"));
-
-    let has_hooks = action
-        .hooks
-        .as_ref()
-        .and_then(|h| h.on_input_resolved.as_ref())
-        .map(|m| !m.is_empty())
-        .unwrap_or(false);
-
-    if has_hooks {
-        let hooks = action.hooks.as_ref().unwrap().on_input_resolved.as_ref().unwrap();
-        println!(
-            "  {}",
-            style("Note: hook execution order follows BTreeMap key order (alphabetical). \
-                 A production wallet should use IndexMap to preserve declaration order.")
-            .yellow()
-        );
-        for (input_id, hook) in hooks {
-            for (param_path, expr) in &hook.set {
-                match eval::eval_simplicityhl_hook(expr, input_id, &ctx) {
-                    Ok(value) => {
-                        // Store the result under the appropriate context namespace
-                        if let Some(name) = param_path
-                            .strip_prefix("instance.")
-                            .or_else(|| param_path.strip_prefix("compile_params."))
-                        {
-                            ctx.set_compile_param(name, &value);
-                        } else if let Some(name) = param_path.strip_prefix("params.") {
-                            ctx.set_param(name, &value);
-                        } else if let Some(name) = param_path.strip_prefix("args.") {
-                            ctx.set_arg(name, &value);
-                        }
-                        let short = &value[..value.len().min(16)];
-                        println!(
-                            "  {} {} = {}…",
-                            style("✓").green(),
-                            style(param_path).bold(),
-                            style(short).yellow(),
-                        );
-                    }
-                    Err(e) => {
-                        println!(
-                            "  {} {} (SimplicityHL: {})",
-                            style("[hook — not evaluated]").yellow(),
-                            style(param_path).bold(),
-                            style(e).dim(),
-                        );
-                    }
-                }
-            }
-        }
-    } else {
-        println!("  (no on_input_resolved hooks for this action)");
-    }
-
-    {
-        let (_, derived) = manifest.compile_param_sets();
-        if !derived.is_empty() {
-            println!();
-            println!("  {}", style("Derived params (set by hooks):").bold());
-            for (name, def) in derived {
-                println!(
-                    "  {} {} — {}",
-                    style(name).cyan(),
-                    style(format!("({})", def.type_)).dim(),
-                    def.description.as_deref().unwrap_or("")
-                );
-            }
-        }
-    }
 
     // ------------------------------------------------------------------
     // Step 3a — Issuance asset IDs + on_resolved compile-param hooks
@@ -851,44 +626,8 @@ pub fn run(
     }
     for inp in action.inputs.as_deref().unwrap_or_default() {
         let Some(hook) = &inp.on_resolved else { continue };
-        for (target, formula) in &hook.set {
-            let value: Option<String> = match formula.trim() {
-                "asset" => ctx
-                    .get_input_attr(&inp.id, "asset")
-                    .map(str::to_string)
-                    .or_else(|| ctx.get_input(&inp.id).map(|r| r.asset.clone())),
-                "reissuance_token" => ctx
-                    .get_input_attr(&inp.id, "reissuance_token")
-                    .map(str::to_string),
-                other => eval::eval_expr_str(other, &ctx).ok(),
-            };
-            match value {
-                None => println!(
-                    "  {} on_resolved set '{}' = '{}' — could not resolve.",
-                    style("[warn]").yellow(), target, formula
-                ),
-                Some(v) => {
-                    if let Some(name) = target
-                        .strip_prefix("instance.")
-                        .or_else(|| target.strip_prefix("compile_params."))
-                    {
-                        ctx.set_compile_param(name, &v);
-                    } else if let Some(name) = target.strip_prefix("params.") {
-                        ctx.set_param(name, &v);
-                    } else if let Some(name) = target.strip_prefix("args.") {
-                        ctx.set_arg(name, &v);
-                    }
-                    let short = &v[..v.len().min(16)];
-                    println!(
-                        "  {} {} = {}…  {}",
-                        style("✓").green(),
-                        style(target).bold().cyan(),
-                        style(short).yellow(),
-                        style(format!("[on_resolved: {}]", inp.id)).dim(),
-                    );
-                }
-            }
-        }
+        let label = format!("[on_resolved: {}]", inp.id);
+        run_hook_block(hook, &mut ctx, &label, Some(&inp.id));
     }
 
     // ------------------------------------------------------------------
@@ -896,7 +635,7 @@ pub fn run(
     // Runs after input resolution + issuance attrs, before PSET construction.
     // ------------------------------------------------------------------
     if let Some(hook) = &action.on_pre_broadcast {
-        run_hook_block(hook, &mut ctx, "[on_pre_broadcast]");
+        run_hook_block(hook, &mut ctx, "[on_pre_broadcast]", None);
     }
 
     // ------------------------------------------------------------------
@@ -905,383 +644,6 @@ pub fn run(
     let net_for_hash = loaded_wallet.as_ref()
         .map(wallet::elements_network)
         .unwrap_or(ElementsNetwork::LiquidTestnet);
-    {
-        let (_, derived_defs) = manifest.compile_param_sets();
-        let mut failed: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut any_new = true;
-        while any_new {
-            any_new = false;
-            for (name, def) in &derived_defs {
-                if ctx.get_compile_param(name).is_some() || failed.contains(*name) { continue; }
-                let Some(crate::manifest::ParamCompute::Tapleaf { simf, params, depends_on, .. }) = &def.compute else { continue };
-
-                // Resolve the params map for this simf compilation.
-                // When no explicit params override is given, auto-populate:
-                //   • if `depends_on` is set, wait only for those params (and pass only them)
-                //   • otherwise wait for ALL compile params (legacy behaviour)
-                let simf_params: std::collections::HashMap<String, String> = if params.is_empty() {
-                    let mut resolved = std::collections::HashMap::new();
-                    let mut all_ready = true;
-                    let gate: Box<dyn Iterator<Item = &str>> = match depends_on {
-                        Some(deps) => Box::new(deps.iter().map(String::as_str)),
-                        None => Box::new(manifest.all_compile_param_names().into_iter()),
-                    };
-                    for cp_name in gate {
-                        match ctx.get_compile_param(cp_name) {
-                            Some(v) => { resolved.insert(cp_name.to_string(), v.to_string()); }
-                            None => { all_ready = false; break; }
-                        }
-                    }
-                    if !all_ready { continue; }
-                    resolved
-                } else {
-                    let mut resolved = std::collections::HashMap::new();
-                    let mut all_ready = true;
-                    for (k, p) in params {
-                        let v = p.value.as_str();
-                        // v is either a compile-param reference or a string/bool literal
-                        let is_param_ref = ctx.get_compile_param(v).is_some();
-                        let is_literal = v.parse::<u64>().is_ok() || v == "true" || v == "false";
-                        if !is_param_ref && !is_literal {
-                            all_ready = false; // dependency not computed yet
-                            break;
-                        }
-                        let value = ctx.get_compile_param(v)
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| p.value.clone());
-                        resolved.insert(k.clone(), value);
-                    }
-                    if !all_ready { continue; }
-                    resolved
-                };
-
-                // Build type hints: inherit from compile param types (same-name mapping),
-                // then override with any explicit inline types from the params map.
-                let simf_type_hints: std::collections::HashMap<String, String> = {
-                    let mut hints: std::collections::HashMap<String, String> = simf_params.keys()
-                        .filter_map(|k| compile_param_type_hints.get(k).map(|t| (k.clone(), t.clone())))
-                        .collect();
-                    if !params.is_empty() {
-                        // For explicit params, inherit type from the *referenced* compile param name.
-                        for (k, p) in params {
-                            if let Some(ty) = compile_param_type_hints.get(p.value.as_str()) {
-                                hints.insert(k.clone(), ty.clone());
-                            }
-                        }
-                        // Then apply inline type overrides.
-                        for (k, p) in params {
-                            if let Some(ty) = &p.type_ {
-                                hints.insert(k.clone(), ty.clone());
-                            }
-                        }
-                    }
-                    hints
-                };
-
-                let simf_path = manifest_file.parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .join(simf);
-
-                match covenant::compute_covenant_script_hash(&simf_path, &simf_params, &simf_type_hints, net_for_hash, include_debug_symbols) {
-                    Ok(hash_bytes) => {
-                        let hex: String = hash_bytes.iter().map(|b| format!("{b:02x}")).collect();
-                        ctx.set_compile_param(*name, &hex);
-                        println!(
-                            "  {} {} = {}  {}",
-                            style("✓").green(),
-                            style(*name).bold().cyan(),
-                            style(&hex[..16]).yellow(),
-                            style("[compute: script_hash]").dim(),
-                        );
-                        any_new = true;
-                    }
-                    Err(e) => {
-                        println!(
-                            "  {} Script hash compute '{}' failed: {e}",
-                            style("[error]").red(), name
-                        );
-                        failed.insert(name.to_string());
-                    }
-                }
-            }
-        }
-        // ----------------------------------------------------------------
-        // Fixed-point pass for circular tapleaf dependencies.
-        // Only runs on deploy actions — non-deploy actions read covenant
-        // hashes from the instance file rather than recomputing them.
-        // ----------------------------------------------------------------
-        if action.deploy {
-        {
-            let stuck_names: Vec<String> = derived_defs
-                .iter()
-                .filter(|(name, def)| {
-                    ctx.get_compile_param(name).is_none()
-                        && !failed.contains(*name)
-                        && matches!(&def.compute, Some(crate::manifest::ParamCompute::Tapleaf { .. }))
-                })
-                .map(|(n, _)| n.to_string())
-                .collect();
-
-            if !stuck_names.is_empty() {
-                let stuck_set: std::collections::HashSet<&str> =
-                    stuck_names.iter().map(String::as_str).collect();
-
-                // Separate genuine circular params (only blocked by other stuck tapleaf params)
-                // from those with a missing non-tapleaf dependency (real error).
-                let mut genuine_circular: Vec<String> = Vec::new();
-                for stuck_name in &stuck_names {
-                    let Some((_, def)) = derived_defs.iter().find(|(n, _)| *n == stuck_name.as_str()) else { continue };
-                    let Some(crate::manifest::ParamCompute::Tapleaf { params, .. }) = &def.compute else { continue };
-
-                    let has_non_stuck_blocker = if params.is_empty() {
-                        // auto-populate: blocked by any unresolved compile param NOT in the stuck set
-                        manifest.all_compile_param_names().into_iter().any(|cp| {
-                            ctx.get_compile_param(cp).is_none() && !stuck_set.contains(cp)
-                        })
-                    } else {
-                        // explicit params: blocked by any unresolved param ref NOT in the stuck set
-                        params.values().any(|p| {
-                            let v = p.value.as_str();
-                            v.parse::<u64>().is_err()
-                                && v != "true"
-                                && v != "false"
-                                && ctx.get_compile_param(v).is_none()
-                                && !stuck_set.contains(v)
-                        })
-                    };
-
-                    if !has_non_stuck_blocker {
-                        genuine_circular.push(stuck_name.clone());
-                    }
-                    // Params with real missing deps stay unresolved; caught by the failed check below.
-                }
-
-                if !genuine_circular.is_empty() {
-                    println!(
-                        "\n  {} Resolving {} circular tapleaf param(s) via fixed-point: {}",
-                        style("[fixed-point]").cyan().bold(),
-                        genuine_circular.len(),
-                        genuine_circular.join(", ")
-                    );
-
-                    // Seed all circular params with 32-byte zeros.
-                    let zero_seed = "0".repeat(64);
-                    for name in &genuine_circular {
-                        if ctx.get_compile_param(name).is_none() {
-                            ctx.set_compile_param(name, &zero_seed);
-                        }
-                    }
-
-                    // Iterate until stable (convergence typically happens in 2–3 rounds).
-                    let mut converged = false;
-                    for iter_num in 0usize..20 {
-                        let mut changed = false;
-
-                        for stuck_name in &genuine_circular {
-                            if failed.contains(stuck_name.as_str()) { continue; }
-                            let Some((_, def)) = derived_defs.iter().find(|(n, _)| *n == stuck_name.as_str()) else { continue };
-                            let Some(crate::manifest::ParamCompute::Tapleaf { simf, params, .. }) = &def.compute else { continue };
-
-                            let simf_params_opt: Option<std::collections::HashMap<String, String>> = if params.is_empty() {
-                                let mut resolved = std::collections::HashMap::new();
-                                let mut ok = true;
-                                for cp_name in manifest.all_compile_param_names() {
-                                    match ctx.get_compile_param(cp_name) {
-                                        Some(v) => { resolved.insert(cp_name.to_string(), v.to_string()); }
-                                        None => { ok = false; break; }
-                                    }
-                                }
-                                if ok { Some(resolved) } else { None }
-                            } else {
-                                let mut resolved = std::collections::HashMap::new();
-                                let mut ok = true;
-                                for (k, p) in params {
-                                    let v = p.value.as_str();
-                                    let val = if v.parse::<u64>().is_ok() || v == "true" || v == "false" {
-                                        p.value.clone()
-                                    } else {
-                                        match ctx.get_compile_param(v) {
-                                            Some(s) => s.to_string(),
-                                            None => { ok = false; break; }
-                                        }
-                                    };
-                                    resolved.insert(k.clone(), val);
-                                }
-                                if ok { Some(resolved) } else { None }
-                            };
-
-                            let Some(simf_params) = simf_params_opt else { continue };
-
-                            let simf_type_hints: std::collections::HashMap<String, String> = {
-                                let mut hints: std::collections::HashMap<String, String> = simf_params.keys()
-                                    .filter_map(|k| compile_param_type_hints.get(k).map(|t| (k.clone(), t.clone())))
-                                    .collect();
-                                if !params.is_empty() {
-                                    for (k, p) in params {
-                                        if let Some(ty) = compile_param_type_hints.get(p.value.as_str()) {
-                                            hints.insert(k.clone(), ty.clone());
-                                        }
-                                    }
-                                    for (k, p) in params {
-                                        if let Some(ty) = &p.type_ {
-                                            hints.insert(k.clone(), ty.clone());
-                                        }
-                                    }
-                                }
-                                hints
-                            };
-
-                            let simf_path = manifest_file.parent()
-                                .unwrap_or(std::path::Path::new("."))
-                                .join(simf.as_str());
-
-                            match covenant::compute_covenant_script_hash(&simf_path, &simf_params, &simf_type_hints, net_for_hash, include_debug_symbols) {
-                                Ok(hash_bytes) => {
-                                    let hex: String = hash_bytes.iter().map(|b| format!("{b:02x}")).collect();
-                                    let old = ctx.get_compile_param(stuck_name).map(str::to_string).unwrap_or_default();
-                                    if hex != old {
-                                        changed = true;
-                                        ctx.set_compile_param(stuck_name, &hex);
-                                    }
-                                }
-                                Err(e) => {
-                                    println!(
-                                        "  {} Fixed-point compute '{}' failed: {e}",
-                                        style("[error]").red(), stuck_name
-                                    );
-                                    failed.insert(stuck_name.clone());
-                                }
-                            }
-                        }
-
-                        if !changed {
-                            converged = true;
-                            println!(
-                                "  {} Fixed-point converged in {} iteration(s).",
-                                style("✓").green(), iter_num + 1
-                            );
-                            for name in &genuine_circular {
-                                if !failed.contains(name.as_str()) {
-                                    if let Some(hex) = ctx.get_compile_param(name) {
-                                        println!(
-                                            "  {} {} = {}…  {}",
-                                            style("✓").green(),
-                                            style(name.as_str()).bold().cyan(),
-                                            style(&hex[..16.min(hex.len())]).yellow(),
-                                            style("[compute: tapleaf fixed-point]").dim(),
-                                        );
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                    }
-
-                    if !converged {
-                        println!(
-                            "  {} Fixed-point did not converge in 20 iterations — using last computed values.",
-                            style("[warn]").yellow()
-                        );
-                    }
-
-                    // Re-run the normal tapleaf loop: fixed-point values may unblock
-                    // any remaining explicit-params tapleaf entries.
-                    let mut any_new2 = true;
-                    while any_new2 {
-                        any_new2 = false;
-                        for (name, def) in &derived_defs {
-                            if ctx.get_compile_param(name).is_some() || failed.contains(*name) { continue; }
-                            let Some(crate::manifest::ParamCompute::Tapleaf { simf, params, .. }) = &def.compute else { continue };
-
-                            let simf_params_opt: Option<std::collections::HashMap<String, String>> = if params.is_empty() {
-                                let mut resolved = std::collections::HashMap::new();
-                                let mut ok = true;
-                                for cp_name in manifest.all_compile_param_names() {
-                                    match ctx.get_compile_param(cp_name) {
-                                        Some(v) => { resolved.insert(cp_name.to_string(), v.to_string()); }
-                                        None => { ok = false; break; }
-                                    }
-                                }
-                                if ok { Some(resolved) } else { None }
-                            } else {
-                                let mut resolved = std::collections::HashMap::new();
-                                let mut ok = true;
-                                for (k, p) in params {
-                                    let v = p.value.as_str();
-                                    let val = if v.parse::<u64>().is_ok() || v == "true" || v == "false" {
-                                        p.value.clone()
-                                    } else {
-                                        match ctx.get_compile_param(v) {
-                                            Some(s) => s.to_string(),
-                                            None => { ok = false; break; }
-                                        }
-                                    };
-                                    resolved.insert(k.clone(), val);
-                                }
-                                if ok { Some(resolved) } else { None }
-                            };
-
-                            let Some(simf_params) = simf_params_opt else { continue };
-
-                            let simf_type_hints: std::collections::HashMap<String, String> = {
-                                let mut hints: std::collections::HashMap<String, String> = simf_params.keys()
-                                    .filter_map(|k| compile_param_type_hints.get(k).map(|t| (k.clone(), t.clone())))
-                                    .collect();
-                                if !params.is_empty() {
-                                    for (k, p) in params {
-                                        if let Some(ty) = compile_param_type_hints.get(p.value.as_str()) {
-                                            hints.insert(k.clone(), ty.clone());
-                                        }
-                                    }
-                                    for (k, p) in params {
-                                        if let Some(ty) = &p.type_ {
-                                            hints.insert(k.clone(), ty.clone());
-                                        }
-                                    }
-                                }
-                                hints
-                            };
-
-                            let simf_path = manifest_file.parent()
-                                .unwrap_or(std::path::Path::new("."))
-                                .join(simf.as_str());
-
-                            match covenant::compute_covenant_script_hash(&simf_path, &simf_params, &simf_type_hints, net_for_hash, include_debug_symbols) {
-                                Ok(hash_bytes) => {
-                                    let hex: String = hash_bytes.iter().map(|b| format!("{b:02x}")).collect();
-                                    ctx.set_compile_param(*name, &hex);
-                                    println!(
-                                        "  {} {} = {}…  {}",
-                                        style("✓").green(),
-                                        style(*name).bold().cyan(),
-                                        style(&hex[..16.min(hex.len())]).yellow(),
-                                        style("[compute: script_hash]").dim(),
-                                    );
-                                    any_new2 = true;
-                                }
-                                Err(e) => {
-                                    println!(
-                                        "  {} Script hash compute '{}' failed: {e}",
-                                        style("[error]").red(), name
-                                    );
-                                    failed.insert(name.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        } // end if action.deploy
-
-        if !failed.is_empty() {
-            let names: Vec<&str> = failed.iter().map(String::as_str).collect();
-            anyhow::bail!(
-                "Cannot proceed: tapleaf compute failed for: {}",
-                names.join(", ")
-            );
-        }
-    }
 
     // ------------------------------------------------------------------
     // Step 3c — SimfFn computed action params
@@ -1292,7 +654,7 @@ pub fn run(
     if let Some(params) = &action.params {
         let simf_params: Vec<(&str, &crate::manifest::ParamDef)> = params
             .iter()
-            .filter(|(_, def)| matches!(&def.compute, Some(crate::manifest::ParamCompute::SimfFn { .. })))
+            .filter(|(_, def)| def.compute.as_ref().is_some_and(|c| c.is_simf_fn()))
             .map(|(n, d)| (n.as_str(), d))
             .collect();
 
@@ -1305,8 +667,8 @@ pub fn run(
             // If an override was supplied in Step 1 the param is already in ctx — skip.
             if ctx.get_param(name).is_some() { continue; }
 
-            let crate::manifest::ParamCompute::SimfFn { simf, fn_name, compile_params: cp_names, input } =
-                def.compute.as_ref().unwrap() else { continue };
+            let Some(crate::manifest::ParamCompute::SimfFn { simf, fn_name, compile_params: cp_names, input }) =
+                def.compute.as_ref().and_then(|c| c.as_spec()) else { continue };
 
             // Build the compile-param subset that will become param:: constants.
             let mut cp_map = std::collections::HashMap::new();
@@ -1419,32 +781,6 @@ pub fn run(
     };
 
     // ------------------------------------------------------------------
-    // Step 6 — Validation
-    // ------------------------------------------------------------------
-    println!();
-    println!("{}", step_header("Step 6: Validation"));
-
-    if let Some(hooks) = &action.hooks {
-        if hooks.on_validate.is_some() {
-            println!(
-                "  {} on_validate hook present (SimplicityHL) — not executed in this version.",
-                style("[TODO]").yellow()
-            );
-        }
-    }
-
-    if let Some(validations) = &action.validations {
-        if validations.is_empty() {
-            println!("  (no validations defined for this action)");
-        }
-        for validation in validations {
-            run_validation(validation, &manifest, &ctx)?;
-        }
-    } else {
-        println!("  (no validations defined for this action)");
-    }
-
-    // ------------------------------------------------------------------
     // Step 7 — PSET
     // ------------------------------------------------------------------
     println!();
@@ -1495,13 +831,13 @@ pub fn run(
     let simf_path = manifest_file
         .parent()
         .unwrap_or(std::path::Path::new("."))
-        .join(manifest.source.as_deref().unwrap_or("covenant.simf"));
+        .join("covenant.simf");
 
     // For constructor actions: pre-compute create_instance tapleaf fields (e.g.
     // FUNDING_SCRIPT_HASH) so they are present in compile_params_map for Step 7.
-    // Without this, missing class fields fall back to the literal param name as a
+    // Without this, missing template fields fall back to the literal param name as a
     // value, which later fails `Value::parse_from_str` with non-hex characters.
-    if action.is_constructor {
+    {
         if let Some(ci) = &action.create_instance {
             let pre_hints: std::collections::HashMap<String, String> = {
                 let mut hints = compile_param_type_hints.clone();
@@ -1523,14 +859,9 @@ pub fn run(
 
     let compile_params_map: std::collections::HashMap<String, String> = {
         let mut m = std::collections::HashMap::new();
-        for name in manifest.all_compile_param_names() {
-            if let Some(v) = ctx.get_compile_param(name) {
-                m.insert(name.to_string(), v.to_string());
-            }
-        }
-        // For class methods: also expose class field values (loaded into ctx in Step 1).
-        if let Some((_, class_def, _)) = manifest.find_class_and_method(action_name) {
-            for field_name in class_def.fields.keys() {
+        // For template actions: also expose template field values (loaded into ctx in Step 1).
+        if let Some((_, template_def, _)) = manifest.find_template_action(action_name) {
+            for field_name in template_def.fields.keys() {
                 if !m.contains_key(field_name.as_str()) {
                     if let Some(v) = ctx.get_compile_param(field_name) {
                         m.insert(field_name.clone(), v.to_string());
@@ -1592,53 +923,8 @@ pub fn run(
         // ---- Evaluate on_resolved inline hooks ----
         for inp in action.inputs.as_deref().unwrap_or_default() {
             let Some(hook) = &inp.on_resolved else { continue };
-            for (target, formula) in &hook.set {
-                // Within an input's own on_resolved, "asset" and "reissuance_token"
-                // are self-referential: they resolve to the computed input attrs first
-                // (the issuance asset / token), falling back to the UTXO's own fields.
-                let value: Option<String> = match formula.trim() {
-                    "asset" => ctx
-                        .get_input_attr(&inp.id, "asset")
-                        .map(str::to_string)
-                        .or_else(|| ctx.get_input(&inp.id).map(|r| r.asset.clone())),
-                    "reissuance_token" => ctx
-                        .get_input_attr(&inp.id, "reissuance_token")
-                        .map(str::to_string),
-                    other => eval::eval_expr_str(other, &ctx).ok(),
-                };
-                match value {
-                    None => println!(
-                        "  {} on_resolved set '{}' = '{}' — could not resolve formula.",
-                        style("[warn]").yellow(), target, formula
-                    ),
-                    Some(v) => {
-                        if let Some(name) = target
-                            .strip_prefix("instance.")
-                            .or_else(|| target.strip_prefix("compile_params."))
-                        {
-                            ctx.set_compile_param(name, &v);
-                        } else if let Some(name) = target.strip_prefix("params.") {
-                            ctx.set_param(name, &v);
-                        } else if let Some(name) = target.strip_prefix("args.") {
-                            ctx.set_arg(name, &v);
-                        } else {
-                            println!(
-                                "  {} on_resolved set '{}' — unknown namespace (expected instance./params./args.).",
-                                style("[warn]").yellow(), target
-                            );
-                            continue;
-                        }
-                        let short = &v[..v.len().min(16)];
-                        println!(
-                            "  {} {} = {}…  {}",
-                            style("✓").green(),
-                            style(target).bold().cyan(),
-                            style(short).yellow(),
-                            style(format!("[on_resolved: {}]", inp.id)).dim(),
-                        );
-                    }
-                }
-            }
+            let label = format!("[on_resolved: {}]", inp.id);
+            run_hook_block(hook, &mut ctx, &label, Some(&inp.id));
         }
 
         // ---- Collect PSET inputs ----
@@ -1772,7 +1058,7 @@ pub fn run(
                     .unwrap_or_else(|| simf_path.clone());
                 let (inp_params, inp_hints) = apply_utxo_compile_params(&compile_params_map, &compile_param_type_hints, inp_ut);
                 // Per-input `utxo_source.compile_params` overrides (resolved against action
-                // params/args), mirroring the output `destination.compile_params` form.
+                // params), mirroring the output `destination.compile_params` form.
                 let (inp_params, inp_hints) = apply_site_compile_param_overrides(
                     inp_params, inp_hints, inp.utxo_source.get("compile_params"),
                     action, &compile_param_type_hints, &ctx,
@@ -1961,7 +1247,7 @@ pub fn run(
                             .unwrap_or_else(|| simf_path.clone());
                         let (out_params, out_hints) = apply_utxo_compile_params(&compile_params_map, &compile_param_type_hints, ut);
                         // Per-output `destination.compile_params` overrides (resolved against
-                        // action params/args), so a covenant can be keyed by a runtime value.
+                        // action params), so a covenant can be keyed by a runtime value.
                         let (out_params, out_hints) = apply_site_compile_param_overrides(
                             out_params, out_hints, m.get("compile_params"),
                             action, &compile_param_type_hints, &ctx,
@@ -2011,12 +1297,10 @@ pub fn run(
                         };
                         next_wallet_addr_idx = Some(addr_result.index() + 1);
                         let addr = addr_result.address().clone();
-                        // Resolution order: per-output → file-level default → chain default.
+                        // Resolution order: per-output → chain default.
                         // Bitcoin does not support confidential outputs; Liquid defaults to confidential.
                         let chain_default = matches!(net, ElementsNetwork::Liquid | ElementsNetwork::LiquidTestnet);
-                        let is_confidential = output.confidential
-                            .or(manifest.confidential_outputs)
-                            .unwrap_or(chain_default);
+                        let is_confidential = output.confidential.unwrap_or(chain_default);
                         let bpk = if is_confidential {
                             addr.blinding_pubkey.map(|pk| lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true })
                         } else {
@@ -2197,15 +1481,6 @@ pub fn run(
     // ------------------------------------------------------------------
     println!();
     println!("{}", step_header("Step 8: Sign"));
-
-    if let Some(witnesses) = &action.witnesses {
-        if let Some(obj) = witnesses.as_object() {
-            for (name, def) in obj {
-                let desc = def.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                println!("  {} Witness '{}': {}", style("[info]").dim(), style(name).bold(), desc);
-            }
-        }
-    }
 
     let mut signed_pset: Option<lwk_wollet::elements::pset::PartiallySignedTransaction> = None;
 
@@ -2608,50 +1883,32 @@ pub fn run(
         hints
     };
 
-    if action.deploy || action.is_constructor {
+    if let Some(ci) = &action.create_instance {
         println!();
         println!("{}", step_header("Step 9b: Creating Instance"));
-        if let Some(ci) = &action.create_instance {
-            let fields = eval_create_instance_fields(
-                ci, &ctx, manifest_file, &create_instance_hints, net_for_hash, true, include_debug_symbols,
-            );
-            let inst = crate::instance::InstanceFile {
-                instance: Some(crate::instance::InstanceData {
-                    class: ci.class.clone(),
-                    fields: fields.into_iter().collect(),
-                }),
-                instance_params: std::collections::HashMap::new(),
-                provided_inputs: std::collections::HashMap::new(),
-            };
-            match inst.write(&effective_instance_out) {
-                Ok(()) => println!(
-                    "  {} Instance written: {}",
-                    style("✓").green(),
-                    effective_instance_out.display()
-                ),
-                Err(e) => println!(
-                    "  {} Could not write instance file: {e}",
-                    style("[warn]").yellow()
-                ),
-            }
-        } else {
-            // Legacy: write flat instance_params
-            let inst = InstanceFile {
-                instance: None,
-                instance_params: ctx.all_compile_params().iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-                provided_inputs: std::collections::HashMap::new(),
-            };
-            match inst.write(&effective_instance_out) {
-                Ok(()) => println!(
-                    "  {} Instance written: {}",
-                    style("✓").green(),
-                    effective_instance_out.display()
-                ),
-                Err(e) => println!(
-                    "  {} Could not write instance file: {e}",
-                    style("[warn]").yellow()
-                ),
-            }
+        let fields = eval_create_instance_fields(
+            ci, &ctx, manifest_file, &create_instance_hints, net_for_hash, true, include_debug_symbols,
+        );
+        let inst = crate::instance::InstanceFile {
+            instance: Some(crate::instance::InstanceData {
+                template: enclosing_template
+                    .expect("create_instance is only legal inside a contract template")
+                    .to_string(),
+                fields: fields.into_iter().collect(),
+            }),
+            instance_params: std::collections::HashMap::new(),
+            provided_inputs: std::collections::HashMap::new(),
+        };
+        match inst.write(&effective_instance_out) {
+            Ok(()) => println!(
+                "  {} Instance written: {}",
+                style("✓").green(),
+                effective_instance_out.display()
+            ),
+            Err(e) => println!(
+                "  {} Could not write instance file: {e}",
+                style("[warn]").yellow()
+            ),
         }
     }
 
@@ -2710,7 +1967,6 @@ pub fn run(
             action: action_name,
             compile_params: ctx.all_compile_params(),
             params: ctx.all_params(),
-            args: ctx.all_args(),
             inputs: ctx.all_inputs().map(|i| RunOutputInput {
                 id: i.id.clone(),
                 txid: i.txid.clone(),
@@ -2879,7 +2135,7 @@ pub fn run(
                                 // --- Method-level on_post_broadcast hook ---
                                 if let Some(hook) = &action.on_post_broadcast {
                                     ctx.set_param("broadcast_txid", &txid);
-                                    run_hook_block(hook, &mut ctx, "[on_post_broadcast]");
+                                    run_hook_block(hook, &mut ctx, "[on_post_broadcast]", None);
                                 }
 
                                 // --- Update and write state file ---
@@ -2888,7 +2144,7 @@ pub fn run(
                                 new_state.last_action = action_name.to_string();
                                 // Record which instance file this contract belongs to: the
                                 // just-written output for constructors, else the loaded input.
-                                let recorded_instance = if action.is_constructor || action.deploy {
+                                let recorded_instance = if action.create_instance.is_some() {
                                     Some(effective_instance_out.as_path())
                                 } else {
                                     instance_in_path
@@ -3000,7 +2256,6 @@ pub fn run(
         action: action_name,
         compile_params: ctx.all_compile_params(),
         params: ctx.all_params(),
-        args: ctx.all_args(),
         inputs: ctx.all_inputs().map(|i| RunOutputInput {
             id: i.id.clone(),
             txid: i.txid.clone(),
@@ -3380,7 +2635,7 @@ fn amount_uses_fee_keyword(v: &serde_json::Value) -> bool {
 /// Supports `params.NAME` (an action param — used when a covenant is keyed by a
 /// runtime value), plus the `$params.NAME` / `instance.NAME` forms (and the
 /// deprecated `compile_params.NAME` alias) that resolve against compile params /
-/// class fields. Anything else is returned verbatim and treated as a literal
+/// template fields. Anything else is returned verbatim and treated as a literal
 /// pubkey hex.
 fn resolve_witness_signing_key<'a>(
     key_ref: &'a str,
@@ -3437,8 +2692,6 @@ fn apply_site_compile_param_overrides(
         };
         let hint = if let Some(k) = raw.strip_prefix("params.") {
             param_type(&action.params, k)
-        } else if let Some(k) = raw.strip_prefix("args.") {
-            param_type(&action.args, k)
         } else if let Some(k) = raw
             .strip_prefix("instance.")
             .or_else(|| raw.strip_prefix("compile_params."))
@@ -3449,7 +2702,6 @@ fn apply_site_compile_param_overrides(
                 .get(raw)
                 .cloned()
                 .or_else(|| param_type(&action.params, raw))
-                .or_else(|| param_type(&action.args, raw))
         } else {
             None
         };
@@ -3460,79 +2712,6 @@ fn apply_site_compile_param_overrides(
     (params, hints)
 }
 
-fn run_validation(
-    validation: &Validation,
-    manifest: &Manifest,
-    ctx: &ExecutionContext,
-) -> Result<()> {
-    let desc = validation.description.as_deref().unwrap_or("");
-
-    match validation.rule.type_.as_str() {
-        "arithmetic" => {
-            let expr = validation.rule.expr.as_deref().unwrap_or("[missing expr]");
-            // `!=` comparisons are enforced (e.g. asserting two asset IDs differ).
-            // Other operators remain informational — see eval::eval_inequality_validation.
-            match eval::eval_inequality_validation(expr, ctx) {
-                Some(true) => {
-                    println!(
-                        "  {} Validation '{}': {} {}",
-                        style("✓").green(),
-                        style(&validation.id).bold(),
-                        expr,
-                        style("(ok)").dim(),
-                    );
-                }
-                Some(false) => {
-                    let msg = validation_error_message(validation).unwrap_or_else(|| {
-                        format!("Validation '{}' failed: {}", validation.id, expr)
-                    });
-                    anyhow::bail!("{msg}");
-                }
-                None => {
-                    println!(
-                        "  {} Validation '{}': {}",
-                        style("[TODO]").yellow(),
-                        style(&validation.id).bold(),
-                        expr
-                    );
-                    if !desc.is_empty() {
-                        println!("    {}", style(desc).dim());
-                    }
-                }
-            }
-        }
-        "simplicity_hl" | "simplicityhl" => {
-            println!(
-                "  {} SimplicityHL validation '{}'",
-                style("[TODO]").yellow(),
-                style(&validation.id).bold()
-            );
-            if !desc.is_empty() {
-                println!("    {}", style(desc).dim());
-            }
-        }
-        "utxo_exists" => {
-            let utxo_type = validation.rule.utxo_type.as_deref().unwrap_or("[unknown]");
-            println!(
-                "  {} utxo_exists '{}': checking for utxo_type '{}'",
-                style("[TODO]").yellow(),
-                style(&validation.id).bold(),
-                style(utxo_type).cyan()
-            );
-        }
-        other => {
-            println!(
-                "  {} Unknown validation type '{}' for '{}'",
-                style("[warn]").yellow(),
-                other,
-                validation.id
-            );
-        }
-    }
-
-    let _ = manifest;
-    Ok(())
-}
 
 /// Broadcast a finalized transaction through the configured backend, returning the
 /// txid on success. Esplora uses a direct HTTP `POST /tx`; Electrum goes through the
@@ -3591,54 +2770,72 @@ fn broadcast_finalized_tx(
 
 /// Extract a human-readable message from a validation's `error` field, which may be
 /// a bare string or a `{"code": ..., "message": ...}` object.
-fn validation_error_message(validation: &Validation) -> Option<String> {
-    match validation.error.as_ref()? {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Object(m) => {
-            m.get("message").and_then(|v| v.as_str()).map(String::from)
-        }
-        _ => None,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Method-level hook execution
 // ---------------------------------------------------------------------------
 
-/// Execute a `HookBlock` (on_pre_broadcast / on_post_broadcast) against the
-/// current execution context.  Setter targets use dot-path notation:
-///   `"params.FOO"`    → ctx.set_param
-///   `"instance.FOO"`  → ctx.set_compile_param (deprecated alias: `"compile_params.FOO"`)
-///   `"args.FOO"`      → ctx.set_arg
+/// Execute one hook block: evaluate each `set` value and write it to its target.
+///
+/// Serves every hook position. `input_id` is `Some` for an input's `on_resolved`,
+/// which enables the two self-referential keywords `asset` and `reissuance_token`.
+///
+/// Only the expression forms of [`ComputeSpec`] are evaluated here; `validate`
+/// rejects the others in hook position, so reaching one at run time means the
+/// manifest was not validated.
 fn run_hook_block(
     hook: &crate::manifest::HookBlock,
     ctx: &mut ExecutionContext,
     label: &str,
+    input_id: Option<&str>,
 ) {
-    for (target, formula) in &hook.set {
-        let value = match eval::eval_expr_str(formula, ctx) {
-            Ok(v) => v,
-            Err(_) => {
-                println!(
-                    "  {} hook set '{}' = '{}' — could not evaluate.",
-                    style("[warn]").yellow(), target, formula
-                );
-                continue;
-            }
+    for (target, spec) in &hook.set {
+        let Some(expr) = spec.as_expr() else {
+            println!(
+                "  {} hook set '{}' — only expression values run in a hook; \
+                 tapleaf/simf_fn/wallet are rejected by `validate`.",
+                style("[warn]").yellow(), target
+            );
+            continue;
         };
+
+        // Within an input's own on_resolved, `asset` and `reissuance_token` resolve
+        // to that input's computed issuance attrs, falling back to its UTXO fields.
+        let value: Option<String> = match (input_id, expr.trim()) {
+            (Some(id), "asset") => ctx
+                .get_input_attr(id, "asset")
+                .map(str::to_string)
+                .or_else(|| ctx.get_input(id).map(|r| r.asset.clone())),
+            (Some(id), "reissuance_token") => {
+                ctx.get_input_attr(id, "reissuance_token").map(str::to_string)
+            }
+            _ => eval::eval_expr_str(expr, ctx).ok(),
+        };
+
+        let Some(v) = value else {
+            println!(
+                "  {} hook set '{}' = '{}' — could not evaluate.",
+                style("[warn]").yellow(), target, expr
+            );
+            continue;
+        };
+
         if let Some(name) = target
             .strip_prefix("instance.")
             .or_else(|| target.strip_prefix("compile_params."))
         {
-            ctx.set_compile_param(name, &value);
+            ctx.set_compile_param(name, &v);
         } else if let Some(name) = target.strip_prefix("params.") {
-            ctx.set_param(name, &value);
-        } else if let Some(name) = target.strip_prefix("args.") {
-            ctx.set_arg(name, &value);
+            ctx.set_param(name, &v);
         } else {
-            ctx.set_param(target, &value);
+            println!(
+                "  {} hook set '{}' — unknown namespace (expected instance./params.).",
+                style("[warn]").yellow(), target
+            );
+            continue;
         }
-        let short = &value[..value.len().min(24)];
+
+        let short = &v[..v.len().min(24)];
         println!(
             "  {} {} = {}…  {}",
             style("✓").green(),
@@ -3728,7 +2925,7 @@ fn eval_create_instance_fields(
     verbose: bool,
     include_debug_symbols: bool,
 ) -> std::collections::HashMap<String, String> {
-    use crate::manifest::FieldValue;
+    use crate::manifest::ComputeSpec;
 
     let mut fields: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     // Track which field names still need evaluation; start with all of them.
@@ -3749,7 +2946,7 @@ fn eval_create_instance_fields(
             let field_value = &ci.fields[*field_name];
 
             let value: Option<String> = match field_value {
-                FieldValue::Expr(expr) => {
+                ComputeSpec::Expr(expr) => {
                     // $params.X / $instance.X → direct lookup; other → eval_expr_str
                     expr
                         .strip_prefix("$params.")
@@ -3762,7 +2959,7 @@ fn eval_create_instance_fields(
                         })
                         .or_else(|| eval::eval_expr_str(expr, ctx).ok())
                 }
-                FieldValue::Compute(compute) => {
+                ComputeSpec::Compute(compute) => {
                     match compute {
                         crate::manifest::ParamCompute::Tapleaf { simf, params, depends_on, extra_leaves } => {
                             // Build simf_params: if params is empty use depends_on (or all ctx params)
@@ -3872,6 +3069,16 @@ fn eval_create_instance_fields(
                         }
                         crate::manifest::ParamCompute::SimfFn { .. } => {
                             // SimfFn is only valid on action params, not create_instance fields.
+                            None
+                        }
+                        crate::manifest::ParamCompute::Wallet { .. } => {
+                            // Wallet-derived values are resolved for action params in Step 1;
+                            // an instance field must be reproducible from the manifest, so a
+                            // constructor writes the already-resolved param, not the source.
+                            println!(
+                                "  {} create_instance field '{}' cannot compute from the wallet —                                  reference the resolved param instead (e.g. \"$params.NAME\").",
+                                style("[error]").red(), field_name
+                            );
                             None
                         }
                     }
@@ -4009,7 +3216,7 @@ pub fn run_headless(
         Some(&params_path),
         loaded_instance.as_ref(),
         instance_path,          // instance_in_path
-        instance_path,          // instance_out_path (read-only methods; unused)
+        instance_path,          // instance_out_path (read-only actions; unused)
         Some(&state_path),      // state_in_path
         Some(&state_path),      // state_out_path
         &std::collections::HashMap::new(), // provided_inputs (none in headless)
@@ -4045,7 +3252,7 @@ pub fn run_headless(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use crate::manifest::{FieldValue, InstanceCreate};
+    use crate::manifest::{ComputeSpec, InstanceCreate};
 
     #[test]
     fn outpoint_override_parses_txid_vout() {
@@ -4078,7 +3285,7 @@ mod tests {
     fn wallet_key_action_param_overwrites_stale_compile_param() {
         let mut ctx = ExecutionContext::new();
 
-        // Simulate class-fields loading from a previous instance file.
+        // Simulate template-fields loading from a previous instance file.
         ctx.set_compile_param("BORROWER_PUB_KEY", "1d4c354f5f91613f50ba8f59361bc5fb0d0e01fbb90495b7fbfc744e8f5d2253");
 
         // Simulate the fixed action-params handler: both writes now happen.
@@ -4232,12 +3439,9 @@ mod tests {
         let mut fields = BTreeMap::new();
         fields.insert(
             "MY_KEY".to_string(),
-            FieldValue::Expr("$params.MY_KEY".to_string()),
+            ComputeSpec::Expr("$params.MY_KEY".to_string()),
         );
-        let ci = InstanceCreate {
-            class: "test".to_string(),
-            fields,
-        };
+        let ci = InstanceCreate { fields };
 
         let result = eval_create_instance_fields(
             &ci,
@@ -4269,12 +3473,12 @@ mod tests {
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../examples/lending_v3/txmanifest.json");
         let raw = std::fs::read_to_string(&manifest_path).expect("read lending_v3 manifest");
-        let manifest: Manifest = serde_json::from_str(&raw).expect("parse lending_v3 manifest");
+        let manifest: Manifest = Manifest::from_json_str(&raw).expect("parse lending_v3 manifest");
         let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
 
         let (_class, _class_def, action) = manifest
-            .find_class_and_method("CreateOffer")
-            .expect("CreateOffer method exists");
+            .find_template_action("CreateOffer")
+            .expect("CreateOffer action exists");
         let ci = action.create_instance.as_ref().expect("CreateOffer has create_instance");
 
         // Live offer 43ab4efe parameters (same as examples/lending_recon.rs).
@@ -4304,10 +3508,10 @@ mod tests {
         ctx.set_compile_param("BORROWER_NFT_ASSET_ID", borrower_nft);
         ctx.set_compile_param("LENDER_NFT_ASSET_ID", lender_nft);
 
-        // Type hints from the class field + method param declarations.
+        // Type hints from the template field + action param declarations.
         let mut hints: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        if let Some((_, class_def, _)) = manifest.find_class_and_method("CreateOffer") {
-            for (fname, fdef) in &class_def.fields {
+        if let Some((_, template_def, _)) = manifest.find_template_action("CreateOffer") {
+            for (fname, fdef) in &template_def.fields {
                 hints.insert(fname.clone(), fdef.type_.clone());
             }
         }
@@ -4468,12 +3672,12 @@ mod tests {
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../examples/lending_v3/txmanifest.json");
         let raw = std::fs::read_to_string(&manifest_path).expect("read lending_v3 manifest");
-        let manifest: Manifest = serde_json::from_str(&raw).expect("parse lending_v3 manifest");
+        let manifest: Manifest = Manifest::from_json_str(&raw).expect("parse lending_v3 manifest");
         let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
 
         let (_class, _class_def, create) = manifest
-            .find_class_and_method("CreateOffer")
-            .expect("CreateOffer method exists");
+            .find_template_action("CreateOffer")
+            .expect("CreateOffer action exists");
         let ci = create.create_instance.as_ref().expect("CreateOffer has create_instance");
 
         // Same live-offer 43ab4efe parameters as the out[5] reproduction test, so the vault
@@ -4493,8 +3697,8 @@ mod tests {
         ctx.set_compile_param("LENDER_NFT_ASSET_ID", "213462821a5cdb96f435f5ea6597e8937359d6fd5a64b6ac8ef4262bc279fcfb");
 
         let mut hints: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        if let Some((_, class_def, _)) = manifest.find_class_and_method("CreateOffer") {
-            for (fname, fdef) in &class_def.fields {
+        if let Some((_, template_def, _)) = manifest.find_template_action("CreateOffer") {
+            for (fname, fdef) in &template_def.fields {
                 hints.insert(fname.clone(), fdef.type_.clone());
             }
         }
@@ -4550,10 +3754,15 @@ mod tests {
         //   protocol_fee  = 1000 * 1000/10000        =  100   (10% of the interest)
         //   lender share  = CURRENT_DEBT(2000) - 100 = 1900
         // Sum must be exactly the debt — the covenant's split_repayment_by_fees leaves no dust.
-        let (_, _, repay) = manifest.find_class_and_method("RepayLoan").expect("RepayLoan method exists");
+        let (_, _, repay) = manifest.find_template_action("RepayLoan").expect("RepayLoan action exists");
         let rp = repay.params.as_ref().expect("RepayLoan has params");
-        let formula_of = |name: &str| rp.get(name).and_then(|p| p.formula.clone())
-            .unwrap_or_else(|| panic!("{name} has a formula"));
+        let formula_of = |name: &str| {
+            rp.get(name)
+                .and_then(|p| p.compute.as_ref())
+                .and_then(|c| c.as_expr())
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("{name} has a compute expression"))
+        };
         let protocol_fee = crate::eval::eval_expr_str(&formula_of("TOTAL_PROTOCOL_FEE"), &ctx)
             .expect("TOTAL_PROTOCOL_FEE evaluates");
         let lender_amount = crate::eval::eval_expr_str(&formula_of("LENDER_VAULT_AMOUNT"), &ctx)
@@ -4625,11 +3834,11 @@ mod tests {
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../examples/dex/txmanifest.json");
         let raw = std::fs::read_to_string(&manifest_path).expect("read dex manifest");
-        let manifest: Manifest = serde_json::from_str(&raw).expect("parse dex manifest");
+        let manifest: Manifest = Manifest::from_json_str(&raw).expect("parse dex manifest");
         let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
 
-        let (_class, class_def, action) = manifest
-            .find_class_and_method("MakeOffer")
+        let (_class, template_def, action) = manifest
+            .find_template_action("MakeOffer")
             .expect("MakeOffer method exists");
         let ci = action.create_instance.as_ref().expect("MakeOffer has create_instance");
 
@@ -4650,9 +3859,9 @@ mod tests {
         ctx.set_param("TIMEOUT", "2000000");
         ctx.set_param("MAX_FEE", "5000");
 
-        // Type hints from the class field + method param declarations (mirrors Step 7's pre-pass).
+        // Type hints from the template field + method param declarations (mirrors Step 7's pre-pass).
         let mut hints: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        for (fname, fdef) in &class_def.fields {
+        for (fname, fdef) in &template_def.fields {
             hints.insert(fname.clone(), fdef.type_.clone());
         }
         if let Some(params) = &action.params {

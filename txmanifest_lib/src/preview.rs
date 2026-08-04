@@ -3,7 +3,7 @@
 //! Renders three confirmation screens from the manifest's author-supplied `ui`
 //! metadata, right before the broadcast prompt:
 //!
-//!   1. **Review action** — the one-line intent (`action.ui.action`), with
+//!   1. **Review action** — the one-line intent (`action.intent`), with
 //!      `{ref}` / `{ref:symbol}` interpolation against the execution context.
 //!   2. **Net effect** — the bottom line: what your wallet actually gains or
 //!      loses, netted per asset. Assets that merely round-trip (an auth NFT
@@ -221,7 +221,7 @@ pub fn render_preview(
     wallet: Option<&WalletDelta>,
 ) {
     // -- Screen 1 — what this action does --------------------------------
-    if let Some(summary) = action.ui.as_ref().and_then(|u| u.action.as_deref()) {
+    if let Some(summary) = action.intent.as_deref() {
         println!();
         println!("{}", style("=== Review action ===").bold().cyan());
         println!("  {}", style(interpolate(summary, ctx)).bold());
@@ -601,23 +601,31 @@ fn output_amount(output: &Output, ctx: &ExecutionContext) -> Option<(u64, String
 
 // -- labels -------------------------------------------------------------
 
+/// The signer-facing label for an input.
+///
+/// `ui.label` is the **only** source. `description` is deliberately not a fallback:
+/// it is developer prose (median 60 chars, 38% over 80, longest 1193 in this repo's
+/// own examples) and dumping it into a one-line net-effect row wrecks the display.
+/// More importantly, `description` is excluded from the manifest's registry hash so
+/// it can be edited without re-signing — which means it must never appear on a
+/// screen the user reads before authorising a transaction. Legs with no `ui.label`
+/// fall back to their `id`, which `validate` flags.
 fn input_label(input: &Input) -> String {
     input
         .ui
         .as_ref()
         .and_then(|u| u.label())
-        .or(input.description.as_deref())
         .unwrap_or(&input.id)
         .to_string()
 }
 
-/// The output's label without any "(if any)" suffix.
+/// The output's label without any "(if any)" suffix. See [`input_label`] for why
+/// `description` is not a fallback.
 fn output_base_label(output: &Output) -> String {
     output
         .ui
         .as_ref()
         .and_then(|u| u.label())
-        .or(output.description.as_deref())
         .unwrap_or(&output.id)
         .to_string()
 }
@@ -671,7 +679,7 @@ mod tests {
     /// with its instance values.
     fn create_offer_ctx() -> (Manifest, ExecutionContext) {
         let src = include_str!("../../examples/lending_v3/txmanifest.json");
-        let manifest: Manifest = serde_json::from_str(src).expect("parse example manifest");
+        let manifest: Manifest = Manifest::from_json_str(src).expect("parse example manifest");
         let mut ctx = ExecutionContext::new();
         for (k, v) in [
             ("PRINCIPAL_AMOUNT", "1000"),
@@ -689,49 +697,11 @@ mod tests {
 
     fn create_offer(manifest: &Manifest) -> &Action {
         manifest
-            .classes
+            .contract_templates
             .as_ref()
             .and_then(|c| c.get("lending_contract"))
-            .and_then(|c| c.methods.get("CreateOffer"))
+            .and_then(|c| c.actions.get("CreateOffer"))
             .expect("CreateOffer method")
-    }
-
-    /// Every leg of every lending_v3 method must carry a `ui.label` and a `ui.role`.
-    ///
-    /// Without them the run flow identifies an input only by its manifest id — `active_offer_in`
-    /// tells a signer nothing about what is being spent. This guards the whole surface rather
-    /// than one action, so a leg added later cannot quietly ship label-less.
-    #[test]
-    fn every_lending_v3_leg_declares_a_label_and_role() {
-        let src = include_str!("../../examples/lending_v3/txmanifest.json");
-        let manifest: Manifest = serde_json::from_str(src).expect("parse example manifest");
-
-        let mut missing: Vec<String> = Vec::new();
-        for (cname, class) in manifest.classes.as_ref().expect("classes") {
-            for (mname, method) in &class.methods {
-                // A one-line summary of intent, shown as the first clear-signing screen.
-                if method.ui.as_ref().and_then(|u| u.action.as_deref()).is_none() {
-                    missing.push(format!("{cname}.{mname}: no ui.action summary"));
-                }
-                for i in method.inputs.iter().flatten() {
-                    if i.ui_label().is_none() {
-                        missing.push(format!("{cname}.{mname}.inputs.{}: no ui.label", i.id));
-                    }
-                    if i.ui_role().is_none() {
-                        missing.push(format!("{cname}.{mname}.inputs.{}: no ui.role", i.id));
-                    }
-                }
-                for o in method.outputs.iter().flatten() {
-                    if o.ui_label().is_none() {
-                        missing.push(format!("{cname}.{mname}.outputs.{}: no ui.label", o.id));
-                    }
-                    if o.ui_role().is_none() {
-                        missing.push(format!("{cname}.{mname}.outputs.{}: no ui.role", o.id));
-                    }
-                }
-            }
-        }
-        assert!(missing.is_empty(), "lending_v3 legs missing UI descriptors:\n  {}", missing.join("\n  "));
     }
 
     /// The role is the machine-readable half of the hint and was declared-but-never-read until
@@ -755,7 +725,7 @@ mod tests {
     fn interpolates_action_summary_with_symbols() {
         let (manifest, ctx) = create_offer_ctx();
         let action = create_offer(&manifest);
-        let template = action.ui.as_ref().unwrap().action.as_ref().unwrap();
+        let template = action.intent.as_ref().unwrap();
         let rendered = interpolate(template, &ctx);
         assert_eq!(
             rendered,
@@ -872,7 +842,7 @@ mod tests {
     fn wallet_nets_omit_round_trips_and_keep_real_movement() {
         use crate::context::ResolvedInput;
         let src = include_str!("../../examples/lending_v3/txmanifest.json");
-        let manifest: Manifest = serde_json::from_str(src).unwrap();
+        let manifest: Manifest = Manifest::from_json_str(src).unwrap();
         let mut ctx = ExecutionContext::new();
         for (k, v) in [
             ("PRINCIPAL_AMOUNT", "1000"),
@@ -891,8 +861,8 @@ mod tests {
                 amount_sat: amount, asset: asset.into(), issuance_entropy: None,
             });
         }
-        let action = manifest.classes.as_ref().unwrap().get("lending_contract").unwrap()
-            .methods.get("ClaimPrincipal").unwrap();
+        let action = manifest.contract_templates.as_ref().unwrap().get("lending_contract").unwrap()
+            .actions.get("ClaimPrincipal").unwrap();
         let buckets = build_net_effect(action, &ctx, Some(195));
         let nets = wallet_nets(&buckets, None);
 

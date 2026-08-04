@@ -1,7 +1,7 @@
 {
+  "$schema": "../../schema/txmanifest.schema.json",
   "$comment": "Ported from Mosaik's tessera.simf (github.com/kaleidoswap/mosaik, crates/tessera/contracts/tessera.simf). Upstream substitutes the four offer terms as inline TESSERA_PARAM literals; here they are ordinary compile params. Change tessera.simf and every offer address changes — the terms live in the tapleaf. NOTE: the Refund method is not executable until upnext/12 (absolute nLockTime) lands; see its description.",
   "manifest_version": "0.1.0",
-  "attestation_version": "1",
   "protocol": "tessera-dex",
   "description": "Tessera — a keyless atomic swap offer on Liquid, the primitive a Mosaik DEX is built from. One UTXO is one all-or-nothing offer: it holds asset A and is spendable by ANYONE who pays AMOUNT_B of ASSET_B to the maker (Settle), or, after TIMEOUT, by anyone who returns asset A to the maker (Refund). No signature on either path — the covenant is pure transaction introspection, and the maker is identified only by a scriptPubKey hash. Modelled as a class: one instance per offer.",
   "chain": "liquid",
@@ -35,7 +35,7 @@
       "confidential": false
     }
   },
-  "classes": {
+  "contract_templates": {
     "tessera_offer_contract": {
       "description": "One Tessera swap offer. Created by MakeOffer, then consumed by exactly one of Settle (a taker fills it) or Refund (it expired). ClaimPayout is the maker's follow-up sweep of their proceeds.",
       "fields": {
@@ -72,13 +72,10 @@
           "description": "Most a refund sweep may skim from the returned asset to pay the network fee."
         }
       },
-      "methods": {
+      "actions": {
         "MakeOffer": {
-          "is_constructor": true,
           "description": "Publish an offer: lock asset A into the Tessera covenant and write the instance file recording the terms. From here the offer is live and anyone may fill it — no further action from the maker.",
-          "ui": {
-            "action": "publish a swap offer: {params.OFFER_AMOUNT} of {params.OFFER_ASSET_ID:symbol} for {params.AMOUNT_B} of {params.ASSET_B:symbol}"
-          },
+          "intent": "publish a swap offer: {params.OFFER_AMOUNT} of {params.OFFER_ASSET_ID:symbol} for {params.AMOUNT_B} of {params.ASSET_B:symbol}",
           "params": {
             "OFFER_ASSET_ID": {
               "type": "liquid.asset_id",
@@ -174,43 +171,7 @@
               }
             }
           ],
-          "validations": [
-            {
-              "id": "offer_amount_nonzero",
-              "rule": {
-                "type": "arithmetic",
-                "expr": "params.OFFER_AMOUNT > 0"
-              },
-              "error": {
-                "code": "INVALID_AMOUNT",
-                "message": "Offer amount must be greater than zero"
-              }
-            },
-            {
-              "id": "price_nonzero",
-              "rule": {
-                "type": "arithmetic",
-                "expr": "params.AMOUNT_B > 0"
-              },
-              "error": {
-                "code": "INVALID_PRICE",
-                "message": "Asked amount must be greater than zero"
-              }
-            },
-            {
-              "id": "assets_differ",
-              "rule": {
-                "type": "arithmetic",
-                "expr": "params.OFFER_ASSET_ID != params.ASSET_B"
-              },
-              "error": {
-                "code": "INVALID_PAIR",
-                "message": "Cannot swap an asset for itself"
-              }
-            }
-          ],
           "create_instance": {
-            "class": "tessera_offer_contract",
             "fields": {
               "OFFER_ASSET_ID": "$params.OFFER_ASSET_ID",
               "OFFER_AMOUNT": "$params.OFFER_AMOUNT",
@@ -220,7 +181,7 @@
               "TIMEOUT": "$params.TIMEOUT",
               "MAX_FEE": "$params.MAX_FEE",
               "MAKER_SPK": {
-                "compute": "tapleaf",
+                "type": "tapleaf",
                 "simf": "./maker_payout.simf",
                 "params": {
                   "PUB_KEY": {
@@ -234,9 +195,7 @@
         },
         "Settle": {
           "description": "Fill the offer: pay the maker AMOUNT_B of asset B and take asset A. Permissionless — anyone holding asset B can run this, the covenant carries no signature and does not care who you are. It only checks that output 0 pays exactly AMOUNT_B of ASSET_B to MAKER_SPK.",
-          "ui": {
-            "action": "fill the offer: pay {instance.AMOUNT_B} of {instance.ASSET_B:symbol} and take {instance.OFFER_AMOUNT} of {instance.OFFER_ASSET_ID:symbol}"
-          },
+          "intent": "fill the offer: pay {instance.AMOUNT_B} of {instance.ASSET_B:symbol} and take {instance.OFFER_AMOUNT} of {instance.OFFER_ASSET_ID:symbol}",
           "inputs": [
             {
               "id": "offer_in",
@@ -337,9 +296,7 @@
         },
         "Refund": {
           "description": "Sweep an expired offer back to the maker. Permissionless and keyless like Settle: after TIMEOUT anyone may run this, but the covenant forces the asset back to MAKER_SPK, so a stranger's only power is to pay the fee on the maker's behalf (or, at worst, burn MAX_FEE). NOT EXECUTABLE YET: the refund path calls jet::check_lock_height(TIMEOUT), an absolute CLTV, and the engine cannot set a transaction nLockTime — see meta/tasks/upnext/12-engine-absolute-locktime.md. Same limitation as the lending example's liquidation path. Modelled here so the covenant's second path is documented and ready once task 12 lands; the sequence below already enables locktime.",
-          "ui": {
-            "action": "refund the expired offer: return {instance.OFFER_AMOUNT} of {instance.OFFER_ASSET_ID:symbol} to the maker"
-          },
+          "intent": "refund the expired offer: return {instance.OFFER_AMOUNT} of {instance.OFFER_ASSET_ID:symbol} to the maker",
           "inputs": [
             {
               "id": "offer_in",
@@ -405,9 +362,7 @@
         },
         "ClaimPayout": {
           "description": "The maker sweeps their proceeds out of the payout covenant into their wallet. Run this after a taker settles the offer. Unlike every other method here, this one is a plain signature check — the swap is already over.",
-          "ui": {
-            "action": "sweep your swap proceeds into your wallet"
-          },
+          "intent": "sweep your swap proceeds into your wallet",
           "inputs": [
             {
               "id": "payout_in",

@@ -1,8 +1,8 @@
 //! Interactive explorer for a manifest file.
 //!
-//! `describe` presents a menu of the contract's classes and actions so you can
-//! drill into any one and see its params, inputs, outputs, witnesses, and
-//! validations without reading the raw JSON. When stdout is not a terminal
+//! `describe` presents a menu of the contract's templates and actions so you can
+//! drill into any one and see its params, inputs, outputs, and witnesses
+//! without reading the raw JSON. When stdout is not a terminal
 //! (e.g. piped to a file), it prints a full non-interactive dump instead.
 
 use anyhow::Result;
@@ -12,12 +12,12 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::manifest::{
-    Action, ClassDef, Manifest, InstanceCreate, Input, Output, ParamDef, Validation,
+    Action, ContractTemplate, Manifest, InstanceCreate, Input, Output, ParamDef,
 };
 
 /// Entry point: explore the contract interactively, or dump it if non-interactive.
 ///
-/// When `action` names a standalone action or a class method, its docs are printed
+/// When `action` names a standalone action or a template action, its docs are printed
 /// directly and no menu is shown.
 pub fn describe(manifest: &Manifest, action: Option<&str>) -> Result<()> {
     if let Some(name) = action {
@@ -29,21 +29,21 @@ pub fn describe(manifest: &Manifest, action: Option<&str>) -> Result<()> {
     main_menu(manifest)
 }
 
-/// Print one action's docs: a standalone action, or a `Class.method`.
+/// Print one action's docs: a standalone action, or a `Template.action`.
 fn describe_action(manifest: &Manifest, name: &str) -> Result<()> {
     if let Some(action) = manifest.actions.get(name) {
         print_action(name, action);
         return Ok(());
     }
-    if let Some((class_id, _class_def, method)) = manifest.find_class_and_method(name) {
-        print_action(&format!("{class_id}.{name}"), method);
+    if let Some((template_id, _template_def, action)) = manifest.find_template_action(name) {
+        print_action(&format!("{template_id}.{name}"), action);
         return Ok(());
     }
 
     let mut available: Vec<String> = manifest.actions.keys().cloned().collect();
-    if let Some(classes) = &manifest.classes {
-        for (class_id, cls) in classes {
-            available.extend(cls.methods.keys().map(|m| format!("{class_id}.{m}")));
+    if let Some(contract_templates) = &manifest.contract_templates {
+        for (template_id, cls) in contract_templates {
+            available.extend(cls.actions.keys().map(|m| format!("{template_id}.{m}")));
         }
     }
     anyhow::bail!(
@@ -55,7 +55,7 @@ fn describe_action(manifest: &Manifest, name: &str) -> Result<()> {
 /// What a top-level menu entry maps to.
 enum Target {
     Overview,
-    Class(String),
+    Template(String),
     Action(String),
     Quit,
 }
@@ -68,10 +68,10 @@ fn main_menu(manifest: &Manifest) -> Result<()> {
         labels.push("Overview".to_string());
         targets.push(Target::Overview);
 
-        if let Some(classes) = &manifest.classes {
-            for (cname, cdef) in classes {
-                labels.push(format!("class   {cname}  ({} methods)", cdef.methods.len()));
-                targets.push(Target::Class(cname.clone()));
+        if let Some(contract_templates) = &manifest.contract_templates {
+            for (cname, cdef) in contract_templates {
+                labels.push(format!("template  {cname}  ({} actions)", cdef.actions.len()));
+                targets.push(Target::Template(cname.clone()));
             }
         }
         for aname in manifest.actions.keys() {
@@ -91,7 +91,7 @@ fn main_menu(manifest: &Manifest) -> Result<()> {
         let Some(idx) = selection else { break };
         match &targets[idx] {
             Target::Overview => print_overview(manifest),
-            Target::Class(name) => class_menu(manifest, name)?,
+            Target::Template(name) => template_menu(manifest, name)?,
             Target::Action(name) => {
                 if let Some(action) = manifest.actions.get(name) {
                     print_action(name, action);
@@ -103,34 +103,34 @@ fn main_menu(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn class_menu(manifest: &Manifest, class_name: &str) -> Result<()> {
-    let class = match manifest.classes.as_ref().and_then(|c| c.get(class_name)) {
+fn template_menu(manifest: &Manifest, template_name: &str) -> Result<()> {
+    let template = match manifest.contract_templates.as_ref().and_then(|c| c.get(template_name)) {
         Some(c) => c,
         None => return Ok(()),
     };
-    print_class_header(class_name, class);
+    print_template_header(template_name, template);
 
     loop {
         let mut labels: Vec<String> = Vec::new();
-        let method_names: Vec<&String> = class.methods.keys().collect();
-        for mname in &method_names {
-            labels.push(format!("method  {mname}"));
+        let action_names: Vec<&String> = template.actions.keys().collect();
+        for aname in &action_names {
+            labels.push(format!("action  {aname}"));
         }
         labels.push("← Back".to_string());
 
         let selection = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt(format!("class {class_name}"))
+            .with_prompt(format!("template {template_name}"))
             .items(&labels)
             .default(0)
             .interact_opt()?;
 
         let Some(idx) = selection else { break };
-        if idx == method_names.len() {
+        if idx == action_names.len() {
             break; // "← Back"
         }
-        let mname = method_names[idx];
-        if let Some(method) = class.methods.get(mname) {
-            print_action(&format!("{class_name}.{mname}"), method);
+        let aname = action_names[idx];
+        if let Some(action) = template.actions.get(aname) {
+            print_action(&format!("{template_name}.{aname}"), action);
         }
     }
     Ok(())
@@ -139,11 +139,11 @@ fn class_menu(manifest: &Manifest, class_name: &str) -> Result<()> {
 /// Full non-interactive listing (used when stdout is not a TTY).
 fn dump_all(manifest: &Manifest) -> Result<()> {
     print_overview(manifest);
-    if let Some(classes) = &manifest.classes {
-        for (cname, cdef) in classes {
-            print_class_header(cname, cdef);
-            for (mname, method) in &cdef.methods {
-                print_action(&format!("{cname}.{mname}"), method);
+    if let Some(contract_templates) = &manifest.contract_templates {
+        for (cname, cdef) in contract_templates {
+            print_template_header(cname, cdef);
+            for (aname, action) in &cdef.actions {
+                print_action(&format!("{cname}.{aname}"), action);
             }
         }
     }
@@ -167,17 +167,6 @@ fn print_overview(manifest: &Manifest) {
     println!("  chain    : {}", manifest.chain.as_deref().unwrap_or("elements (default)"));
     println!("  version  : {}", manifest.manifest_version);
 
-    let (user, derived) = manifest.compile_param_sets();
-    if !user.is_empty() || !derived.is_empty() {
-        println!("  {}", style("Compile params").bold());
-        for (name, def) in &user {
-            println!("    {} : {}", style(name).green(), def.type_);
-        }
-        for (name, def) in &derived {
-            println!("    {} : {} {}", style(name).green(), def.type_, style("(derived)").dim());
-        }
-    }
-
     if let Some(utxo_types) = &manifest.utxo_types {
         if !utxo_types.is_empty() {
             println!("  {}", style("UTXO types").bold());
@@ -187,42 +176,33 @@ fn print_overview(manifest: &Manifest) {
         }
     }
 
-    if let Some(classes) = &manifest.classes {
-        if !classes.is_empty() {
-            let names: Vec<&str> = classes.keys().map(String::as_str).collect();
-            println!("  {}: {}", style("Classes").bold(), names.join(", "));
+    if let Some(contract_templates) = &manifest.contract_templates {
+        if !contract_templates.is_empty() {
+            let names: Vec<&str> = contract_templates.keys().map(String::as_str).collect();
+            println!("  {}: {}", style("Contract templates").bold(), names.join(", "));
         }
     }
     if !manifest.actions.is_empty() {
         let names: Vec<&str> = manifest.actions.keys().map(String::as_str).collect();
         println!("  {}: {}", style("Standalone actions").bold(), names.join(", "));
     }
-
-    if let Some(lifecycle) = &manifest.lifecycle {
-        if let Some(states) = lifecycle.get("states").and_then(Value::as_array) {
-            let s: Vec<String> = states.iter().filter_map(|v| v.as_str().map(String::from)).collect();
-            if !s.is_empty() {
-                println!("  {}: {}", style("Lifecycle states").bold(), s.join(" → "));
-            }
-        }
-    }
 }
 
-fn print_class_header(name: &str, class: &ClassDef) {
+fn print_template_header(name: &str, template: &ContractTemplate) {
     println!();
-    println!("{}", style(format!("══ class {name}")).bold().magenta());
-    if let Some(d) = &class.description {
+    println!("{}", style(format!("══ template {name}")).bold().magenta());
+    if let Some(d) = &template.description {
         println!("  {}", style(d).italic());
     }
-    if !class.fields.is_empty() {
+    if !template.fields.is_empty() {
         println!("  {}", style("Fields").bold());
-        for (fname, def) in &class.fields {
+        for (fname, def) in &template.fields {
             let desc = def.description.as_deref().map(|d| format!(" — {d}")).unwrap_or_default();
             let default = def.default.as_deref().map(|d| format!("  [default: {d}]")).unwrap_or_default();
             println!("    {} : {}{}{}", style(fname).green(), def.type_, style(desc).dim(), style(default).yellow());
         }
     }
-    println!("  {}: {}", style("Methods").bold(), class.methods.keys().cloned().collect::<Vec<_>>().join(", "));
+    println!("  {}: {}", style("Actions").bold(), template.actions.keys().cloned().collect::<Vec<_>>().join(", "));
 }
 
 fn print_action(title: &str, action: &Action) {
@@ -233,22 +213,16 @@ fn print_action(title: &str, action: &Action) {
     }
 
     let mut flags = Vec::new();
-    if action.is_constructor {
+    if action.create_instance.is_some() {
         flags.push("constructor");
-    }
-    if action.deploy {
-        flags.push("deploy");
     }
     if !flags.is_empty() {
         println!("  {}", style(format!("[{}]", flags.join(", "))).yellow());
     }
 
     print_param_map("Params", &action.params);
-    print_param_map("Args", &action.args);
     print_inputs(&action.inputs);
     print_outputs(&action.outputs);
-    print_witnesses("Witnesses", &action.witnesses);
-    print_validations(&action.validations);
     print_create_instance(&action.create_instance);
 }
 
@@ -260,11 +234,8 @@ fn print_param_map(label: &str, params: &Option<BTreeMap<String, ParamDef>>) {
     println!("  {}", style(label).bold());
     for (name, def) in params {
         let mut extra = String::new();
-        if def.derived.unwrap_or(false) {
-            extra.push_str(" (derived)");
-        }
-        if let Some(src) = &def.source {
-            extra.push_str(&format!(" [source: {}]", src.type_));
+        if def.compute.is_some() {
+            extra.push_str(" (computed)");
         }
         let desc = def.description.as_deref().map(|d| format!(" — {d}")).unwrap_or_default();
         println!("    {} : {}{}{}", style(name).green(), def.type_, style(extra).yellow(), style(desc).dim());
@@ -338,38 +309,9 @@ fn role_tag(role: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-fn print_witnesses(label: &str, witnesses: &Option<Value>) {
-    let Some(Value::Object(m)) = witnesses else { return };
-    if m.is_empty() {
-        return;
-    }
-    println!("  {}", style(label).bold());
-    for (name, spec) in m {
-        let ty = spec.get("type").and_then(Value::as_str).unwrap_or("?");
-        println!("    {} : {}", style(name).green(), ty);
-    }
-}
-
-fn print_validations(validations: &Option<Vec<Validation>>) {
-    let Some(validations) = validations else { return };
-    if validations.is_empty() {
-        return;
-    }
-    println!("  {}", style("Validations").bold());
-    for v in validations {
-        let detail = match v.rule.type_.as_str() {
-            "arithmetic" => v.rule.expr.clone().unwrap_or_default(),
-            "utxo_exists" => format!("utxo_type {}", v.rule.utxo_type.clone().unwrap_or_default()),
-            _ => String::new(),
-        };
-        println!("    {} [{}] {}", style(&v.id).green(), v.rule.type_, style(detail).dim());
-    }
-}
-
 fn print_create_instance(create_instance: &Option<InstanceCreate>) {
     let Some(ci) = create_instance else { return };
     println!("  {}", style("Creates instance").bold());
-    println!("    class: {}", style(&ci.class).green());
     let fields: Vec<&str> = ci.fields.keys().map(String::as_str).collect();
     if !fields.is_empty() {
         println!("    fields: {}", style(fields.join(", ")).dim());
