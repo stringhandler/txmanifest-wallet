@@ -411,6 +411,16 @@ fn resolve_ref(name: &str, ctx: &ExecutionContext) -> Option<String> {
             return Some(v.to_string());
         }
     }
+    // `inputs.<id>.<field>` — the explicit, unambiguous spelling. The bare
+    // `<id>.<field>` form below still works, but it collides with every other
+    // namespace: an input called `params` or `instance` would shadow one, and an
+    // input's own field name can never be told apart from a namespace by shape
+    // alone. Prefer this form in new manifests.
+    if let Some(rest) = name.strip_prefix("inputs.") {
+        let (input_id, field) = rest.split_once('.')?;
+        return resolve_input_field(input_id, field, ctx);
+    }
+
     // input_id.field  (e.g. "collateral.amount_sat", "yes_rt.reissuance_token")
     if let Some(dot) = name.rfind('.') {
         let input_id = &name[..dot];
@@ -431,6 +441,41 @@ fn resolve_ref(name: &str, ctx: &ExecutionContext) -> Option<String> {
         }
     }
     None
+}
+
+/// Resolve a `<input_id>.<field>` reference — the tail of an `inputs.` / `$inputs.` path.
+///
+/// Public so `create_instance` field expressions can take the same route: they need a
+/// STRING, and the ordinary expression evaluator returns a u64.
+pub fn resolve_input_ref(rest: &str, ctx: &ExecutionContext) -> Option<String> {
+    let (input_id, field) = rest.split_once('.')?;
+    resolve_input_field(input_id, field, ctx)
+}
+
+/// Resolve one field of a resolved input.
+///
+/// ⚠️ `asset` is the asset of the UTXO being **spent**. On an input that carries a new
+/// issuance those are two different things — a wallet L-BTC UTXO minting a new asset has
+/// `asset` = L-BTC — so the newly created ids are exposed under distinct names,
+/// `issued_asset` and `reissuance_token`, rather than shadowing `asset`. Getting this
+/// wrong is silent and expensive: it writes L-BTC's id into a field meant to hold the
+/// asset the transaction just created.
+///
+/// Available fields:
+///
+/// - `asset`            — asset id of the spent UTXO
+/// - `amount_sat`       — its value
+/// - `issued_asset`     — asset id created by this input's issuance, if any
+/// - `reissuance_token` — reissuance token id created by this input's issuance, if any
+fn resolve_input_field(input_id: &str, field: &str, ctx: &ExecutionContext) -> Option<String> {
+    if let Some(inp) = ctx.get_input(input_id) {
+        match field {
+            "amount_sat" => return Some(inp.amount_sat.to_string()),
+            "asset" => return Some(inp.asset.clone()),
+            _ => {}
+        }
+    }
+    ctx.get_input_attr(input_id, field).map(str::to_string)
 }
 
 // ---------------------------------------------------------------------------

@@ -92,9 +92,24 @@ so one action cannot both mint an asset and pay it to an address derived from th
 asset ids exist only for the length of that run unless something records them. You cannot
 recover them afterwards from what lands in the wallet, because the reissuance token id and
 the outcome asset id are sibling hashes of the same entropy (`SHA256(entropy ‖ 0x00)` and
-`SHA256(entropy ‖ 0x01)`) — holding one tells you nothing about the other. So the `on_resolved`
-hooks capture all four at the one moment they are derivable, and every later action reads
-them from the instance. `CreateMarket` consequently takes **no params at all**.
+`SHA256(entropy ‖ 0x01)`) — holding one tells you nothing about the other. So
+`create_instance` reads all four straight off the inputs that created them:
+
+```json
+"create_instance": { "fields": {
+  "YES_TOKEN_ASSET":      "$inputs.yes_defining_in.issued_asset",
+  "YES_REISSUANCE_TOKEN": "$inputs.yes_defining_in.reissuance_token"
+}}
+```
+
+`CreateMarket` consequently takes **no params at all** — everything comes from the instance.
+
+Two things about that spelling are worth knowing. `$inputs.<id>.<field>` is a *string*
+lookup; a bare expression goes through the arithmetic evaluator, which returns a `u64` and
+rejects a 32-byte id outright. And it is `issued_asset`, **not** `asset`: on an input
+carrying an issuance those are different values — `asset` is the asset of the UTXO being
+spent, which here is L-BTC. Writing `asset` would put L-BTC's id into `YES_TOKEN_ASSET`,
+and nothing downstream would object, because it is a perfectly well-formed asset id.
 
 Upstream Deadcat does both in one transaction (`pset/creation.rs`) because it computes the
 ids in Rust before building anything. The two-transaction bootstrap costs one extra fee and

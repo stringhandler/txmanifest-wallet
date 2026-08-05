@@ -373,6 +373,21 @@ pub fn run(
                         style(expr).yellow()
                     );
                 }
+                // Hook params are filled by an on_resolved / on_pre_broadcast block later in
+                // the run. Nothing to prompt for and nothing to evaluate yet — but a
+                // --params override still wins, so a value can be pinned for a dry run.
+                if def.compute.as_ref().is_some_and(|c| c.is_hook())
+                    && overrides.get(name.as_str()).is_none()
+                {
+                    println!(
+                        "  {} {}  {}",
+                        style("○").dim(),
+                        style(name.as_str()).cyan(),
+                        style("[will be set by a hook]").dim(),
+                    );
+                    continue;
+                }
+
                 // SimfFn params are computed after inputs resolve (Step 3a). Skip here unless
                 // an explicit override is provided via --params.
                 if def.compute.as_ref().is_some_and(|c| c.is_simf_fn())
@@ -603,6 +618,7 @@ pub fn run(
                         &resolved.txid, resolved.vout,
                     ) {
                         ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
+                        ctx.set_input_attr(&inp.id, "issued_asset", asset_id.to_string());
                         ctx.set_input_attr(&inp.id, "reissuance_token", token_id.to_string());
                     }
                 }
@@ -617,6 +633,7 @@ pub fn run(
                     if let Ok(entropy) = pset_builder::decode_entropy_hex(&entropy_hex) {
                         if let Ok(asset_id) = pset_builder::compute_asset_from_entropy(&entropy) {
                             ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
+                            ctx.set_input_attr(&inp.id, "issued_asset", asset_id.to_string());
                         }
                     }
                 }
@@ -898,6 +915,7 @@ pub fn run(
                             &resolved.txid, resolved.vout
                         ) {
                             ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
+                            ctx.set_input_attr(&inp.id, "issued_asset", asset_id.to_string());
                             ctx.set_input_attr(&inp.id, "reissuance_token", token_id.to_string());
                         }
                     }
@@ -912,6 +930,7 @@ pub fn run(
                         if let Ok(entropy) = pset_builder::decode_entropy_hex(&entropy_hex) {
                             if let Ok(asset_id) = pset_builder::compute_asset_from_entropy(&entropy) {
                                 ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
+                                ctx.set_input_attr(&inp.id, "issued_asset", asset_id.to_string());
                             }
                         }
                     }
@@ -1458,6 +1477,7 @@ pub fn run(
                             println!("      issuance_entropy  = {}", style(hex_bytes(entropy_bytes)).yellow());
                         }
                         ctx.set_input_attr(&iso.input_id, "asset", iso.asset_id.to_string());
+                        ctx.set_input_attr(&iso.input_id, "issued_asset", iso.asset_id.to_string());
                         ctx.set_input_attr(&iso.input_id, "reissuance_token", iso.token_id.to_string());
                         if let Some(entropy_bytes) = &iso.entropy {
                             let hex = entropy_bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
@@ -2957,15 +2977,24 @@ fn eval_create_instance_fields(
 
             let value: Option<String> = match field_value {
                 ComputeSpec::Expr(expr) => {
-                    // $params.X / $instance.X → direct lookup; other → eval_expr_str
+                    // `$`-prefixed forms are direct STRING lookups; everything else falls
+                    // through to eval_expr_str, which is arithmetic and returns a u64. That
+                    // is why a 32-byte id has to arrive by a `$` form: an asset id is not a
+                    // number, and the numeric path rejects it.
+                    //   $params.X / $instance.X          — a named value in the run context
+                    //   $inputs.<input_id>.<field>       — straight off a resolved input
                     expr
-                        .strip_prefix("$params.")
-                        .or_else(|| expr.strip_prefix("$instance."))
-                        .or_else(|| expr.strip_prefix("$compile_params."))
-                        .and_then(|name| {
-                            ctx.get_param(name)
-                                .or_else(|| ctx.get_compile_param(name))
-                                .map(str::to_string)
+                        .strip_prefix("$inputs.")
+                        .and_then(|rest| eval::resolve_input_ref(rest, ctx))
+                        .or_else(|| {
+                            expr.strip_prefix("$params.")
+                                .or_else(|| expr.strip_prefix("$instance."))
+                                .or_else(|| expr.strip_prefix("$compile_params."))
+                                .and_then(|name| {
+                                    ctx.get_param(name)
+                                        .or_else(|| ctx.get_compile_param(name))
+                                        .map(str::to_string)
+                                })
                         })
                         .or_else(|| eval::eval_expr_str(expr, ctx).ok())
                 }
@@ -3079,6 +3108,15 @@ fn eval_create_instance_fields(
                         }
                         crate::manifest::ParamCompute::SimfFn { .. } => {
                             // SimfFn is only valid on action params, not create_instance fields.
+                            None
+                        }
+                        crate::manifest::ParamCompute::Hook {} => {
+                            // A hook fills a PARAM, not an instance field. If a hook produced
+                            // this value, name the param it wrote: "$params.NAME".
+                            println!(
+                                "  {} create_instance field '{}' cannot be computed by a hook — reference the param the hook set (e.g. \"$params.NAME\"), or read the input directly (\"$inputs.<id>.issued_asset\").",
+                                style("[error]").red(), field_name
+                            );
                             None
                         }
                         crate::manifest::ParamCompute::Wallet { .. } => {
@@ -3434,6 +3472,81 @@ mod tests {
 
         assert_eq!(params.get("COUNT").map(String::as_str), Some("7"),
             "an unreferencing literal must pass through verbatim");
+    }
+
+    /// `$inputs.<id>.<field>` reads an instance field straight off a resolved input, with
+    /// no hook in between (examples/deadcat's constructor).
+    ///
+    /// The assertion that matters is `issued_asset` != `asset`. On an input carrying a new
+    /// issuance those are different things — the spent UTXO is L-BTC, the created asset is
+    /// not — and confusing them writes L-BTC's id into a field meant to hold the asset the
+    /// transaction just created. Nothing downstream would notice: it is a well-formed
+    /// 32-byte id, so the covenant addresses simply come out wrong.
+    #[test]
+    fn create_instance_reads_input_refs_and_distinguishes_issued_asset() {
+        const LBTC: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+        const ISSUED: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+        const TOKEN: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+
+        let mut ctx = ExecutionContext::new();
+        ctx.set_input(ResolvedInput {
+            id: "yes_defining_in".to_string(),
+            txid: "aa".repeat(32),
+            vout: 0,
+            amount_sat: 5_000,
+            asset: LBTC.to_string(),
+            issuance_entropy: None,
+        });
+        ctx.set_input_attr("yes_defining_in", "issued_asset", ISSUED);
+        ctx.set_input_attr("yes_defining_in", "reissuance_token", TOKEN);
+
+        let mut fields = BTreeMap::new();
+        for (name, expr) in [
+            ("YES_TOKEN_ASSET", "$inputs.yes_defining_in.issued_asset"),
+            ("YES_REISSUANCE_TOKEN", "$inputs.yes_defining_in.reissuance_token"),
+            ("SPENT_ASSET", "$inputs.yes_defining_in.asset"),
+        ] {
+            fields.insert(name.to_string(), ComputeSpec::Expr(expr.to_string()));
+        }
+        let ci = InstanceCreate { fields };
+
+        let result = eval_create_instance_fields(
+            &ci,
+            &ctx,
+            std::path::Path::new("/nonexistent"),
+            &std::collections::HashMap::new(),
+            lwk_wollet::ElementsNetwork::LiquidTestnet,
+            false,
+            false,
+        );
+
+        assert_eq!(result.get("YES_TOKEN_ASSET").map(String::as_str), Some(ISSUED));
+        assert_eq!(result.get("YES_REISSUANCE_TOKEN").map(String::as_str), Some(TOKEN));
+        assert_eq!(
+            result.get("SPENT_ASSET").map(String::as_str),
+            Some(LBTC),
+            "`asset` must stay the SPENT utxo's asset — if this ever aliases to the issued \
+             asset, every manifest using `.asset` on a funding input changes meaning",
+        );
+    }
+
+    /// A 32-byte id can only travel by a `$` form. The bare-expression path is arithmetic
+    /// (`eval_expr` returns u64), which is exactly why `$inputs.` had to be added rather
+    /// than relying on the existing evaluator.
+    #[test]
+    fn a_bare_input_expression_cannot_carry_an_asset_id() {
+        let mut ctx = ExecutionContext::new();
+        ctx.set_input_attr("in0", "issued_asset", &"22".repeat(32));
+
+        assert!(
+            eval::eval_expr_str("inputs.in0.issued_asset", &ctx).is_err(),
+            "the numeric evaluator must reject a 32-byte id rather than mangle it",
+        );
+        assert_eq!(
+            eval::resolve_input_ref("in0.issued_asset", &ctx).as_deref(),
+            Some("22".repeat(32).as_str()),
+            "the string path must return it intact",
+        );
     }
 
     /// `eval_create_instance_fields` with a `"$params.KEY"` expression must prefer

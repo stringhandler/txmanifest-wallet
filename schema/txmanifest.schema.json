@@ -432,6 +432,26 @@
         },
         {
           "additionalProperties": false,
+          "description": "A value a **hook** supplies later in this run — declared here, set by an `on_resolved` / `on_pre_broadcast` block targeting `params.<name>`.\n\nThis exists so a hook cannot invent an identifier. Without it, `\"set\": { \"params.YES_TOKN_ASSET\": \"asset\" }` is accepted, fills a slot nobody reads, and surfaces as a wrong covenant address much later; with it, `validate` rejects the typo and the declaration carries the `type` that byte-order handling depends on.\n\nIt lives under `compute` rather than as a separate `deferred: true` flag because `compute` already means exactly \"this value is derived, do not prompt for it\" — the only thing that differs here is *who* derives it. A second flag would need its own prompt-suppression path and would have to define what it means alongside a `compute` that is also present.",
+          "properties": {
+            "$comment": {
+              "description": "Documentation only; ignored by the engine.",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "hook"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "A value taken from the executing wallet rather than the manifest.\n\nGrouped under one tag rather than spread across three so that \"is this wallet-derived?\" is a single check on `compute` before dispatching on `wallet` — and so adding a new wallet-derived value does not grow the top-level variant list.",
           "properties": {
             "$comment": {

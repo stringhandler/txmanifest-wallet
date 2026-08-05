@@ -168,6 +168,12 @@ impl ComputeSpec {
     pub fn is_simf_fn(&self) -> bool {
         matches!(self.as_spec(), Some(ParamCompute::SimfFn { .. }))
     }
+
+    /// True when a hook supplies this value later in the run, so the user is never
+    /// prompted and there is nothing to evaluate up front.
+    pub fn is_hook(&self) -> bool {
+        matches!(self.as_spec(), Some(ParamCompute::Hook {}))
+    }
 }
 
 /// Auto-computation spec for a derived compile param or action param.
@@ -217,6 +223,20 @@ pub enum ParamCompute {
         #[serde(default)]
         extra_leaves: Option<Vec<TaprootLeafSpec>>,
     },
+    /// A value a **hook** supplies later in this run — declared here, set by an
+    /// `on_resolved` / `on_pre_broadcast` block targeting `params.<name>`.
+    ///
+    /// This exists so a hook cannot invent an identifier. Without it, `"set": {
+    /// "params.YES_TOKN_ASSET": "asset" }` is accepted, fills a slot nobody reads, and
+    /// surfaces as a wrong covenant address much later; with it, `validate` rejects the
+    /// typo and the declaration carries the `type` that byte-order handling depends on.
+    ///
+    /// It lives under `compute` rather than as a separate `deferred: true` flag because
+    /// `compute` already means exactly "this value is derived, do not prompt for it" —
+    /// the only thing that differs here is *who* derives it. A second flag would need its
+    /// own prompt-suppression path and would have to define what it means alongside a
+    /// `compute` that is also present.
+    Hook {},
     /// A value taken from the executing wallet rather than the manifest.
     ///
     /// Grouped under one tag rather than spread across three so that "is this

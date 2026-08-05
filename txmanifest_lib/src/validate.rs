@@ -100,16 +100,42 @@ fn param_types(
 /// hook fires at a fixed point in the flow, with no `.simf` path, network or wallet
 /// threaded through it. Rejecting the rest here — rather than at run time — keeps a
 /// manifest from parsing cleanly and then silently skipping an assignment.
-fn check_hook(report: &mut Report, loc: &str, hook: &crate::manifest::HookBlock) {
+fn check_hook(
+    report: &mut Report,
+    loc: &str,
+    hook: &crate::manifest::HookBlock,
+    action: &Action,
+) {
     use crate::manifest::ParamCompute;
     for (target, spec) in &hook.set {
         let tloc = format!("{loc}.set.{target}");
+
+        // A `params.X` target must name a param this action declares. Undeclared, the
+        // write lands in a slot nothing reads and the failure surfaces far away — as a
+        // covenant address that is merely wrong. The declaration also carries the `type`
+        // that decides whether the value is byte-reversed on its way into a program.
+        if let Some(name) = target.strip_prefix("params.") {
+            let declared = action.params.iter().flatten().any(|(n, _)| n == name);
+            if !declared {
+                report.error(
+                    &tloc,
+                    format!(
+                        "sets 'params.{name}', but this action declares no param '{name}' — \
+                         add it with {{\"type\": …, \"compute\": {{\"type\": \"hook\"}}}}"
+                    ),
+                );
+            }
+        }
         let Some(compute) = spec.as_spec() else { continue }; // bare expression: fine
         match compute {
             ParamCompute::Expr { .. } => {}
             ParamCompute::Wallet { .. } => report.error(
                 tloc,
                 "a hook cannot take a value from the wallet: the value would differ per user, and an `instance.*` field feeds covenant addresses that must be reproducible from the manifest alone",
+            ),
+            ParamCompute::Hook {} => report.error(
+                tloc,
+                "`{\"type\": \"hook\"}` declares that a hook SUPPLIES a param; it is not a value a hook can set. Put it on the param declaration and give the hook a real expression",
             ),
             ParamCompute::Tapleaf { .. } | ParamCompute::SimfFn { .. } => report.error(
                 tloc,
@@ -259,12 +285,34 @@ fn check_action(
         ("on_post_broadcast", &action.on_post_broadcast),
     ] {
         if let Some(hook) = hook {
-            check_hook(report, &format!("{loc}.{field}"), hook);
+            check_hook(report, &format!("{loc}.{field}"), hook, action);
         }
     }
     for input in action.inputs.iter().flatten() {
         if let Some(hook) = &input.on_resolved {
-            check_hook(report, &format!("{loc}.inputs.{}.on_resolved", input.id), hook);
+            check_hook(report, &format!("{loc}.inputs.{}.on_resolved", input.id), hook, action);
+        }
+    }
+
+    // The converse of the check inside `check_hook`: a param that declares
+    // `compute: {"type": "hook"}` is promising that some hook fills it. If none does, the
+    // param is simply never set — and because it is also never prompted, the run reaches
+    // PSET build with a hole in it rather than asking the user for anything.
+    let hook_targets: BTreeSet<&str> = [&action.on_pre_broadcast, &action.on_post_broadcast]
+        .into_iter()
+        .flatten()
+        .chain(action.inputs.iter().flatten().filter_map(|i| i.on_resolved.as_ref()))
+        .flat_map(|h| h.set.keys())
+        .filter_map(|t| t.strip_prefix("params."))
+        .collect();
+    for (name, def) in action.params.iter().flatten() {
+        if def.compute.as_ref().is_some_and(|c| c.is_hook()) && !hook_targets.contains(name.as_str()) {
+            report.error(
+                format!("{loc}.params.{name}"),
+                "declares compute {\"type\": \"hook\"} but no hook in this action sets \
+                 'params.{name}' — it would never be given a value, and it is not prompted for either"
+                    .replace("{name}", name),
+            );
         }
     }
 
@@ -756,12 +804,22 @@ mod tests {
     // -- hooks -------------------------------------------------------------
 
     /// Build a manifest whose single action carries `on_pre_broadcast.set`.
+    ///
+    /// `B` is declared as a hook param so these fixtures exercise the *value* rules
+    /// without tripping the separate target-must-be-declared rule.
     fn validate_with_hook(set: Value) -> Report {
+        validate_with_hook_and_params(
+            set,
+            serde_json::json!({ "B": { "type": "u64", "compute": { "type": "hook" } } }),
+        )
+    }
+
+    fn validate_with_hook_and_params(set: Value, params: Value) -> Report {
         let manifest: Manifest = Manifest::from_json_str(
             &serde_json::json!({
                 "manifest_version": "1",
                 "protocol": "test",
-                "actions": { "A": { "on_pre_broadcast": { "set": set } } }
+                "actions": { "A": { "params": params, "on_pre_broadcast": { "set": set } } }
             })
             .to_string(),
         )
@@ -778,6 +836,66 @@ mod tests {
             "params.B": { "type": "expr", "expr": "params.X + 1" }
         }));
         assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn hook_target_must_name_a_declared_param() {
+        // The typo hole this rule exists to close: before it, `params.TYPO` was accepted,
+        // filled a slot nobody read, and surfaced later as a wrong covenant address.
+        let report = validate_with_hook_and_params(
+            serde_json::json!({ "params.TYPO": "params.X + 1" }),
+            serde_json::json!({ "REAL": { "type": "u64", "compute": { "type": "hook" } } }),
+        );
+        assert!(
+            errors_at(&report, "actions.A.on_pre_broadcast.set.params.TYPO")
+                .iter()
+                .any(|m| m.contains("declares no param")),
+            "expected an undeclared-target error, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn hook_param_with_no_hook_setting_it_is_an_error() {
+        // The converse: declared as hook-supplied, but nothing supplies it. Since a hook
+        // param is never prompted either, this reaches PSET build with a hole in it.
+        let report = validate_with_hook_and_params(
+            serde_json::json!({ "instance.A": "1 + 1" }),
+            serde_json::json!({ "ORPHAN": { "type": "u64", "compute": { "type": "hook" } } }),
+        );
+        assert!(
+            errors_at(&report, "actions.A.params.ORPHAN")
+                .iter()
+                .any(|m| m.contains("no hook in this action sets")),
+            "expected an orphaned-hook-param error, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn a_declared_hook_param_that_is_set_passes() {
+        let report = validate_with_hook_and_params(
+            serde_json::json!({ "params.FILLED": "params.X + 1" }),
+            serde_json::json!({ "FILLED": { "type": "u64", "compute": { "type": "hook" } } }),
+        );
+        assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn hook_compute_is_not_a_value_a_hook_can_set() {
+        // `{"type": "hook"}` declares where a value comes FROM; it is meaningless as the
+        // value itself, and would otherwise be silently skipped at run time.
+        let report = validate_with_hook_and_params(
+            serde_json::json!({ "params.B": { "type": "hook" } }),
+            serde_json::json!({ "B": { "type": "u64", "compute": { "type": "hook" } } }),
+        );
+        assert!(
+            errors_at(&report, "actions.A.on_pre_broadcast.set.params.B")
+                .iter()
+                .any(|m| m.contains("declares that a hook SUPPLIES")),
+            "expected a hook-as-value rejection, got: {:?}",
+            report.issues
+        );
     }
 
     #[test]
