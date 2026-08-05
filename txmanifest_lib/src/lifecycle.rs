@@ -1444,9 +1444,19 @@ pub fn run(
                 }
                 Ok(result) => {
                     for iso in &result.issuances {
-                        println!("    Issuance '{}': asset={}, token={}", iso.input_id,
-                            style(&iso.asset_id.to_string()[..16]).yellow(),
-                            style(&iso.token_id.to_string()[..16]).yellow());
+                        // Printed in full, not elided. These ids exist nowhere else yet:
+                        // they are derived from this input's outpoint, and unless the action
+                        // is a constructor that captures them via `on_resolved`, this line is
+                        // the only record the operator will ever get. An elided id is not a
+                        // record of anything.
+                        println!("    Issuance '{}':", iso.input_id);
+                        println!("      asset             = {}", style(iso.asset_id.to_string()).yellow());
+                        println!("      reissuance_token  = {}", style(iso.token_id.to_string()).yellow());
+                        if let Some(entropy_bytes) = &iso.entropy {
+                            // Needed verbatim in the instance file's `provided_inputs` before
+                            // any later reissuance of this asset can be built.
+                            println!("      issuance_entropy  = {}", style(hex_bytes(entropy_bytes)).yellow());
+                        }
                         ctx.set_input_attr(&iso.input_id, "asset", iso.asset_id.to_string());
                         ctx.set_input_attr(&iso.input_id, "reissuance_token", iso.token_id.to_string());
                         if let Some(entropy_bytes) = &iso.entropy {

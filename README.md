@@ -40,6 +40,7 @@ manifest-wallet/
     ├── p2pk/               # "hello world" — pay-to-public-key via Simplicity
     ├── lending/            # P2P collateralised lending protocol
     ├── dex/                # keyless atomic swap offers (Mosaik's Tessera covenant)
+    ├── deadcat/            # binary prediction market with on-chain oracle resolution
     └── last_will/          # time-locked inheritance
 ```
 
