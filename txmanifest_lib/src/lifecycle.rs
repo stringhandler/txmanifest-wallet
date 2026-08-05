@@ -598,9 +598,16 @@ pub fn run(
     for inp in action.inputs.as_deref().unwrap_or_default() {
         match issuance_kind(inp) {
             Some("new") => {
+                let contract_hash = match issuance_contract_hash(inp) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        println!("  {} Input '{}': {e}", style("[error]").red(), inp.id);
+                        continue;
+                    }
+                };
                 if let Some(resolved) = ctx.get_input(&inp.id) {
                     if let Ok((asset_id, token_id)) = pset_builder::compute_asset_ids_from_outpoint(
-                        &resolved.txid, resolved.vout,
+                        &resolved.txid, resolved.vout, contract_hash,
                     ) {
                         ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
                         ctx.set_input_attr(&inp.id, "reissuance_token", token_id.to_string());
@@ -893,9 +900,16 @@ pub fn run(
         for inp in action.inputs.as_deref().unwrap_or_default() {
             match issuance_kind(inp) {
                 Some("new") => {
+                    let contract_hash = match issuance_contract_hash(inp) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            println!("  {} Input '{}': {e}", style("[error]").red(), inp.id);
+                            continue;
+                        }
+                    };
                     if let Some(resolved) = ctx.get_input(&inp.id) {
                         if let Ok((asset_id, token_id)) = pset_builder::compute_asset_ids_from_outpoint(
-                            &resolved.txid, resolved.vout
+                            &resolved.txid, resolved.vout, contract_hash,
                         ) {
                             ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
                             ctx.set_input_attr(&inp.id, "reissuance_token", token_id.to_string());
@@ -941,7 +955,18 @@ pub fn run(
                         .map(|a| eval::eval_amount(a, &ctx).unwrap_or(0)).unwrap_or(0);
                     let inflation_amount = v.get("inflation_amount_sat")
                         .map(|a| eval::eval_amount(a, &ctx).unwrap_or(0)).unwrap_or(0);
-                    Some(pset_builder::IssuanceKind::New { asset_amount, inflation_amount })
+                    // Hard error rather than a silent fall back to the zero hash: the
+                    // contract hash feeds the asset id, so getting it wrong issues a
+                    // different asset than the manifest describes.
+                    let contract_hash = match issuance_contract_hash(inp) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            println!("  {} Input '{}': {e}", style("[error]").red(), inp.id);
+                            collect_inputs_ok = false;
+                            break;
+                        }
+                    };
+                    Some(pset_builder::IssuanceKind::New { asset_amount, inflation_amount, contract_hash })
                 }
                 Some("reissue") => {
                     let v = inp.issuance.as_ref().unwrap();
@@ -2586,6 +2611,18 @@ fn issuance_kind(input: &crate::manifest::Input) -> Option<&str> {
         .as_ref()
         .and_then(|v| v.get("kind"))
         .and_then(|v| v.as_str())
+}
+
+/// The contract hash an input's new issuance commits to — all zeros when the `issuance`
+/// block names no `contract` / `contract_hash`, which is what every manifest written before
+/// those keys existed gets, unchanged.
+fn issuance_contract_hash(
+    input: &crate::manifest::Input,
+) -> anyhow::Result<lwk_wollet::elements::ContractHash> {
+    match input.issuance.as_ref() {
+        Some(spec) => pset_builder::contract_hash_from_issuance_spec(spec),
+        None => Ok(pset_builder::zero_contract_hash()),
+    }
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {

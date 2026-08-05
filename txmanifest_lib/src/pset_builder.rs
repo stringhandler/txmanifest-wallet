@@ -25,6 +25,15 @@ pub enum IssuanceKind {
     New {
         asset_amount: u64,
         inflation_amount: u64,
+        /// The contract hash this issuance commits to — the asset-registry document that
+        /// gives the asset its name, ticker and precision, or [`ContractHash::from_byte_array`]
+        /// of zeros for an unnamed asset.
+        ///
+        /// This is not decoration: `entropy = fast_merkle_root([prevout_hash, contract_hash])`,
+        /// so it feeds the asset id, and the asset id is typically a covenant compile param.
+        /// Two issuances from the same outpoint with different contract hashes are different
+        /// assets at different covenant addresses.
+        contract_hash: ContractHash,
     },
     Reissue {
         asset_amount: u64,
@@ -245,11 +254,9 @@ fn build_inner(
                     let (asset_id, token_id) = pset.inputs()[idx].issuance_ids();
                     // Compute entropy so the caller can store it for future reissuances.
                     let entropy = match iso {
-                        IssuanceKind::New { .. } => {
-                            let midstate = AssetId::generate_asset_entropy(
-                                utxo.outpoint,
-                                ContractHash::from_byte_array([0u8; 32]),
-                            );
+                        IssuanceKind::New { contract_hash, .. } => {
+                            let midstate =
+                                AssetId::generate_asset_entropy(utxo.outpoint, *contract_hash);
                             Some(midstate.to_byte_array())
                         }
                         IssuanceKind::Reissue { entropy, .. } => Some(*entropy),
@@ -269,12 +276,10 @@ fn build_inner(
                     // A covenant input may carry either a NEW issuance (e.g. an issuance-factory
                     // covenant minting a fresh NFT from its own outpoint) or a reissuance.
                     let entropy = match iso {
-                        IssuanceKind::New { .. } => {
+                        IssuanceKind::New { contract_hash, .. } => {
                             apply_new_issuance(&mut pset, idx, iso)?;
-                            let midstate = AssetId::generate_asset_entropy(
-                                *outpoint,
-                                ContractHash::from_byte_array([0u8; 32]),
-                            );
+                            let midstate =
+                                AssetId::generate_asset_entropy(*outpoint, *contract_hash);
                             Some(midstate.to_byte_array())
                         }
                         IssuanceKind::Reissue { entropy, .. } => {
@@ -481,7 +486,7 @@ fn apply_sequence(pset: &mut PartiallySignedTransaction, idx: usize, sequence: O
 }
 
 fn apply_new_issuance(pset: &mut PartiallySignedTransaction, idx: usize, iso: &IssuanceKind) -> Result<()> {
-    if let IssuanceKind::New { asset_amount, inflation_amount } = iso {
+    if let IssuanceKind::New { asset_amount, inflation_amount, contract_hash } = iso {
         let input = &mut pset.inputs_mut()[idx];
         if *asset_amount > 0 {
             input.issuance_value_amount = Some(*asset_amount);
@@ -489,7 +494,11 @@ fn apply_new_issuance(pset: &mut PartiallySignedTransaction, idx: usize, iso: &I
         if *inflation_amount > 0 {
             input.issuance_inflation_keys = Some(*inflation_amount);
         }
-        input.issuance_asset_entropy = Some([0u8; 32]); // contract hash = zeros
+        // For a NEW issuance this PSET field carries the CONTRACT HASH, from which the
+        // entropy is derived; for a reissuance the same field carries the entropy itself
+        // (see `apply_reissuance`). Same key, two meanings — a quirk of PSET, not of this
+        // code, and the reason both writers spell out which one they mean.
+        input.issuance_asset_entropy = Some(contract_hash.to_byte_array());
         input.blinded_issuance = Some(0x00); // 0x00 = explicit (not confidential)
     }
     Ok(())
@@ -554,21 +563,83 @@ fn confidential_output(
 // Asset ID computation from issuance outpoint
 // ---------------------------------------------------------------------------
 
-/// Compute (asset_id, token_id) deterministically from a new-issuance outpoint.
+/// Compute (asset_id, token_id) deterministically from a new-issuance outpoint and the
+/// contract hash the issuance commits to.
 ///
 /// Uses the elements library's canonical formula:
 ///   prevout_hash = SHA256D(consensus_encode(outpoint))
-///   entropy      = fast_merkle_root([prevout_hash, zero_contract_hash])
+///   entropy      = fast_merkle_root([prevout_hash, contract_hash])
 ///   asset        = SHA256(entropy || 0x00) as Midstate
 ///   token        = SHA256(entropy || 0x01) as Midstate  (explicit, confidential=false)
-pub fn compute_asset_ids_from_outpoint(txid_display: &str, vout: u32) -> Result<(AssetId, AssetId)> {
+///
+/// Pass [`zero_contract_hash`] for an unnamed asset — that is what an `issuance` block with
+/// no `contract` / `contract_hash` resolves to, and what every manifest predating those keys
+/// was already getting.
+pub fn compute_asset_ids_from_outpoint(
+    txid_display: &str,
+    vout: u32,
+    contract_hash: ContractHash,
+) -> Result<(AssetId, AssetId)> {
     let txid = Txid::from_str(txid_display)
         .map_err(|e| anyhow::anyhow!("Cannot parse txid '{txid_display}': {e}"))?;
     let outpoint = OutPoint::new(txid, vout);
-    let contract_hash = ContractHash::from_byte_array([0u8; 32]);
     let asset_id = AssetId::new_issuance(outpoint, contract_hash);
     let token_id = AssetId::new_reissuance_token(outpoint, contract_hash, false);
     Ok((asset_id, token_id))
+}
+
+/// The all-zero contract hash: an issuance that commits to no registry document.
+pub fn zero_contract_hash() -> ContractHash {
+    ContractHash::from_byte_array([0u8; 32])
+}
+
+/// Resolve an input's `issuance` block to the contract hash its new issuance commits to.
+///
+/// Accepts either spelling, and neither:
+/// - `"contract": { … }`     — an inline asset-registry document, hashed with
+///   `ContractHash::from_json_contract` (keys sorted lexicographically before hashing, so
+///   the key order written in the manifest does not change the asset id).
+/// - `"contract_hash": "<64 hex>"` — a hash you already have, in the **display** byte order
+///   `ContractHash` prints and parses (reversed relative to the internal bytes, like a txid).
+/// - neither → [`zero_contract_hash`].
+///
+/// The two are mutually exclusive: silently preferring one would let a manifest carry a
+/// `contract` document that does not describe the asset it actually issues.
+pub fn contract_hash_from_issuance_spec(issuance: &serde_json::Value) -> Result<ContractHash> {
+    let contract = issuance.get("contract");
+    let contract_hash = issuance.get("contract_hash");
+
+    match (contract, contract_hash) {
+        (Some(_), Some(_)) => anyhow::bail!(
+            "issuance declares both 'contract' and 'contract_hash' — keep one; \
+             'contract' is the document, 'contract_hash' is its hash"
+        ),
+        (Some(doc), None) => {
+            anyhow::ensure!(
+                doc.is_object(),
+                "issuance 'contract' must be a JSON object (an asset-registry document), got {doc}"
+            );
+            let json = serde_json::to_string(doc).context("Cannot serialise issuance 'contract'")?;
+            ContractHash::from_json_contract(&json)
+                .map_err(|e| anyhow::anyhow!("Cannot hash issuance 'contract': {e}"))
+        }
+        (None, Some(h)) => {
+            let s = h
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("issuance 'contract_hash' must be a hex string, got {h}"))?
+                .trim()
+                .trim_start_matches("0x")
+                .trim_start_matches("0X");
+            anyhow::ensure!(
+                s.len() == 64,
+                "issuance 'contract_hash' must be 32 bytes (64 hex chars), got {} chars",
+                s.len()
+            );
+            ContractHash::from_str(s)
+                .map_err(|e| anyhow::anyhow!("Cannot parse issuance 'contract_hash' '{s}': {e}"))
+        }
+        (None, None) => Ok(zero_contract_hash()),
+    }
 }
 
 /// Compute the reissued asset_id from a known issuance entropy (32 bytes, SHA256 midstate).
@@ -611,4 +682,123 @@ pub fn decode_entropy_hex(hex: &str) -> Result<[u8; 32]> {
             .map_err(|_| anyhow::anyhow!("Invalid hex byte at position {i}"))?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fixed outpoint, so the derived ids below are stable across runs.
+    const TXID: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+    fn spec(json: serde_json::Value) -> ContractHash {
+        contract_hash_from_issuance_spec(&json).expect("spec should resolve")
+    }
+
+    #[test]
+    fn no_contract_keys_means_a_zero_hash() {
+        // The behaviour every manifest written before these keys relies on. If this
+        // changes, every asset id those manifests derive changes with it.
+        let h = spec(serde_json::json!({ "kind": "new", "asset_amount_sat": 1 }));
+        assert_eq!(h, zero_contract_hash());
+        assert_eq!(h.to_byte_array(), [0u8; 32]);
+    }
+
+    #[test]
+    fn zero_hash_asset_ids_are_unchanged() {
+        // Characterisation pin: these are the ids the engine produced before the contract
+        // hash was configurable, so a regression here is a silent break of live manifests.
+        let (asset, token) =
+            compute_asset_ids_from_outpoint(TXID, 0, zero_contract_hash()).expect("derive");
+        assert_eq!(
+            asset.to_string(),
+            "9cb6d324d65f002d56883f59e7ae55aeb47fe36627d700f4eb5e00d9bad46d4b"
+        );
+        assert_eq!(
+            token.to_string(),
+            "fd8fc3a1b01586b15c5225bb60d72c5fd169bb3ba5dd3aadd795984623261804"
+        );
+    }
+
+    #[test]
+    fn a_contract_moves_the_asset_id() {
+        // The whole point: naming an asset is not decoration, it re-derives the id.
+        let plain = compute_asset_ids_from_outpoint(TXID, 0, zero_contract_hash()).expect("derive");
+        let named = compute_asset_ids_from_outpoint(
+            TXID,
+            0,
+            spec(serde_json::json!({
+                "kind": "new",
+                "contract": { "name": "Test Asset", "ticker": "TST", "precision": 0, "version": 0 }
+            })),
+        )
+        .expect("derive");
+        assert_ne!(plain.0, named.0, "asset id must depend on the contract hash");
+        assert_ne!(plain.1, named.1, "reissuance token id must too");
+    }
+
+    #[test]
+    fn contract_key_order_does_not_move_the_hash() {
+        // from_json_contract sorts keys before hashing, so the manifest author cannot
+        // change the asset id by reordering the document.
+        let a = spec(serde_json::json!({
+            "kind": "new",
+            "contract": { "name": "Test Asset", "ticker": "TST", "precision": 0, "version": 0 }
+        }));
+        let b = spec(serde_json::json!({
+            "kind": "new",
+            "contract": { "version": 0, "precision": 0, "ticker": "TST", "name": "Test Asset" }
+        }));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_displayed_hash_round_trips_into_contract_hash() {
+        // The byte-order decision, pinned. `contract_hash` is read in the order
+        // ContractHash prints, so pasting a hash copied off a registry or an explorer
+        // yields the same asset as the document it came from — no manual reversal.
+        let doc = serde_json::json!({ "name": "Test Asset", "ticker": "TST", "precision": 0, "version": 0 });
+        let from_doc = spec(serde_json::json!({ "kind": "new", "contract": doc }));
+        let from_hash = spec(serde_json::json!({
+            "kind": "new", "contract_hash": from_doc.to_string()
+        }));
+        assert_eq!(from_doc, from_hash);
+
+        // And a 0x prefix is tolerated, since half the ecosystem writes one.
+        let prefixed = spec(serde_json::json!({
+            "kind": "new", "contract_hash": format!("0x{from_doc}")
+        }));
+        assert_eq!(from_doc, prefixed);
+    }
+
+    #[test]
+    fn both_contract_forms_at_once_is_rejected() {
+        let err = contract_hash_from_issuance_spec(&serde_json::json!({
+            "kind": "new",
+            "contract": { "name": "Test" },
+            "contract_hash": "ab".repeat(32)
+        }))
+        .expect_err("declaring both must fail");
+        assert!(err.to_string().contains("both"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn malformed_contract_hash_is_rejected() {
+        for bad in ["abcd", &"zz".repeat(32)] {
+            assert!(
+                contract_hash_from_issuance_spec(&serde_json::json!({
+                    "kind": "new", "contract_hash": bad
+                }))
+                .is_err(),
+                "contract_hash '{bad}' should have been rejected"
+            );
+        }
+        assert!(
+            contract_hash_from_issuance_spec(&serde_json::json!({
+                "kind": "new", "contract": "not an object"
+            }))
+            .is_err(),
+            "a non-object contract should have been rejected"
+        );
+    }
 }

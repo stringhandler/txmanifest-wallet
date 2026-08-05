@@ -234,6 +234,7 @@ fn check_action(
                 other => report.warn(&iloc, format!("unrecognized utxo_source: {other}")),
             }
             check_witnesses(report, &format!("{iloc}.witnesses"), &input.witnesses);
+            check_issuance(report, &format!("{iloc}.issuance"), &input.issuance);
         }
     }
 
@@ -446,6 +447,93 @@ const KNOWN_WITNESS_TYPES: &[&str] = &["simplicityhl", "Signature", "taproot_lea
 /// object missing/with an unknown `type` is silently dropped and zero-filled,
 /// which produces a covenant that fails at `run` time with no hint as to why —
 /// exactly the failure this check exists to surface statically.
+/// Validate an input's `issuance` block.
+///
+/// The contract keys get more scrutiny than their size suggests, because a mistake in one
+/// is invisible: the transaction still builds and broadcasts, it just issues a different
+/// asset than the manifest describes — and every covenant address derived from that asset
+/// id moves with it. Catching it here means catching it before a testnet round trip.
+fn check_issuance(report: &mut Report, loc: &str, issuance: &Option<Value>) {
+    let Some(issuance) = issuance else { return };
+    let Some(map) = issuance.as_object() else {
+        report.error(loc.to_string(), "issuance must be an object");
+        return;
+    };
+
+    let kind = map.get("kind").and_then(Value::as_str);
+    match kind {
+        Some("new") | Some("reissue") => {}
+        Some(other) => report.error(
+            loc.to_string(),
+            format!("unknown issuance kind '{other}' (expected \"new\" or \"reissue\")"),
+        ),
+        None => report.error(
+            loc.to_string(),
+            "issuance is missing a string \"kind\" (\"new\" or \"reissue\") and will be ignored at run time",
+        ),
+    }
+
+    let has_contract = map.contains_key("contract");
+    let has_contract_hash = map.contains_key("contract_hash");
+
+    if has_contract && has_contract_hash {
+        report.error(
+            loc.to_string(),
+            "issuance declares both \"contract\" and \"contract_hash\" — keep one; \
+             \"contract\" is the registry document, \"contract_hash\" is its hash",
+        );
+    }
+
+    // A reissuance derives its asset from the stored entropy, never from a contract hash:
+    // the contract was committed to once, at the original issuance. Accepting the key here
+    // would let an author think they were naming an asset when nothing reads it.
+    if kind == Some("reissue") && (has_contract || has_contract_hash) {
+        report.error(
+            loc.to_string(),
+            "a reissuance cannot carry \"contract\" / \"contract_hash\" — the contract was \
+             committed to by the original issuance, and the asset comes from its entropy",
+        );
+    }
+
+    if let Some(doc) = map.get("contract") {
+        if !doc.is_object() {
+            report.error(
+                format!("{loc}.contract"),
+                "contract must be a JSON object (an asset-registry document)",
+            );
+        } else if doc.as_object().is_some_and(|o| o.is_empty()) {
+            report.warn(
+                format!("{loc}.contract"),
+                "contract is an empty object — it still hashes to a non-zero value, so this \
+                 is a different asset than declaring no contract at all",
+            );
+        }
+    }
+
+    if let Some(h) = map.get("contract_hash") {
+        match h.as_str() {
+            None => report.error(
+                format!("{loc}.contract_hash"),
+                format!("contract_hash must be a hex string, got {h}"),
+            ),
+            Some(s) => {
+                let s = s.trim().trim_start_matches("0x").trim_start_matches("0X");
+                if s.len() != 64 {
+                    report.error(
+                        format!("{loc}.contract_hash"),
+                        format!("contract_hash must be 32 bytes (64 hex chars), got {}", s.len()),
+                    );
+                } else if !s.chars().all(|c| c.is_ascii_hexdigit()) {
+                    report.error(
+                        format!("{loc}.contract_hash"),
+                        "contract_hash is not valid hex",
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn check_witnesses(report: &mut Report, loc: &str, witnesses: &Option<Value>) {
     let Some(witnesses) = witnesses else { return };
     let Some(map) = witnesses.as_object() else {
@@ -621,6 +709,109 @@ mod tests {
         }));
         assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
         assert!(report.warnings() >= 1);
+    }
+
+    // -- issuance ----------------------------------------------------------
+
+    /// Same shape as `validate_with_input_witnesses`, for the `issuance` block.
+    fn validate_with_issuance(issuance: Value) -> Report {
+        let manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": "1",
+            "protocol": "test",
+            "actions": {
+                "A": {
+                    "inputs": [
+                        { "id": "in0", "utxo_source": "wallet", "issuance": issuance }
+                    ]
+                }
+            }
+        }))
+        .expect("test manifest should deserialize");
+        validate(&manifest)
+    }
+
+    #[test]
+    fn issuance_without_contract_keys_passes() {
+        // The pre-existing spelling, unchanged: no contract keys means a zero hash.
+        let report = validate_with_issuance(serde_json::json!({
+            "kind": "new", "asset_amount_sat": 0, "inflation_amount_sat": 1
+        }));
+        assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn inline_contract_and_hash_forms_pass() {
+        let with_doc = validate_with_issuance(serde_json::json!({
+            "kind": "new",
+            "asset_amount_sat": 1000,
+            "contract": { "name": "Test", "ticker": "TST", "precision": 0, "version": 0 }
+        }));
+        assert_eq!(with_doc.errors(), 0, "unexpected errors: {:?}", with_doc.issues);
+
+        let with_hash = validate_with_issuance(serde_json::json!({
+            "kind": "new", "asset_amount_sat": 1000, "contract_hash": "ab".repeat(32)
+        }));
+        assert_eq!(with_hash.errors(), 0, "unexpected errors: {:?}", with_hash.issues);
+    }
+
+    #[test]
+    fn declaring_both_contract_forms_is_an_error() {
+        // Preferring one silently would let a manifest carry a document that does not
+        // describe the asset it actually issues.
+        let report = validate_with_issuance(serde_json::json!({
+            "kind": "new",
+            "contract": { "name": "Test" },
+            "contract_hash": "ab".repeat(32)
+        }));
+        let errs = errors_at(&report, "actions.A.inputs.in0.issuance");
+        assert!(
+            errs.iter().any(|m| m.contains("both")),
+            "expected a both-forms error, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn contract_on_a_reissuance_is_an_error() {
+        // A reissuance derives its asset from stored entropy; a contract hash here would
+        // read as naming the asset while nothing consumes it.
+        let report = validate_with_issuance(serde_json::json!({
+            "kind": "reissue", "asset_amount_sat": 5, "contract": { "name": "Test" }
+        }));
+        let errs = errors_at(&report, "actions.A.inputs.in0.issuance");
+        assert!(
+            errs.iter().any(|m| m.contains("reissuance cannot carry")),
+            "expected a reissuance/contract error, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn malformed_contract_hash_is_an_error() {
+        for bad in [serde_json::json!("abcd"), serde_json::json!("zz".repeat(32)), serde_json::json!(42)] {
+            let report = validate_with_issuance(serde_json::json!({
+                "kind": "new", "contract_hash": bad
+            }));
+            assert!(
+                has_error_at(&report, "actions.A.inputs.in0.issuance.contract_hash"),
+                "expected an error for contract_hash {bad}, got: {:?}",
+                report.issues
+            );
+        }
+    }
+
+    #[test]
+    fn non_object_contract_is_an_error() {
+        let report = validate_with_issuance(serde_json::json!({
+            "kind": "new", "contract": "Test Asset"
+        }));
+        assert!(has_error_at(&report, "actions.A.inputs.in0.issuance.contract"));
+    }
+
+    #[test]
+    fn unknown_issuance_kind_is_an_error() {
+        let report = validate_with_issuance(serde_json::json!({ "kind": "mint" }));
+        assert!(has_error_at(&report, "actions.A.inputs.in0.issuance"));
     }
 
     // -- clear-signing UI budget ------------------------------------------

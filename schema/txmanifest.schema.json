@@ -209,7 +209,9 @@
         "id": {
           "type": "string"
         },
-        "issuance": true,
+        "issuance": {
+          "description": "An Elements asset issuance carried by this input.\n\n- `{\"kind\": \"new\", \"asset_amount_sat\": <expr>, \"inflation_amount_sat\": <expr>}` — mint a brand-new asset, whose id is derived from this input's outpoint. Either amount may be `0` (an issuance of reissuance tokens only, or of a fixed-supply asset with no reissuance rights). - `{\"kind\": \"reissue\", \"asset_amount_sat\": <expr>}` — mint more of an existing asset by spending its reissuance token. Needs `issuance_entropy` on the resolved input (from the instance file's `provided_inputs`).\n\nA `new` issuance may also name the **contract** it commits to — the asset-registry document giving the asset its name, ticker and precision — in either of two ways:\n\n- `\"contract\": { … }` — the document inline; the engine hashes it (keys are sorted before hashing, so key order in the manifest does not move the asset id). Prefer this: it keeps the asset id reproducible from the manifest alone. - `\"contract_hash\": \"<64 hex>\"` — the hash alone, in the display byte order `ContractHash` prints (reversed relative to the internal bytes, like a txid). For matching an existing on-chain asset whose document you do not have.\n\nDeclaring both is an error. Declaring neither means a zero contract hash — an unnamed asset, and the behaviour of every manifest written before these keys.\n\nThis is not metadata bolted onto the side: the contract hash is an input to `entropy = fast_merkle_root([prevout_hash, contract_hash])`, so it changes the asset id, which is typically a covenant compile param, which moves every covenant address derived from it. It cannot be added to an asset after the fact."
+        },
         "on_resolved": {
           "anyOf": [
             {
