@@ -10,6 +10,14 @@
           "description": "Documentation only; ignored by the engine.",
           "type": "string"
         },
+        "allow_change": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AllowChange"
+            }
+          ],
+          "description": "Whether the engine may append a change output this action did not declare.\n\n**Every output a transaction carries must be written in the manifest. The network fee is the single exception, because it has no manifest spelling.** A change output is not an exception: its address and amount are chosen by the engine, so silently adding one moves value to a destination the manifest never named, in an amount nobody wrote down. That is how an oversized collateral input once turned 88,735 satoshis into a miner's fee without a word of warning.\n\nSo the default is [`AllowChange::None`]: a surplus in any asset — including L-BTC — is an error, and the action must size its inputs to what it spends. Relax it only where the surplus genuinely cannot be predicted:\n\n- `\"none\"` (default) — no change may be added; any surplus is an error. - `\"lbtc_only\"` — the engine may return an L-BTC surplus to the wallet. Use this for ordinary funding actions, where the fee is only known after the size is. A surplus in any other asset is still an error. - `\"any\"` — the engine may return a surplus in any asset.\n\nThis governs *undeclared* change. An output with `\"destination\": \"change\"` is declared, and permits change for its own asset regardless of this setting."
+        },
         "create_instance": {
           "anyOf": [
             {
@@ -86,6 +94,32 @@
         }
       },
       "type": "object"
+    },
+    "AllowChange": {
+      "description": "Which assets an action lets the engine return a surplus in, via a change output the manifest did not declare. See [`Action::allow_change`].\n\nSpelled as an enum rather than a boolean because the useful middle case — \"return leftover L-BTC, but never move a protocol asset I did not account for\" — is the one most funding actions want, and a boolean cannot say it.",
+      "oneOf": [
+        {
+          "description": "No undeclared change. A surplus in any asset fails the build.",
+          "enum": [
+            "none"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Only the policy asset (L-BTC) may be returned.",
+          "enum": [
+            "lbtc_only"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Any asset may be returned.",
+          "enum": [
+            "any"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "ComputeSpec": {
       "anyOf": [

@@ -79,11 +79,14 @@ pub struct BuildPsetRequest {
     pub outputs: Vec<PsetOutputSpec>,
     pub fee_rate: f32,
     pub policy_asset: AssetId,
-    /// Whether the action declared an explicit `"change"` output. When `false`,
-    /// the builder never adds a change output — any L-BTC surplus is folded into
-    /// the fee instead. This keeps the output set to exactly the declared outputs
-    /// plus the fee, which recursive covenants (e.g. last-will Refresh) require.
-    pub build_change: bool,
+    /// The assets for which the action declared a `"change"` output.
+    ///
+    /// The builder adds a change output only for an asset in this set. Every other output
+    /// a transaction carries has to come from the manifest — the fee is the single
+    /// exception, because it has no manifest spelling. A surplus in an asset with no
+    /// declared change output is an error rather than a silently-invented output: the
+    /// alternative is a transaction that moves value the manifest never mentioned.
+    pub change_assets: std::collections::HashSet<AssetId>,
 }
 
 pub struct IssuanceResult {
@@ -117,7 +120,7 @@ pub fn build_pset(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRequ
 
     // First pass: temp fee=1 to estimate weight.
     let (temp_pset, temp_sec, _) =
-        build_inner(wollet, &secp, &mut rng, req, 1, wallet_blinding_pk_btc, network, false)?;
+        build_inner(wollet, &secp, &mut rng, req, 1, wallet_blinding_pk_btc, network, false, false)?;
     let fee = {
         let mut tmp = temp_pset.clone();
         let mut tmp_rng = thread_rng();
@@ -136,7 +139,7 @@ pub fn build_pset(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRequ
 
     // Second pass: real fee.
     let (mut pset, inp_txout_sec, issuances) =
-        build_inner(wollet, &secp, &mut rng, req, fee, wallet_blinding_pk_btc, network, false)?;
+        build_inner(wollet, &secp, &mut rng, req, fee, wallet_blinding_pk_btc, network, false, true)?;
 
     wollet
         .add_details(&mut pset)
@@ -195,7 +198,7 @@ pub fn estimate_fee(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRe
     let wallet_blinding_pk_btc = btc_pubkey(wallet_blinding_pk);
 
     let (draft_pset, draft_sec, _) =
-        build_inner(wollet, &secp, &mut rng, req, 0, wallet_blinding_pk_btc, network, true)?;
+        build_inner(wollet, &secp, &mut rng, req, 0, wallet_blinding_pk_btc, network, true, false)?;
     let mut tmp = draft_pset;
     if pset_has_confidential_output(&tmp) {
         tmp.blind_last(&mut rng, &secp, &draft_sec)
@@ -226,6 +229,9 @@ fn build_inner(
     // Estimation pass: don't enforce balance or add change — the fee absorbs any
     // surplus (possibly 0). Used only to measure the resulting tx's vsize.
     draft: bool,
+    // Only the final pass checks the absorbed surplus. The weight-estimation pass runs with
+    // a placeholder fee of 1, against which every real surplus looks absurd.
+    enforce_fee_sanity: bool,
 ) -> Result<(PartiallySignedTransaction, HashMap<usize, TxOutSecrets>, Vec<IssuanceResult>)> {
     let mut pset = PartiallySignedTransaction::new_v2();
     let mut inp_txout_sec: HashMap<usize, TxOutSecrets> = HashMap::new();
@@ -303,7 +309,7 @@ fn build_inner(
     // plus the fee, as recursive covenants require.
     let (change, fee) = if draft {
         (0u64, total_lbtc_in.saturating_sub(total_lbtc_out))
-    } else if req.build_change {
+    } else if req.change_assets.contains(&req.policy_asset) {
         let lbtc_needed = total_lbtc_out + fee;
         if total_lbtc_in < lbtc_needed {
             anyhow::bail!(
@@ -319,7 +325,22 @@ fn build_inner(
                 total_lbtc_in, total_lbtc_out
             );
         }
-        (0u64, total_lbtc_in - total_lbtc_out)
+        let surplus = total_lbtc_in - total_lbtc_out;
+        // No change permitted for L-BTC, so the surplus IS the fee — and anything the fee
+        // does not account for is value leaving the wallet to no declared destination.
+        // Paying it to miners silently is exactly the failure `allow_change` exists to
+        // prevent, so the difference is an error, not a donation.
+        if enforce_fee_sanity && surplus != fee {
+            anyhow::bail!(
+                "L-BTC does not balance: inputs exceed outputs by {surplus} sat, but the fee \
+                 is {fee} sat, leaving {} sat unaccounted for.\n\
+                 This action does not permit L-BTC change, so there is nowhere for it to go. \
+                 Either set \"allow_change\": \"lbtc_only\" on the action, declare a change \
+                 output, or size the input to outputs + fee exactly.",
+                surplus.saturating_sub(fee)
+            );
+        }
+        (0u64, surplus)
     };
 
     // blinder_index must reference an input whose secrets are in inp_txout_sec (i.e. a wallet
@@ -353,6 +374,20 @@ fn build_inner(
         .fold(HashMap::new(), |mut m, o| { *m.entry(o.asset).or_default() += o.amount; m });
     for (asset, in_amt) in &wallet_asset_in {
         let out_amt = total_non_lbtc_out.get(asset).copied().unwrap_or(0);
+        if *in_amt > out_amt && !req.change_assets.contains(asset) {
+            // Only the fee may be an output the manifest did not declare. Inventing a
+            // change output here would move an asset to an address of the engine's
+            // choosing, in an amount nobody wrote down.
+            anyhow::bail!(
+                "Asset {asset} does not balance: inputs provide {} sat but the outputs \
+                 account for only {out_amt} sat.\n\
+                 This action does not permit change in that asset, so there is nowhere for \
+                 the remaining {} sat to go. Either set \"allow_change\" on the action, \
+                 declare a change output for it, or size the input to what the action spends.",
+                in_amt,
+                in_amt - out_amt
+            );
+        }
         if *in_amt > out_amt {
             let surplus = in_amt - out_amt;
             let change_addr = wollet.change(None).context("Cannot derive change address")?.address().clone();

@@ -1127,6 +1127,10 @@ pub fn run(
 
         // ---- Collect PSET outputs ----
         let mut pset_outputs: Vec<pset_builder::PsetOutputSpec> = Vec::new();
+    // Assets the action declares a `"change"` output for. Anything left over in an asset
+    // absent from this set is an error, not an output the engine invents.
+    let mut change_assets: std::collections::HashSet<lwk_wollet::elements::AssetId> =
+        std::collections::HashSet::new();
         // (output id, amount formula) for each pushed output, aligned with pset_outputs
         // by index, so amounts referencing the `fee` keyword can be re-evaluated once
         // the fee is estimated below (and the covenant state metadata kept in sync).
@@ -1201,6 +1205,7 @@ pub fn run(
                 match &output.destination {
                     serde_json::Value::String(dest) if dest == "change" => {
                         println!("  {} Output '{}' → change (auto).", style("·").dim(), output.id);
+                        change_assets.insert(asset_id);
                         continue;
                     }
                     serde_json::Value::Object(m)
@@ -1402,16 +1407,32 @@ pub fn run(
 
         // ---- Build PSET ----
         if collect_inputs_ok && collect_outputs_ok {
-            // Only build a change output if the action declared one. Otherwise the
-            // fee absorbs the surplus and the output count stays exact (recursive covenants).
-            let build_change = action.outputs.as_deref().unwrap_or_default().iter()
-                .any(|o| o.destination.as_str() == Some("change"));
+            // Change is permitted per ASSET: by an explicit `destination: "change"`
+            // output (collected while resolving outputs, above), or by the action's
+            // `allow_change` setting, which covers surpluses that cannot be predicted —
+            // chiefly the L-BTC left after a fee whose size is only known once the
+            // transaction is built.
+            let mut change_assets = change_assets;
+            match action.allow_change {
+                crate::manifest::AllowChange::None => {}
+                crate::manifest::AllowChange::LbtcOnly => {
+                    change_assets.insert(net.policy_asset());
+                }
+                crate::manifest::AllowChange::Any => {
+                    for i in &pset_inputs {
+                        if let pset_builder::PsetInput::Wallet { utxo, .. } = i {
+                            change_assets.insert(utxo.unblinded.asset);
+                        }
+                    }
+                    change_assets.insert(net.policy_asset());
+                }
+            }
             let mut req = pset_builder::BuildPsetRequest {
                 inputs: pset_inputs,
                 outputs: pset_outputs,
                 fee_rate: fee_rate as f32,
                 policy_asset: net.policy_asset(),
-                build_change,
+                change_assets: change_assets.clone(),
             };
 
             // Resolve the `fee` keyword: estimate the fee from the current (fee=0)

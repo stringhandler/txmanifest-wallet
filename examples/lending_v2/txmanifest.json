@@ -104,6 +104,7 @@
       ]
     },
     "PrepareLender": {
+      "allow_change": "any",
       "description": "Utility: ensure the lender wallet has a PRINCIPAL_AMOUNT-sat UTXO of PRINCIPAL_ASSET_ID ready for SetupLending. Accepts any UTXO of that asset and splits off the exact amount needed.",
       "inputs": [
         {

@@ -323,10 +323,62 @@ pub struct TapleafParam {
 // Action
 // ---------------------------------------------------------------------------
 
+/// Which assets an action lets the engine return a surplus in, via a change output the
+/// manifest did not declare. See [`Action::allow_change`].
+///
+/// Spelled as an enum rather than a boolean because the useful middle case — "return
+/// leftover L-BTC, but never move a protocol asset I did not account for" — is the one
+/// most funding actions want, and a boolean cannot say it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum AllowChange {
+    /// No undeclared change. A surplus in any asset fails the build.
+    #[default]
+    None,
+    /// Only the policy asset (L-BTC) may be returned.
+    LbtcOnly,
+    /// Any asset may be returned.
+    Any,
+}
+
+impl AllowChange {
+    /// Whether a surplus in `asset` may be returned to the wallet.
+    pub fn permits(&self, asset: &lwk_wollet::elements::AssetId, policy_asset: &lwk_wollet::elements::AssetId) -> bool {
+        match self {
+            AllowChange::None => false,
+            AllowChange::LbtcOnly => asset == policy_asset,
+            AllowChange::Any => true,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Action {
     pub description: Option<String>,
+    /// Whether the engine may append a change output this action did not declare.
+    ///
+    /// **Every output a transaction carries must be written in the manifest. The network
+    /// fee is the single exception, because it has no manifest spelling.** A change output
+    /// is not an exception: its address and amount are chosen by the engine, so silently
+    /// adding one moves value to a destination the manifest never named, in an amount
+    /// nobody wrote down. That is how an oversized collateral input once turned 88,735
+    /// satoshis into a miner's fee without a word of warning.
+    ///
+    /// So the default is [`AllowChange::None`]: a surplus in any asset — including L-BTC —
+    /// is an error, and the action must size its inputs to what it spends. Relax it only
+    /// where the surplus genuinely cannot be predicted:
+    ///
+    /// - `"none"` (default) — no change may be added; any surplus is an error.
+    /// - `"lbtc_only"` — the engine may return an L-BTC surplus to the wallet. Use this
+    ///   for ordinary funding actions, where the fee is only known after the size is.
+    ///   A surplus in any other asset is still an error.
+    /// - `"any"` — the engine may return a surplus in any asset.
+    ///
+    /// This governs *undeclared* change. An output with `"destination": "change"` is
+    /// declared, and permits change for its own asset regardless of this setting.
+    #[serde(default)]
+    pub allow_change: AllowChange,
     /// Runtime action parameters (Spec §5). Prompted, or set by hooks.
     pub params: Option<BTreeMap<String, ParamDef>>,
     pub inputs: Option<Vec<Input>>,

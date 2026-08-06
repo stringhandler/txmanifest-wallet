@@ -376,6 +376,61 @@
             }
           ]
         },
+        "PrepareInitialIssuance": {
+          "$comment": "A funding action, not a protocol one: nothing here touches the covenant. It exists because InitialIssuance declares no change output — the covenant pins the fee at output index 5, and a change output would displace it — so whatever L-BTC the collateral input carries beyond the collateral IS the fee. Feeding it an ordinary wallet UTXO therefore pays the entire remainder to miners. This action cuts a UTXO of exactly the right size first, which turns that behaviour from a hazard into an intent: the surplus becomes FEE_ALLOWANCE and nothing more.",
+          "description": "Cut an exactly-sized collateral UTXO for InitialIssuance. Reads COLLATERAL_PER_TOKEN and COLLATERAL_ASSET_ID from the instance and takes the number of pairs you intend to mint, so the output is PAIRS x 2 x COLLATERAL_PER_TOKEN plus a fee allowance — the exact amount InitialIssuance consumes. Run this first, then InitialIssuance, which will select the UTXO this produced (pin it with --input collateral_in=<txid>:<vout> if your wallet holds other L-BTC of a similar size).",
+          "intent": "cut a {params.PAIRS}-pair collateral UTXO for opening the market",
+          "params": {
+            "PAIRS": {
+              "type": "u64",
+              "description": "How many YES/NO pairs InitialIssuance will mint. Must match the PAIRS you pass there — a mismatch just means the sizing is wrong, and the surplus or shortfall shows up as a fee error."
+            },
+            "FEE_ALLOWANCE": {
+              "type": "u64",
+              "default": "2000",
+              "description": "Extra L-BTC to include on top of the collateral, which becomes InitialIssuance's fee. That transaction is large (three inputs, two of them Simplicity covenant spends with sizeable witnesses), so leave real headroom. Anything unspent here is paid to miners, so do not inflate it either."
+            }
+          },
+          "inputs": [
+            {
+              "id": "funding_in",
+              "description": "Wallet L-BTC UTXO to cut from. Must hold at least the collateral plus the fee allowance plus this transaction's own fee.",
+              "utxo_source": "wallet",
+              "asset": "instance.COLLATERAL_ASSET_ID",
+              "amount_sat": {
+                "min_amount": "params.PAIRS * 2 * instance.COLLATERAL_PER_TOKEN + params.FEE_ALLOWANCE"
+              },
+              "ui": {
+                "label": "wallet funds to cut the collateral from",
+                "role": "funding"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "sized_collateral",
+              "description": "The exactly-sized UTXO InitialIssuance will spend as its collateral input: PAIRS x 2 x COLLATERAL_PER_TOKEN of collateral, plus FEE_ALLOWANCE which becomes that transaction's fee.",
+              "destination": "wallet",
+              "asset": "instance.COLLATERAL_ASSET_ID",
+              "amount_sat": "params.PAIRS * 2 * instance.COLLATERAL_PER_TOKEN + params.FEE_ALLOWANCE",
+              "ui": {
+                "label": "collateral sized for opening the market",
+                "role": "collateral"
+              }
+            },
+            {
+              "id": "funding_change",
+              "description": "The rest of the funding UTXO, back to your wallet. Present precisely because this action is allowed a change output, unlike InitialIssuance.",
+              "destination": "change",
+              "asset": "instance.COLLATERAL_ASSET_ID",
+              "optional": true,
+              "ui": {
+                "label": "change returned to you",
+                "role": "change"
+              }
+            }
+          ]
+        },
         "InitialIssuance": {
           "$comment": "Path 1. Fee MUST land at output index 5, which it does only because no change output is declared here: the engine appends declared outputs, then any change, then the fee. Declaring a change output would push the fee to index 6 and the covenant would reject the spend. Size the collateral input exactly (see `prepare`) — surplus L-BTC is swallowed by the fee.",
           "description": "First covenant-validated transaction: state 0 -> 1. Reissues the first batch of YES/NO pairs, deposits their collateral, and moves all three covenant UTXOs to the state-1 address. Collateral comes from your wallet, not from the covenant — in the dormant state there is no collateral UTXO yet.",
@@ -1019,6 +1074,7 @@
           ]
         },
         "RedeemYes": {
+          "allow_change": "lbtc_only",
           "$comment": "Path 4 in state 2, PARTIAL form (remaining collateral > 0). The full-drain form is a different output layout — the burn becomes output 0 and there is no collateral output at all — and needs its own action, not modelled here. The fee is checked at num_outputs - 1, so change outputs are fine on this path.",
           "description": "Redeem winning YES tokens for collateral (state 2). Each YES token draws 2 x COLLATERAL_PER_TOKEN — the whole pair's backing, both your stake and the loser's — so the pool drains exactly as all winners redeem, with nothing stranded. Losing NO tokens have no path; they are simply worthless.",
           "intent": "redeem {params.TOKENS_BURNED} winning YES tokens for collateral",
@@ -1132,6 +1188,7 @@
           ]
         },
         "RedeemNo": {
+          "allow_change": "lbtc_only",
           "$comment": "Path 4 in state 3 — the mirror of RedeemYes. Same partial-only caveat.",
           "description": "Redeem winning NO tokens for collateral (state 3). Each NO token draws 2 x COLLATERAL_PER_TOKEN.",
           "intent": "redeem {params.TOKENS_BURNED} winning NO tokens for collateral",
@@ -1244,6 +1301,7 @@
           ]
         },
         "RedeemExpired": {
+          "allow_change": "lbtc_only",
           "$comment": "Path 5, partial form. NOT EXECUTABLE YET: this is the one Deadcat path that calls jet::check_lock_height(EXPIRY_TIME), an absolute CLTV, and the engine cannot set a transaction nLockTime — see meta/tasks/upnext/12-engine-absolute-locktime.md. (The pre-expiry paths are fine: they assert lock_time < EXPIRY_TIME, which a locktime of 0 satisfies.) BURN_TOKEN_ASSET must be supplied byte-reversed, because witness values are parsed as raw SimplicityHL literals with no liquid.asset_id type hint to trigger the reversal that compile params get.",
           "description": "Redeem after the market expired unresolved (state 1, at or after EXPIRY_TIME). Both sides redeem at 1 x COLLATERAL_PER_TOKEN — half the winner's rate — so YES and NO holders are made whole together and the pool drains exactly. This is the escape hatch for an oracle that never attests.",
           "intent": "redeem {params.TOKENS_BURNED} tokens from the expired market",
@@ -1359,6 +1417,7 @@
           ]
         },
         "CancelPairs": {
+          "allow_change": "lbtc_only",
           "$comment": "Path 6, partial form (state 1 -> 1). The full form, which drains the pool to zero and cycles the reissuance tokens back to state 0, is CancelAll.",
           "description": "Unwind part of your position while the market is unresolved. Burn matched YES and NO in equal amounts and take back the full 2 x COLLATERAL_PER_TOKEN per pair — you are undoing an issuance, so there is no loss and no time constraint. Only matched pairs qualify: burning one side alone would leave the other side under-collateralised.",
           "intent": "cancel {params.PAIRS_BURNED} pairs and reclaim their collateral",
@@ -1487,6 +1546,7 @@
           ]
         },
         "CancelAll": {
+          "allow_change": "lbtc_only",
           "$comment": "Path 6, full form (state 1 -> 0). PAIRS_BURNED must equal the whole pool: collateral_in.amount_sat / (2 x COLLATERAL_PER_TOKEN). If it does not, the covenant takes the partial branch instead and this output layout is rejected.",
           "description": "Wind the market all the way down. Burn every outstanding pair, take back all the collateral, and cycle both reissuance tokens back to the state-0 address so the market is dormant rather than dead. Without this the tokens would be stranded at a collateral-less state-1 address and the market could never be reissued — the reason the dormant state exists at all (design doc section 5.3).",
           "intent": "wind the market down and return it to dormant",

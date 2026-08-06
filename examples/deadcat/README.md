@@ -67,6 +67,7 @@ otherwise surface only as a failed spend.
 |--------|------|-----------|
 | `IssueReissuanceTokens` | — (plain Elements tx) | mints the two reissuance tokens to your wallet, writes the instance |
 | `CreateMarket` | — (plain Elements tx) | moves both tokens into state 0 |
+| `PrepareInitialIssuance` | — (funding tx) | cuts an exactly-sized collateral UTXO |
 | `InitialIssuance` | 1 | 0 → 1 |
 | `MintPairs` | 2 | 1 → 1 |
 | `ResolveYes` / `ResolveNo` | 3 | 1 → 2 / 1 → 3 |
