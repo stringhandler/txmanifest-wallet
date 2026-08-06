@@ -13,7 +13,9 @@ use simplicityhl::ast::ElementsJetHinter;
 use simplicityhl::simplicity::bit_machine::{ExecTracker, FrameIter, NodeOutput};
 use simplicityhl::simplicity::jet::elements::{ElementsEnv, ElementsUtxo};
 use simplicityhl::simplicity::BitMachine;
-use simplicityhl::{simplicity, Arguments, CompiledProgram, WitnessTypes, WitnessValues};
+use simplicityhl::{
+    simplicity, Arguments, CompiledProgram, UnstableFeatures, WitnessTypes, WitnessValues,
+};
 
 /// Signs `(key_label, kind, sighash)` and returns a 64-byte Schnorr signature.
 type SigSigner = dyn Fn(&str, &str, &[u8; 32]) -> Result<[u8; 64]>;
@@ -30,6 +32,67 @@ const NUMS_KEY_BYTES: [u8; 32] = [
     0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
 ];
 
+/// How a `.simf` program is compiled — the manifest's `simplicity_hl` block reduced to
+/// what the compiler actually takes. Build it with
+/// [`Manifest::compile_opts`](crate::manifest::Manifest::compile_opts).
+///
+/// Every helper in this module takes `impl Into<CompileOpts>`, so callers that predate
+/// unstable features (recon examples, tests) can keep passing a bare `bool` for debug
+/// symbols and get "no unstable features" — the same thing the compiler defaults to.
+#[derive(Debug, Clone)]
+pub struct CompileOpts {
+    /// Include SimplicityHL debug symbols. Changes the CMR, and therefore every covenant
+    /// address; see [`SimplicityHl::debug_symbols`](crate::manifest::SimplicityHl::debug_symbols).
+    pub debug_symbols: bool,
+    /// Unstable compiler features the program may use (`simc -Z <name>`). Purely a gate:
+    /// enabling a feature never changes generated code, so it never moves an address.
+    pub unstable_features: UnstableFeatures,
+}
+
+impl Default for CompileOpts {
+    fn default() -> Self {
+        Self {
+            debug_symbols: false,
+            unstable_features: UnstableFeatures::none(),
+        }
+    }
+}
+
+impl From<bool> for CompileOpts {
+    fn from(debug_symbols: bool) -> Self {
+        Self {
+            debug_symbols,
+            ..Self::default()
+        }
+    }
+}
+
+impl From<&CompileOpts> for CompileOpts {
+    fn from(opts: &CompileOpts) -> Self {
+        opts.clone()
+    }
+}
+
+/// The single place this crate hands a program to the SimplicityHL compiler.
+///
+/// Every covenant address, CMR and dry-run in this crate goes through here, so the
+/// toolchain settings cannot be applied on some paths and forgotten on others — which
+/// for `debug_symbols` would mean deriving two different addresses for one covenant.
+fn compile_program(
+    source: String,
+    arguments: Arguments,
+    opts: &CompileOpts,
+) -> Result<CompiledProgram> {
+    CompiledProgram::new_with_unstable(
+        source,
+        &opts.unstable_features,
+        arguments,
+        opts.debug_symbols,
+        Box::new(ElementsJetHinter::new()),
+    )
+    .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))
+}
+
 /// Compile a `.simf` file and return the Simplicity tapleaf hash (32 bytes, natural byte order).
 ///
 /// This is an intermediate taproot value (TapLeafHash). To get the value that the Simplicity
@@ -39,16 +102,15 @@ pub fn compute_tapleaf_hash(
     simf_path: &Path,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
-    include_debug_symbols: bool,
+    opts: impl Into<CompileOpts>,
 ) -> Result<[u8; 32]> {
+    let opts = opts.into();
     let source = std::fs::read_to_string(simf_path)
         .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    let compiled =
-        CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
-            .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
+    let compiled = compile_program(source, arguments, &opts)?;
     let commit = compiled.commit();
     let cmr = commit.cmr();
     let leaf_ver = simplicity_leaf_version();
@@ -67,9 +129,9 @@ pub fn compute_covenant_script_hash(
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     network: lwk_wollet::ElementsNetwork,
-    include_debug_symbols: bool,
+    opts: impl Into<CompileOpts>,
 ) -> Result<[u8; 32]> {
-    compute_covenant_script_hash_with_leaves(simf_path, compile_params, type_hints, &[], network, include_debug_symbols)
+    compute_covenant_script_hash_with_leaves(simf_path, compile_params, type_hints, &[], network, opts)
 }
 
 /// Like [`compute_covenant_script_hash`] but folds `extra_leaf_payloads` (taproot storage
@@ -82,9 +144,9 @@ pub fn compute_covenant_script_hash_with_leaves(
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
     network: lwk_wollet::ElementsNetwork,
-    include_debug_symbols: bool,
+    opts: impl Into<CompileOpts>,
 ) -> Result<[u8; 32]> {
-    let addr = compute_covenant_address(simf_path, compile_params, type_hints, extra_leaf_payloads, network, include_debug_symbols)?;
+    let addr = compute_covenant_address(simf_path, compile_params, type_hints, extra_leaf_payloads, network, opts)?;
     let spk = addr.script_pubkey();
     Ok(sha256::Hash::hash(spk.as_bytes()).to_byte_array())
 }
@@ -96,15 +158,15 @@ pub fn check_compile(
     simf_path: &Path,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
-    include_debug_symbols: bool,
+    opts: impl Into<CompileOpts>,
 ) -> Result<()> {
+    let opts = opts.into();
     let source = std::fs::read_to_string(simf_path)
         .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
-        .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
+    compile_program(source, arguments, &opts)?;
     Ok(())
 }
 
@@ -120,14 +182,20 @@ pub fn compile_simf_function(
     fn_name: Option<&str>,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
+    opts: impl Into<CompileOpts>,
 ) -> Result<simplicityhl::CompiledFunction> {
+    let opts = opts.into();
     let source = std::fs::read_to_string(simf_path)
         .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    let template = simplicityhl::TemplateProgram::new(source, Box::new(ElementsJetHinter::new()))
-        .map_err(|e| anyhow::anyhow!("SimplicityHL parse/analyse failed: {e}"))?;
+    let template = simplicityhl::TemplateProgram::new_with_unstable(
+        source,
+        &opts.unstable_features,
+        Box::new(ElementsJetHinter::new()),
+    )
+    .map_err(|e| anyhow::anyhow!("SimplicityHL parse/analyse failed: {e}"))?;
     template
         .compile_function(fn_name, arguments)
         .map_err(|e| anyhow::anyhow!("SimplicityHL function compile failed: {e}"))
@@ -149,14 +217,20 @@ pub fn execute_simf_function(
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     input_hex: &str,
+    opts: impl Into<CompileOpts>,
 ) -> Result<String> {
+    let opts = opts.into();
     let source = std::fs::read_to_string(simf_path)
         .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    let template = simplicityhl::TemplateProgram::new(source, Box::new(ElementsJetHinter::new()))
-        .map_err(|e| anyhow::anyhow!("SimplicityHL parse/analyse failed: {e}"))?;
+    let template = simplicityhl::TemplateProgram::new_with_unstable(
+        source,
+        &opts.unstable_features,
+        Box::new(ElementsJetHinter::new()),
+    )
+    .map_err(|e| anyhow::anyhow!("SimplicityHL parse/analyse failed: {e}"))?;
 
     // Compile first to get the source type for input parsing.
     let compiled = template
@@ -186,6 +260,7 @@ pub fn execute_simf_function(
     _compile_params: &HashMap<String, String>,
     _type_hints: &HashMap<String, String>,
     _input_hex: &str,
+    _opts: impl Into<CompileOpts>,
 ) -> Result<String> {
     anyhow::bail!(
         "The `simf_fn` compute hook requires the `simplicity_eval` feature \
@@ -274,8 +349,9 @@ pub fn dry_run_covenant(
     input_index: u32,
     genesis_hash: BlockHash,
     debug_jets: bool,
-    include_debug_symbols: bool,
+    opts: impl Into<CompileOpts>,
 ) -> Result<()> {
+    let opts = opts.into();
     // Debug: all prints go to stdout so they interleave correctly with lifecycle output.
     use std::io::Write as _;
     let stdout = std::io::stdout();
@@ -344,9 +420,7 @@ pub fn dry_run_covenant(
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    let compiled =
-        CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
-            .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
+    let compiled = compile_program(source, arguments, &opts)?;
     let abi_meta = compiled
         .generate_abi_meta()
         .map_err(|e| anyhow::anyhow!("Cannot get ABI metadata: {e}"))?;
@@ -580,17 +654,16 @@ pub fn finalize_covenant_input(
     input_index: u32,
     genesis_hash: BlockHash,
     pset_input: &mut lwk_wollet::elements::pset::Input,
-    include_debug_symbols: bool,
+    opts: impl Into<CompileOpts>,
 ) -> Result<()> {
+    let opts = opts.into();
     // Compile
     let source = std::fs::read_to_string(simf_path)
         .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    let compiled =
-        CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
-            .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
+    let compiled = compile_program(source, arguments, &opts)?;
     let abi_meta = compiled
         .generate_abi_meta()
         .map_err(|e| anyhow::anyhow!("Cannot get ABI metadata: {e}"))?;
@@ -688,8 +761,9 @@ pub fn compute_covenant_address(
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
     network: lwk_wollet::ElementsNetwork,
-    include_debug_symbols: bool,
+    opts: impl Into<CompileOpts>,
 ) -> Result<Address> {
+    let opts = opts.into();
     eprintln!(
         "[covenant] compute_covenant_address: {} extra leaf(s), simf={}",
         extra_leaf_payloads.len(),
@@ -721,9 +795,7 @@ pub fn compute_covenant_address(
         .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
     eprintln!("[covenant] simf source loaded ({} bytes)", source.len());
 
-    let compiled =
-        CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
-            .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
+    let compiled = compile_program(source, arguments, &opts)?;
     eprintln!("[covenant] SimplicityHL compilation OK");
 
     // Get CMR; tapscript leaf = CMR (32 bytes) as required by Elements Simplicity validator
@@ -1016,6 +1088,33 @@ fn network_to_params(network: lwk_wollet::ElementsNetwork) -> &'static AddressPa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// End-to-end proof that `simplicity_hl.unstable_features` reaches the compiler:
+    /// `prize.simf` declares `enum Action`, which is gated syntax.
+    ///
+    /// Both directions matter. Compiling *with* the feature shows the manifest can
+    /// enable it at all; compiling *without* must still fail, or the manifest key would
+    /// be decorative — the gate silently open for every program in the repo.
+    #[test]
+    fn unstable_features_gate_a_program_that_uses_enums() {
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifest_path = crate_dir.join("../examples/prize_contest/txmanifest.json");
+        let raw = std::fs::read_to_string(&manifest_path).expect("read prize manifest");
+        let manifest =
+            crate::manifest::Manifest::from_json_str(&raw).expect("parse prize manifest");
+        let simf_path = crate_dir.join("../examples/prize_contest/prize.simf");
+        let (params, hints) = (HashMap::new(), HashMap::new());
+
+        check_compile(&simf_path, &params, &hints, manifest.compile_opts())
+            .expect("prize.simf should compile with the manifest's unstable features");
+
+        let err = check_compile(&simf_path, &params, &hints, CompileOpts::default())
+            .expect_err("prize.simf must not compile with no unstable features enabled");
+        assert!(
+            err.to_string().contains("enums"),
+            "error should name the missing feature: {err}"
+        );
+    }
 
     /// The adapted last-will book example must compile with the three pubkey params
     /// wired in. Guards the tutorial's `.simf` against compiler/syntax drift.

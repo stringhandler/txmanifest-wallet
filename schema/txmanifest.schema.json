@@ -611,6 +611,13 @@
           "default": false,
           "description": "Whether covenant `.simf` programs are compiled with debug symbols included.\n\nThis changes the program's CMR **and therefore every covenant address**, because `assert!`/`panic!` embed source info into `fail`-node commitments. Set it to match the toolchain of any protocol this manifest must interoperate with — e.g. `true` for simplicity-lending / `smplx-sdk`, which compiles with debug symbols on.\n\nDefaults to `false` (production; debug symbols are a transitional feature).",
           "type": "boolean"
+        },
+        "unstable_features": {
+          "description": "Unstable SimplicityHL compiler features this manifest's programs are allowed to use — the manifest form of `simc -Z <name>`, one entry per feature:\n\n```json \"simplicity_hl\": { \"unstable_features\": [\"enums\"] } ```\n\nThe compiler rejects gated syntax unless the feature is enabled, so a program using `enum` fails to compile until `\"enums\"` is listed here. Enabling a feature the programs don't use is harmless: this only lifts a restriction, it never changes generated code, and therefore never changes a CMR or covenant address.\n\nManifest-wide rather than per-`utxo_type`, mirroring `simc`'s own per-invocation `-Z` flag — the whole point of a gate is that a reader can see, in one place, which unstable syntax this protocol depends on.\n\nDefaults to empty: nothing unstable is enabled.",
+          "items": {
+            "$ref": "#/definitions/UnstableFeatureName"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -712,6 +719,14 @@
         }
       ],
       "description": "Per-input / per-output UI hint. Accepts either a bare label string (`\"collateral locked\"`) or a detailed object for finer control.\n\nHand-deserialized rather than `#[serde(untagged)]`: an untagged enum reports only `data did not match any variant of untagged enum UiSpec`, swallowing the real reason. Dispatching on the JSON shape lets `UiDetail`'s own error through, so a misspelled key names itself."
+    },
+    "UnstableFeatureName": {
+      "description": "Unstable SimplicityHL compiler feature (`simc -Z <name>`).\n- imports — Module system syntax: 'use' imports, 'mod' modules, 'as' aliases, 'crate::' paths\n- enums — Enum syntax: 'enum' declarations and 'EnumName::Variant' match expressions",
+      "enum": [
+        "imports",
+        "enums"
+      ],
+      "type": "string"
     },
     "UtxoScript": {
       "additionalProperties": false,

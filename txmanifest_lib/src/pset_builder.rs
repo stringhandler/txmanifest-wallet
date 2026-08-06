@@ -627,9 +627,9 @@ pub fn covenant_script_pubkey(
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
     network: ElementsNetwork,
-    include_debug_symbols: bool,
+    opts: impl Into<covenant::CompileOpts>,
 ) -> Result<Script> {
-    let addr = covenant::compute_covenant_address(simf_path, compile_params, type_hints, extra_leaf_payloads, network, include_debug_symbols)
+    let addr = covenant::compute_covenant_address(simf_path, compile_params, type_hints, extra_leaf_payloads, network, opts)
         .with_context(|| "Cannot compute covenant address")?;
     Ok(addr.script_pubkey())
 }

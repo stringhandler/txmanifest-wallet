@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use simplicityhl::{UnstableFeature, UnstableFeatures};
 
 // ---------------------------------------------------------------------------
 // Top-level file
@@ -50,6 +52,92 @@ pub struct SimplicityHl {
     /// Defaults to `false` (production; debug symbols are a transitional feature).
     #[serde(default)]
     pub debug_symbols: bool,
+
+    /// Unstable SimplicityHL compiler features this manifest's programs are allowed to
+    /// use — the manifest form of `simc -Z <name>`, one entry per feature:
+    ///
+    /// ```json
+    /// "simplicity_hl": { "unstable_features": ["enums"] }
+    /// ```
+    ///
+    /// The compiler rejects gated syntax unless the feature is enabled, so a program
+    /// using `enum` fails to compile until `"enums"` is listed here. Enabling a feature
+    /// the programs don't use is harmless: this only lifts a restriction, it never
+    /// changes generated code, and therefore never changes a CMR or covenant address.
+    ///
+    /// Manifest-wide rather than per-`utxo_type`, mirroring `simc`'s own per-invocation
+    /// `-Z` flag — the whole point of a gate is that a reader can see, in one place,
+    /// which unstable syntax this protocol depends on.
+    ///
+    /// Defaults to empty: nothing unstable is enabled.
+    #[serde(default)]
+    pub unstable_features: Vec<UnstableFeatureName>,
+}
+
+/// One entry of [`SimplicityHl::unstable_features`], parsed straight into the compiler's
+/// own [`UnstableFeature`] so the manifest and the toolchain cannot disagree about which
+/// names exist.
+///
+/// Both directions of drift are therefore load-time errors, which is the intent: a
+/// misspelling (`"enum"`), and a feature that has since *stabilized* upstream — the
+/// variant is deleted on stabilization, and the stale `-Z` name it leaves behind in a
+/// manifest is no longer meaningful.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnstableFeatureName(pub UnstableFeature);
+
+impl<'de> Deserialize<'de> for UnstableFeatureName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        UnstableFeature::from_str(&raw).map(Self).map_err(|_| {
+            serde::de::Error::custom(format!(
+                "unknown SimplicityHL unstable feature '{raw}'; known features: {}",
+                known_unstable_feature_names().join(", ")
+            ))
+        })
+    }
+}
+
+impl JsonSchema for UnstableFeatureName {
+    fn schema_name() -> String {
+        "UnstableFeatureName".to_string()
+    }
+
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        // Enumerated from the compiler's own list rather than hand-copied, so the
+        // published schema tracks the toolchain the same way the parser does.
+        schemars::schema::SchemaObject {
+            instance_type: Some(schemars::schema::InstanceType::String.into()),
+            enum_values: Some(
+                UnstableFeature::ALL
+                    .iter()
+                    .map(|feature| serde_json::Value::String(feature.to_string()))
+                    .collect(),
+            ),
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some(unstable_feature_descriptions()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .into()
+    }
+}
+
+/// Every `-Z` name the linked compiler accepts, for error messages.
+fn known_unstable_feature_names() -> Vec<String> {
+    UnstableFeature::ALL
+        .iter()
+        .map(UnstableFeature::to_string)
+        .collect()
+}
+
+/// `name — what it enables` for each feature, as the schema's description.
+fn unstable_feature_descriptions() -> String {
+    let mut out = String::from("Unstable SimplicityHL compiler feature (`simc -Z <name>`).");
+    for feature in UnstableFeature::ALL {
+        out.push_str(&format!("\n- {feature} — {}", feature.description()));
+    }
+    out
 }
 
 /// Structural keys an author may place in a manifest that carry no protocol meaning
@@ -922,6 +1010,26 @@ impl Manifest {
         self.simplicity_hl.as_ref().is_some_and(|s| s.debug_symbols)
     }
 
+    /// The unstable SimplicityHL features this manifest enables for its `.simf` programs.
+    /// Empty by default; see [`SimplicityHl::unstable_features`].
+    pub fn unstable_features(&self) -> UnstableFeatures {
+        UnstableFeatures::new(
+            self.simplicity_hl
+                .iter()
+                .flat_map(|hl| hl.unstable_features.iter().map(|name| name.0)),
+        )
+    }
+
+    /// Everything the SimplicityHL compiler needs from this manifest, in the shape the
+    /// [`crate::covenant`] helpers take. Build this once per run and pass it down —
+    /// deriving it per call site is how the two settings drift apart.
+    pub fn compile_opts(&self) -> crate::covenant::CompileOpts {
+        crate::covenant::CompileOpts {
+            debug_symbols: self.include_debug_symbols(),
+            unstable_features: self.unstable_features(),
+        }
+    }
+
     /// Look up a named `utxo_type` entry.
     pub fn utxo_type(&self, name: &str) -> anyhow::Result<&UtxoType> {
         self.utxo_types
@@ -1205,6 +1313,60 @@ mod tests {
         let absent =
             Manifest::from_json_str(r#"{ "manifest_version": "1", "protocol": "t" }"#).unwrap();
         assert!(!absent.include_debug_symbols());
+    }
+
+    #[test]
+    fn unstable_features_reach_the_compiler_and_default_to_none() {
+        // The point of the field is that the set handed to the compiler is exactly what
+        // the manifest listed — an entry that silently doesn't arrive shows up much later
+        // as an "unstable feature not enabled" compile error.
+        let enabled = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t",
+                 "simplicity_hl": { "unstable_features": ["enums"] } }"#,
+        )
+        .expect("unstable_features should parse");
+        assert_eq!(
+            enabled.unstable_features(),
+            UnstableFeatures::new([UnstableFeature::Enums])
+        );
+        // Purely a gate: it must not drag debug symbols (which move every address) along.
+        assert!(!enabled.include_debug_symbols());
+
+        // Absent block, empty block and empty list all mean "nothing unstable".
+        for json in [
+            r#"{ "manifest_version": "1", "protocol": "t" }"#,
+            r#"{ "manifest_version": "1", "protocol": "t", "simplicity_hl": {} }"#,
+            r#"{ "manifest_version": "1", "protocol": "t",
+                 "simplicity_hl": { "unstable_features": [] } }"#,
+        ] {
+            let m = Manifest::from_json_str(json).expect("should parse");
+            assert_eq!(m.unstable_features(), UnstableFeatures::none(), "{json}");
+        }
+
+        // A name the compiler doesn't know is a load-time error, not a mystery compile
+        // failure later — and the message says which names exist.
+        let err = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t",
+                 "simplicity_hl": { "unstable_features": ["enum"] } }"#,
+        )
+        .expect_err("a misspelled feature must not parse");
+        let msg = err.to_string();
+        assert!(msg.contains("enum"), "{msg}");
+        assert!(msg.contains("enums"), "message should list known features: {msg}");
+
+        // Both settings travel together to the compile sites.
+        let both = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t",
+                 "simplicity_hl": { "debug_symbols": true, "unstable_features": ["enums", "enums"] } }"#,
+        )
+        .expect("both settings should parse");
+        let opts = both.compile_opts();
+        assert!(opts.debug_symbols);
+        // Duplicates collapse rather than being passed through twice.
+        assert_eq!(
+            opts.unstable_features,
+            UnstableFeatures::new([UnstableFeature::Enums])
+        );
     }
 
     #[test]

@@ -181,10 +181,11 @@ pub fn run(
     let manifest: Manifest = Manifest::from_json_str(&raw).with_context(|| {
         format!("Failed to parse manifest file: {}", manifest_file.display())
     })?;
-    // Whether covenants compile with SimplicityHL debug symbols (affects every CMR/address).
-    // Sourced from the manifest so interop targets (e.g. simplicity-lending) can be matched
-    // without hardcoding; defaults to false.
-    let include_debug_symbols = manifest.include_debug_symbols();
+    // How every `.simf` in this run compiles: debug symbols (which affect every CMR and
+    // address, so interop targets like simplicity-lending can be matched without
+    // hardcoding) and any unstable `-Z` features the programs need. Sourced from the
+    // manifest's `simplicity_hl` block once, then passed to every compile site.
+    let compile_opts = manifest.compile_opts();
     // INPUT paths (instance load, state load) are NEVER auto-discovered: a run only
     // loads an instance/state if one is passed explicitly (`--instance` / `--state`).
     // This keeps a stale on-disk file from silently overriding `--params` and never
@@ -722,6 +723,7 @@ pub fn run(
                 &cp_map,
                 &compile_param_type_hints,
                 input_hex,
+                &compile_opts,
             ) {
                 Ok(result_hex) => {
                     println!(
@@ -864,7 +866,7 @@ pub fn run(
                 hints
             };
             let pre_fields = eval_create_instance_fields(
-                ci, &ctx, manifest_file, &pre_hints, net_for_hash, false, include_debug_symbols,
+                ci, &ctx, manifest_file, &pre_hints, net_for_hash, false, &compile_opts,
             );
             for (name, val) in pre_fields {
                 ctx.set_compile_param(&name, val);
@@ -1077,7 +1079,7 @@ pub fn run(
                     inp_params, inp_hints, inp.utxo_source.get("compile_params"),
                     action, &compile_param_type_hints, &ctx,
                 );
-                let script_pubkey = match pset_builder::covenant_script_pubkey(&inp_simf_path, &inp_params, &inp_hints, &leaf_payloads, net, include_debug_symbols) {
+                let script_pubkey = match pset_builder::covenant_script_pubkey(&inp_simf_path, &inp_params, &inp_hints, &leaf_payloads, net, &compile_opts) {
                     Ok(s) => s,
                     Err(e) => {
                         println!("  {} Covenant address failed (input '{}'):", style("[error]").red(), inp.id);
@@ -1271,7 +1273,7 @@ pub fn run(
                             out_params, out_hints, m.get("compile_params"),
                             action, &compile_param_type_hints, &ctx,
                         );
-                        let script_pubkey = match pset_builder::covenant_script_pubkey(&out_simf_path, &out_params, &out_hints, &leaf_payloads, net, include_debug_symbols) {
+                        let script_pubkey = match pset_builder::covenant_script_pubkey(&out_simf_path, &out_params, &out_hints, &leaf_payloads, net, &compile_opts) {
                             Ok(s) => s,
                             Err(e) => {
                                 println!("  {} Covenant address failed (output '{}'):", style("[error]").red(), output.id);
@@ -1592,7 +1594,7 @@ pub fn run(
                 );
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
-                match covenant::check_compile(&check_simf_path, &check_params, &check_hints, include_debug_symbols) {
+                match covenant::check_compile(&check_simf_path, &check_params, &check_hints, &compile_opts) {
                     Ok(()) => println!("{}", style("OK").green()),
                     Err(e) => {
                         println!("{}", style("FAILED").red());
@@ -1709,7 +1711,7 @@ pub fn run(
                                         pset_idx as u32,
                                         genesis_hash,
                                         debug_jets,
-                                        include_debug_symbols,
+                                        &compile_opts,
                                     ) {
                                         Ok(()) => println!("{}", style("OK").green()),
                                         Err(e) => {
@@ -1877,7 +1879,7 @@ pub fn run(
                                     pset_idx as u32,
                                     genesis_hash,
                                     &mut pset.inputs_mut()[pset_idx],
-                                    include_debug_symbols,
+                                    &compile_opts,
                                 ) {
                                     Ok(()) => println!("{}", style("OK").green()),
                                     Err(e) => {
@@ -1933,7 +1935,7 @@ pub fn run(
         println!();
         println!("{}", step_header("Step 9b: Creating Instance"));
         let fields = eval_create_instance_fields(
-            ci, &ctx, manifest_file, &create_instance_hints, net_for_hash, true, include_debug_symbols,
+            ci, &ctx, manifest_file, &create_instance_hints, net_for_hash, true, &compile_opts,
         );
         let inst = crate::instance::InstanceFile {
             instance: Some(crate::instance::InstanceData {
@@ -3022,9 +3024,11 @@ fn eval_create_instance_fields(
     type_hints: &std::collections::HashMap<String, String>,
     network: lwk_wollet::ElementsNetwork,
     verbose: bool,
-    include_debug_symbols: bool,
+    opts: impl Into<crate::covenant::CompileOpts>,
 ) -> std::collections::HashMap<String, String> {
     use crate::manifest::ComputeSpec;
+
+    let opts = opts.into();
 
     let mut fields: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     // Track which field names still need evaluation; start with all of them.
@@ -3155,7 +3159,7 @@ fn eval_create_instance_fields(
                                     match leaves_result {
                                         None => None, // a leaf ref not yet computed — retry in a later pass
                                         Some(leaves) => {
-                                            match covenant::compute_covenant_script_hash_with_leaves(&simf_path, &p, &hints, &leaves, network, include_debug_symbols) {
+                                            match covenant::compute_covenant_script_hash_with_leaves(&simf_path, &p, &hints, &leaves, network, &opts) {
                                                 Ok(hash_bytes) => {
                                                     Some(hash_bytes.iter().map(|b| format!("{b:02x}")).collect())
                                                 }
@@ -4135,9 +4139,9 @@ mod tests {
             .expect("MakeOffer method exists");
         let ci = action.create_instance.as_ref().expect("MakeOffer has create_instance");
 
-        // Track the manifest's own setting — debug symbols change the CMR, so a hardcoded
+        // Track the manifest's own settings — debug symbols change the CMR, so a hardcoded
         // value here would verify a compilation mode the CLI never actually runs.
-        let debug = manifest.include_debug_symbols();
+        let compile_opts = manifest.compile_opts();
         let maker_pub_key = "e1512ae2f5b4ee8c12e9c57ccd0943273c6256f496516d3aefeaa16c32d3c05b";
         let lbtc_testnet = "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49";
         let usdt_ish = "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5";
@@ -4163,7 +4167,7 @@ mod tests {
             }
         }
 
-        let fields = eval_create_instance_fields(ci, &ctx, &manifest_path, &hints, net, false, debug);
+        let fields = eval_create_instance_fields(ci, &ctx, &manifest_path, &hints, net, false, &compile_opts);
 
         // MAKER_SPK is sha256 of the maker_payout covenant's scriptPubKey — verify against the
         // program itself rather than a copied constant.
@@ -4173,7 +4177,7 @@ mod tests {
         let payout_hints: std::collections::HashMap<String, String> =
             [("PUB_KEY".to_string(), "pubkey".to_string())].into_iter().collect();
         let payout_addr = crate::covenant::compute_covenant_address(
-            &payout_simf, &payout_params, &payout_hints, &[], net, debug,
+            &payout_simf, &payout_params, &payout_hints, &[], net, &compile_opts,
         )
         .expect("maker_payout covenant address compiles");
         let expect_spk_hash: String =
@@ -4211,7 +4215,7 @@ mod tests {
         );
         let offer_simf = manifest_path.parent().unwrap().join("tessera.simf");
         let offer_addr = crate::covenant::compute_covenant_address(
-            &offer_simf, &offer_params, &offer_hints, &[], net, debug,
+            &offer_simf, &offer_params, &offer_hints, &[], net, &compile_opts,
         )
         .expect("tessera_offer covenant address compiles from create_instance output");
 
@@ -4219,7 +4223,7 @@ mod tests {
         let mut bumped = offer_params.clone();
         bumped.insert("AMOUNT_B".to_string(), "50001".to_string());
         let bumped_addr = crate::covenant::compute_covenant_address(
-            &offer_simf, &bumped, &offer_hints, &[], net, debug,
+            &offer_simf, &bumped, &offer_hints, &[], net, &compile_opts,
         )
         .expect("bumped offer address compiles");
         assert_ne!(
@@ -4234,7 +4238,7 @@ mod tests {
         other_side.insert("OFFER_ASSET_ID".to_string(), lbtc_testnet.to_string());
         other_side.insert("OFFER_AMOUNT".to_string(), "999".to_string());
         let other_side_addr = crate::covenant::compute_covenant_address(
-            &offer_simf, &other_side, &offer_hints, &[], net, debug,
+            &offer_simf, &other_side, &offer_hints, &[], net, &compile_opts,
         )
         .expect("offer address compiles with a different asset A");
         assert_eq!(
