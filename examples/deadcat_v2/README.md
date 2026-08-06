@@ -1,5 +1,13 @@
 # deadcat_v2 — explicit reissuance tokens
 
+> **Superseded — this fork does not work.** Elements' reissuance branch rebuilds the spent
+> token's asset tag from the blinding nonce and byte-compares it against the input's asset
+> *commitment* (`confidential_validation.cpp`). An explicit asset starts `0x01`, a generator
+> starts `0x0a`/`0x0b`, so no nonce can ever make an explicit reissuance token validate.
+> Unblinding the tokens is therefore impossible, not merely inadvisable, and Deadcat's
+> design doc §13 was literal. See [`deadcat_v3`](../deadcat_v3/README.md) for the fork that
+> works. Kept as the record of what was tried and why it failed.
+
 Same protocol as [`examples/deadcat`](../deadcat/README.md), one forked covenant. Read that
 README first — the state model, the seven spending paths, the fee-index rules and the
 bootstrap flow are all identical and are documented there. This file only covers the delta.
