@@ -165,6 +165,15 @@ Deadcat client today. Five things stand between the two, four of them engine gap
    paths. It also means the eight `*_ABF` / `*_VBF` witnesses have no manifest spelling:
    they are per-UTXO secrets, and a witness `value` can only reference values the engine
    already holds.
+
+   In practice it surfaces on `InitialIssuance` as `Execution reached a pruned branch`,
+   with `no_reissuance_in` (path 7, script-hash comparison only) finalizing while
+   `yes_reissuance_in` (path 1, commitment arithmetic) fails.
+
+   **[`examples/deadcat_v2`](../deadcat_v2/README.md) is the same protocol with these
+   tokens read explicitly**, and it runs. It is a fork — different CMR, different
+   addresses, not Deadcat-compatible — which is why this unmodified port stays: it is what
+   `deadcat_recon` checks against upstream.
 2. **Reissuance from a confidential input.** Relatedly, `apply_reissuance` sets the
    issuance blinding nonce to a fixed marker (`[0…0, 1]`) rather than the input's real asset
    blinding factor, which is correct only for explicit reissuance-token UTXOs.
@@ -179,22 +188,22 @@ Deadcat client today. Five things stand between the two, four of them engine gap
    the same limitation the `dex` example's `Refund` hits, tracked in
    `meta/tasks/upnext/12-engine-absolute-locktime.md`. The *pre*-expiry paths are fine: they
    assert `lock_time < EXPIRY_TIME`, which the default locktime of 0 satisfies.
-5. **One thing you must carry by hand.** Every reissuance input needs `issuance_entropy` in
-   the instance file's `provided_inputs`, and the engine reads that field but never writes
-   it — `create_instance` always writes `provided_inputs: {}`, discarding the entropy it
-   just computed and put in the context. `IssueReissuanceTokens` now prints it, so copy it
-   in before running `InitialIssuance`:
+5. Nothing is hand-carried any more. The two issuance entropies used to be, because a
+   reissuance cannot recover its entropy from anything on chain — the reissuance token UTXO
+   holds no trace of the outpoint that created the asset. The constructor now captures them
+   as instance fields, and each reissuance input names the one it needs:
 
    ```json
-   "provided_inputs": {
-     "yes_reissuance_in": { "txid": "…", "vout": 0, "amount_sat": 1,
-                            "asset": "<YES_REISSUANCE_TOKEN>",
-                            "issuance_entropy": "<printed by IssueReissuanceTokens>" }
-   }
+   "issuance": { "kind": "reissue", "asset_amount_sat": "params.PAIRS",
+                 "entropy": "instance.YES_ISSUANCE_ENTROPY",
+                 "issued_asset": "instance.YES_TOKEN_ASSET" }
    ```
 
-   (The four asset ids used to be a second hand-carried value; they are now captured into
-   the instance by the constructor's `on_resolved` hooks.)
+   `issued_asset` is a check, not an input: the engine re-derives the asset id from the
+   entropy and refuses to build if they disagree. Worth having, because an entropy is
+   opaque — and the byte order a block explorer prints is the **reverse** of the one used
+   here, so a value copied from one is well-formed, builds, broadcasts, and reissues the
+   wrong asset.
 
 Witness values *do* interpolate — `"value": "params.TOKENS_BURNED"` is substituted before
 the SimplicityHL parser sees it — but they are parsed as raw literals with no type hint, so

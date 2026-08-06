@@ -443,6 +443,16 @@ fn resolve_ref(name: &str, ctx: &ExecutionContext) -> Option<String> {
     None
 }
 
+/// Resolve any dotted reference (`instance.X`, `params.X`, `inputs.<id>.<field>`) to its
+/// STRING value, or `None` if it does not resolve.
+///
+/// The public door onto the same resolver `eval_asset_label` uses. Callers that need a
+/// 32-byte value — an asset id, an issuance entropy — must come through here rather than
+/// [`eval_expr_str`], which is arithmetic and returns a `u64`.
+pub fn resolve_value_ref(name: &str, ctx: &ExecutionContext) -> Option<String> {
+    resolve_ref(name.trim(), ctx)
+}
+
 /// Resolve a `<input_id>.<field>` reference — the tail of an `inputs.` / `$inputs.` path.
 ///
 /// Public so `create_instance` field expressions can take the same route: they need a
@@ -467,11 +477,15 @@ pub fn resolve_input_ref(rest: &str, ctx: &ExecutionContext) -> Option<String> {
 /// - `amount_sat`       — its value
 /// - `issued_asset`     — asset id created by this input's issuance, if any
 /// - `reissuance_token` — reissuance token id created by this input's issuance, if any
+/// - `issuance_entropy` — the issuance entropy, hex. Set once the PSET is built, so a
+///   constructor can persist it; a later reissuance of the same asset needs it and cannot
+///   derive it from anything on chain.
 fn resolve_input_field(input_id: &str, field: &str, ctx: &ExecutionContext) -> Option<String> {
     if let Some(inp) = ctx.get_input(input_id) {
         match field {
             "amount_sat" => return Some(inp.amount_sat.to_string()),
             "asset" => return Some(inp.asset.clone()),
+            "issuance_entropy" => return inp.issuance_entropy.clone(),
             _ => {}
         }
     }

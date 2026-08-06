@@ -624,17 +624,15 @@ pub fn run(
                 }
             }
             Some("reissue") => {
-                let (rt_asset, entropy_hex_opt) = match ctx.get_input(&inp.id) {
-                    Some(r) => (r.asset.clone(), r.issuance_entropy.clone()),
+                let rt_asset = match ctx.get_input(&inp.id) {
+                    Some(r) => r.asset.clone(),
                     None => continue,
                 };
                 ctx.set_input_attr(&inp.id, "reissuance_token", &rt_asset);
-                if let Some(entropy_hex) = entropy_hex_opt {
-                    if let Ok(entropy) = pset_builder::decode_entropy_hex(&entropy_hex) {
-                        if let Ok(asset_id) = pset_builder::compute_asset_from_entropy(&entropy) {
-                            ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
-                            ctx.set_input_attr(&inp.id, "issued_asset", asset_id.to_string());
-                        }
+                if let Ok(Some(entropy)) = resolve_issuance_entropy(inp, &ctx) {
+                    if let Ok(asset_id) = pset_builder::compute_asset_from_entropy(&entropy) {
+                        ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
+                        ctx.set_input_attr(&inp.id, "issued_asset", asset_id.to_string());
                     }
                 }
             }
@@ -921,17 +919,15 @@ pub fn run(
                     }
                 }
                 Some("reissue") => {
-                    let (rt_asset, entropy_hex_opt) = match ctx.get_input(&inp.id) {
-                        Some(r) => (r.asset.clone(), r.issuance_entropy.clone()),
+                    let rt_asset = match ctx.get_input(&inp.id) {
+                        Some(r) => r.asset.clone(),
                         None => continue,
                     };
                     ctx.set_input_attr(&inp.id, "reissuance_token", &rt_asset);
-                    if let Some(entropy_hex) = entropy_hex_opt {
-                        if let Ok(entropy) = pset_builder::decode_entropy_hex(&entropy_hex) {
-                            if let Ok(asset_id) = pset_builder::compute_asset_from_entropy(&entropy) {
-                                ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
-                                ctx.set_input_attr(&inp.id, "issued_asset", asset_id.to_string());
-                            }
+                    if let Ok(Some(entropy)) = resolve_issuance_entropy(inp, &ctx) {
+                        if let Ok(asset_id) = pset_builder::compute_asset_from_entropy(&entropy) {
+                            ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
+                            ctx.set_input_attr(&inp.id, "issued_asset", asset_id.to_string());
                         }
                     }
                 }
@@ -975,25 +971,24 @@ pub fn run(
                         }
                         None => 0,
                     };
-                    let entropy = if let Some(resolved) = ctx.get_input(&inp.id) {
-                        if let Some(hex) = &resolved.issuance_entropy.clone() {
-                            match pset_builder::decode_entropy_hex(hex) {
-                                Ok(e) => e,
-                                Err(err) => {
-                                    println!("  {} Input '{}' entropy decode failed: {err}", style("[error]").red(), inp.id);
-                                    collect_inputs_ok = false;
-                                    break;
-                                }
-                            }
-                        } else {
-                            println!("  {} Input '{}' is a reissuance but has no issuance_entropy — add it to the instance file.", style("[error]").red(), inp.id);
+                    let entropy = match resolve_issuance_entropy(inp, &ctx) {
+                        Ok(Some(e)) => e,
+                        Ok(None) => {
+                            println!(
+                                "  {} Input '{}' is a reissuance but no entropy was found. Give the 
+         issuance an \"entropy\" reference (e.g. \"instance.YES_ISSUANCE_ENTROPY\",
+         captured by the constructor as \"$inputs.<id>.issuance_entropy\"), or put
+         issuance_entropy on this input in the instance file's provided_inputs.",
+                                style("[error]").red(), inp.id
+                            );
                             collect_inputs_ok = false;
                             break;
                         }
-                    } else {
-                        println!("  {} Input '{}' not resolved", style("[error]").red(), inp.id);
-                        collect_inputs_ok = false;
-                        break;
+                        Err(e) => {
+                            println!("  {} Input '{}': {e}", style("[error]").red(), inp.id);
+                            collect_inputs_ok = false;
+                            break;
+                        }
                     };
                     Some(pset_builder::IssuanceKind::Reissue { asset_amount, entropy })
                 }
@@ -2618,6 +2613,59 @@ fn issuance_kind(input: &crate::manifest::Input) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+/// Resolve the issuance entropy for a reissuance input.
+///
+/// Two sources, in order:
+/// 1. `issuance.entropy` — a reference into the run context, normally an instance field a
+///    constructor captured with `$inputs.<id>.issuance_entropy`. This is the good path: the
+///    value travels with the contract and nothing has to pin an outpoint to carry it.
+/// 2. `provided_inputs.<id>.issuance_entropy` in the instance file — the older path, kept
+///    working. It rides along with an outpoint override, which pins that input for *every*
+///    action sharing the input id, long after the pin stops being correct.
+///
+/// Returns `Ok(None)` when neither is present, so the caller can name the offending input.
+fn resolve_issuance_entropy(
+    inp: &crate::manifest::Input,
+    ctx: &ExecutionContext,
+) -> anyhow::Result<Option<[u8; 32]>> {
+    let spec = inp.issuance.as_ref();
+    let entropy_ref = spec.and_then(|v| v.get("entropy")).and_then(|v| v.as_str());
+
+    let hex = match entropy_ref {
+        Some(r) => Some(eval::resolve_value_ref(r, ctx).ok_or_else(|| {
+            anyhow::anyhow!(
+                "issuance.entropy '{r}' does not resolve — a constructor should capture it \
+                 with \"$inputs.<id>.issuance_entropy\""
+            )
+        })?),
+        None => ctx.get_input(&inp.id).and_then(|r| r.issuance_entropy.clone()),
+    };
+
+    let Some(hex) = hex else { return Ok(None) };
+    let entropy = pset_builder::decode_entropy_hex(&hex)
+        .with_context(|| format!("issuance entropy '{hex}' is not 32 bytes of hex"))?;
+
+    // Optional cross-check. An entropy is opaque — a byte-reversed one (the order every
+    // block explorer prints) is still well-formed, and the transaction it builds still
+    // broadcasts; it just reissues a different asset. Re-deriving the asset id turns that
+    // into an error here rather than a wrong market later.
+    if let Some(expected_ref) = spec
+        .and_then(|v| v.get("issued_asset"))
+        .and_then(|v| v.as_str())
+    {
+        if let Some(expected) = eval::resolve_value_ref(expected_ref, ctx) {
+            let derived = pset_builder::compute_asset_from_entropy(&entropy)?.to_string();
+            anyhow::ensure!(
+                derived == expected,
+                "issuance entropy does not produce the declared asset:\n      \
+                 entropy  {hex}\n      derives  {derived}\n      declared {expected} ({expected_ref})\n      \
+                 note: an entropy copied from a block explorer is byte-reversed relative to this one"
+            );
+        }
+    }
+    Ok(Some(entropy))
+}
+
 fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -3528,6 +3576,107 @@ mod tests {
             "`asset` must stay the SPENT utxo's asset — if this ever aliases to the issued \
              asset, every manifest using `.asset` on a funding input changes meaning",
         );
+    }
+
+    /// Build a reissuance input whose `issuance` block carries the given extra keys.
+    #[cfg(test)]
+    fn reissue_input(extra: serde_json::Value) -> crate::manifest::Input {
+        let mut iss = serde_json::json!({ "kind": "reissue", "asset_amount_sat": 10 });
+        for (k, v) in extra.as_object().unwrap() {
+            iss[k] = v.clone();
+        }
+        serde_json::from_value(serde_json::json!({
+            "id": "yes_reissuance_in",
+            "utxo_source": "wallet",
+            "issuance": iss
+        }))
+        .expect("test input should deserialize")
+    }
+
+    /// The entropy that mints the real testnet market's YES asset, and the asset id it
+    /// must produce. Taken from the live chain (mint tx 14369d64…), so this also pins the
+    /// byte order: a block explorer prints this entropy reversed.
+    #[cfg(test)]
+    const YES_ENTROPY: &str = "f8326827828ee2aab3c4d273fb573a8cf89a401bbc6643637d439ff36c60b6b9";
+    #[cfg(test)]
+    const YES_ASSET: &str = "3a8b6b466346d9dbfcecd8c8d7b0c1873aee4e00fd5df0d95086a3f7eecd5a39";
+
+    #[test]
+    fn issuance_entropy_comes_from_the_reference() {
+        let mut ctx = ExecutionContext::new();
+        ctx.set_compile_param("YES_ISSUANCE_ENTROPY", YES_ENTROPY);
+
+        let inp = reissue_input(serde_json::json!({ "entropy": "instance.YES_ISSUANCE_ENTROPY" }));
+        let entropy = resolve_issuance_entropy(&inp, &ctx)
+            .expect("should resolve")
+            .expect("should be present");
+        assert_eq!(hex_bytes(&entropy), YES_ENTROPY);
+    }
+
+    #[test]
+    fn issuance_entropy_cross_check_rejects_a_reversed_value() {
+        // The failure this check exists for. A byte-reversed entropy — the order every
+        // block explorer prints — is still 32 well-formed bytes, still builds, still
+        // broadcasts, and reissues a completely different asset.
+        let mut reversed = pset_builder::decode_entropy_hex(YES_ENTROPY).unwrap();
+        reversed.reverse();
+
+        let mut ctx = ExecutionContext::new();
+        ctx.set_compile_param("YES_ISSUANCE_ENTROPY", hex_bytes(&reversed));
+        ctx.set_compile_param("YES_TOKEN_ASSET", YES_ASSET);
+
+        let inp = reissue_input(serde_json::json!({
+            "entropy": "instance.YES_ISSUANCE_ENTROPY",
+            "issued_asset": "instance.YES_TOKEN_ASSET"
+        }));
+        let err = resolve_issuance_entropy(&inp, &ctx).expect_err("reversed entropy must fail");
+        assert!(
+            err.to_string().contains("does not produce the declared asset"),
+            "unexpected error: {err}"
+        );
+
+        // …and the correct order passes the same check.
+        ctx.set_compile_param("YES_ISSUANCE_ENTROPY", YES_ENTROPY);
+        assert!(resolve_issuance_entropy(&inp, &ctx).unwrap().is_some());
+    }
+
+    #[test]
+    fn issuance_entropy_falls_back_to_provided_inputs() {
+        // The old path stays working: no `entropy` reference, value from the instance
+        // file's provided_inputs.
+        let mut ctx = ExecutionContext::new();
+        ctx.set_input(ResolvedInput {
+            id: "yes_reissuance_in".to_string(),
+            txid: "aa".repeat(32),
+            vout: 0,
+            amount_sat: 1,
+            asset: "bb".repeat(32),
+            issuance_entropy: Some(YES_ENTROPY.to_string()),
+        });
+        let entropy = resolve_issuance_entropy(&reissue_input(serde_json::json!({})), &ctx)
+            .expect("should resolve")
+            .expect("should be present");
+        assert_eq!(hex_bytes(&entropy), YES_ENTROPY);
+    }
+
+    #[test]
+    fn issuance_entropy_absent_is_reported_not_guessed() {
+        let ctx = ExecutionContext::new();
+        assert!(
+            resolve_issuance_entropy(&reissue_input(serde_json::json!({})), &ctx)
+                .expect("missing entropy is not an error, it is a None")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_entropy_reference_is_an_error() {
+        // Distinct from "absent": the manifest named a value and it was not there, which
+        // is a broken manifest rather than a missing instance field.
+        let ctx = ExecutionContext::new();
+        let inp = reissue_input(serde_json::json!({ "entropy": "instance.NOT_SET" }));
+        let err = resolve_issuance_entropy(&inp, &ctx).expect_err("should error");
+        assert!(err.to_string().contains("does not resolve"), "unexpected: {err}");
     }
 
     /// A 32-byte id can only travel by a `$` form. The bare-expression path is arithmetic

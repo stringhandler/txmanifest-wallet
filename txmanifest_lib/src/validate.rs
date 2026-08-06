@@ -260,6 +260,7 @@ fn check_action(
                 other => report.warn(&iloc, format!("unrecognized utxo_source: {other}")),
             }
             check_witnesses(report, &format!("{iloc}.witnesses"), &input.witnesses);
+            check_issuance(report, &format!("{iloc}.issuance"), &input.issuance);
         }
     }
 
@@ -494,6 +495,62 @@ const KNOWN_WITNESS_TYPES: &[&str] = &["simplicityhl", "Signature", "taproot_lea
 /// object missing/with an unknown `type` is silently dropped and zero-filled,
 /// which produces a covenant that fails at `run` time with no hint as to why —
 /// exactly the failure this check exists to surface statically.
+/// Validate an input's `issuance` block.
+///
+/// `entropy` gets the attention: without it a reissuance can only get its entropy from an
+/// outpoint pin in the instance file, and that pin applies to every action sharing the
+/// input id — so it keeps resolving to a UTXO that was spent several actions ago.
+fn check_issuance(report: &mut Report, loc: &str, issuance: &Option<Value>) {
+    let Some(issuance) = issuance else { return };
+    let Some(map) = issuance.as_object() else {
+        report.error(loc.to_string(), "issuance must be an object");
+        return;
+    };
+
+    let kind = map.get("kind").and_then(Value::as_str);
+    match kind {
+        Some("new") | Some("reissue") => {}
+        Some(other) => report.error(
+            loc.to_string(),
+            format!("unknown issuance kind '{other}' (expected \"new\" or \"reissue\")"),
+        ),
+        None => report.error(
+            loc.to_string(),
+            "issuance is missing a string \"kind\" (\"new\" or \"reissue\") and will be ignored at run time",
+        ),
+    }
+
+    for key in ["entropy", "issued_asset"] {
+        let Some(v) = map.get(key) else { continue };
+        if !v.is_string() {
+            report.error(
+                format!("{loc}.{key}"),
+                format!("{key} must be a reference string, e.g. \"instance.YES_ISSUANCE_ENTROPY\""),
+            );
+        }
+        // A new issuance DERIVES its entropy from the outpoint being spent; naming one
+        // would read as pinning a value that is in fact ignored.
+        if kind == Some("new") {
+            report.error(
+                format!("{loc}.{key}"),
+                format!(
+                    "'{key}' applies to a reissuance; a new issuance derives its entropy from \
+                     the outpoint it spends"
+                ),
+            );
+        }
+    }
+
+    if kind == Some("reissue") && !map.contains_key("entropy") {
+        report.warn(
+            loc.to_string(),
+            "no \"entropy\" reference — this reissuance can only run if the instance file \
+             carries issuance_entropy under provided_inputs, which also pins the outpoint \
+             for every action sharing this input id",
+        );
+    }
+}
+
 fn check_witnesses(report: &mut Report, loc: &str, witnesses: &Option<Value>) {
     let Some(witnesses) = witnesses else { return };
     let Some(map) = witnesses.as_object() else {

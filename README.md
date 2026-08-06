@@ -41,6 +41,7 @@ manifest-wallet/
     ├── lending/            # P2P collateralised lending protocol
     ├── dex/                # keyless atomic swap offers (Mosaik's Tessera covenant)
     ├── deadcat/            # binary prediction market with on-chain oracle resolution
+    ├── deadcat_v2/         # …same, with explicit reissuance tokens so it executes here
     └── last_will/          # time-locked inheritance
 ```
 

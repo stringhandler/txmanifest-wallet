@@ -209,7 +209,9 @@
         "id": {
           "type": "string"
         },
-        "issuance": true,
+        "issuance": {
+          "description": "An Elements asset issuance carried by this input.\n\n- `{\"kind\": \"new\", \"asset_amount_sat\": <expr>, \"inflation_amount_sat\": <expr>}` — mint a brand-new asset, whose id is derived from this input's outpoint. Either amount may be `0` (reissuance tokens only, or a fixed supply with no reissuance rights). - `{\"kind\": \"reissue\", \"asset_amount_sat\": <expr>, \"entropy\": <ref>}` — mint more of an existing asset by spending its reissuance token.\n\nA reissuance needs the **issuance entropy** of the original mint — `fast_merkle_root([sha256d(defining outpoint), contract_hash])`, the value the asset id itself is derived from. It cannot be recovered from anything on chain: the reissuance token UTXO carries no trace of the outpoint that created it. So a constructor has to capture it at the one moment it exists, and hand it back later:\n\n```json // in the minting action's create_instance: \"YES_ISSUANCE_ENTROPY\": \"$inputs.yes_defining_in.issuance_entropy\" // in the reissuing action's input: \"issuance\": { \"kind\": \"reissue\", \"asset_amount_sat\": \"params.PAIRS\", \"entropy\": \"instance.YES_ISSUANCE_ENTROPY\", \"issued_asset\": \"instance.YES_TOKEN_ASSET\" } ```\n\n`issued_asset` is optional and is a **check**, not an input: the engine re-derives the asset id from the entropy and refuses to build if the two disagree. An entropy is opaque, and the byte order block explorers print is the reverse of the one used here — without the check a transposed value still builds a broadcastable transaction that reissues the wrong asset.\n\nFailing that, the entropy may come from `provided_inputs.<input_id>.issuance_entropy` in the instance file. That works, but it travels with an outpoint override which pins the input for *every* action sharing its id — long after the pin is correct."
+        },
         "on_resolved": {
           "anyOf": [
             {
