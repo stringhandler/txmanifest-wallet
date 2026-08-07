@@ -352,7 +352,12 @@
           ]
         },
         "destination": {
-          "description": "\"change\" | \"params.<name>\" | {\"utxo_type\": \"...\"} | {\"type\": \"burn\"} | conditional"
+          "allOf": [
+            {
+              "$ref": "#/definitions/OutputDestination"
+            }
+          ],
+          "description": "Where this output's value goes. See [`OutputDestination`] for the accepted forms."
         },
         "id": {
           "type": "string"
@@ -388,6 +393,82 @@
         "id"
       ],
       "type": "object"
+    },
+    "OutputDestination": {
+      "anyOf": [
+        {
+          "description": "`change`, `wallet`, a literal address, or a `params.X` / `instance.X` reference that resolves to one.",
+          "examples": [
+            "change",
+            "wallet",
+            "params.receive_address"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The covenant address derived for a declared `utxo_type`.",
+          "properties": {
+            "args": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Binds the utxo_type's declared `params` for this site. Values are expressions in the ACTION's scope (`params.X`, `instance.X`, a literal). Every param without a default has to be bound here.",
+              "type": "object"
+            },
+            "compile_params": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Per-site compile-param overrides for this destination, resolved against the action's params.",
+              "type": "object"
+            },
+            "utxo_type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "utxo_type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "P2TR output built from a 32-byte script hash.",
+          "properties": {
+            "script_hash": {
+              "description": "32-byte hex, or a reference resolving to it.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "script_hash"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`op_return` / `burn` embed the output's own `data` field (bare OP_RETURN when absent). `fee` declares the fee leg and produces no PSET output of its own.",
+          "properties": {
+            "type": {
+              "enum": [
+                "op_return",
+                "burn",
+                "fee"
+              ]
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Conditional destination. Parsed but NOT implemented — the engine has no arm for it and skips the output entirely.",
+          "required": [
+            "if"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Where this output's value goes. A string is `change` (wallet change, amount auto-computed), `wallet` (a fresh receive address), or an address / `params.X` reference resolving to one."
     },
     "ParamCompute": {
       "description": "Auto-computation spec for a derived compile param or action param.\n\nDispatched by `type`, the same discriminator every other tagged object in the format uses (`script.type`, `destination.type`, a witness's `type`). Note this is the *method* of computation; the value's data type is `ParamDef::type_`, one level up. The legacy key `lang` is still accepted as an alias for the discriminator: - `\"expr\"`: arithmetic expression over other compile params (`pow(base, exp)` supported) - `\"tapleaf\"`: compile a `.simf` file and return its Simplicity tapleaf hash (32 bytes hex) - `\"simf_fn\"`: call a named function in a `.simf` file and use its return value - `\"wallet\"`: take the value from the executing wallet rather than the manifest, with `wallet` selecting which ([`WalletValue`])\n\nThe `wallet` variant differs from the others in kind: `expr`, `tapleaf` and `simf_fn` are reproducible by anyone holding the manifest, whereas a `wallet_*` value depends on who is running the action. They live here anyway because from an author's point of view they answer the same question — where does this value come from, if not the user? — and having two fields for that (the old `source`) meant two things to check and a name that collided with `script.source`, a file path.",
@@ -647,21 +728,104 @@
       ],
       "type": "object"
     },
+    "TaprootLeafKind": {
+      "description": "The hashing scheme for a [`TaprootLeafSpec`]'s payload.",
+      "oneOf": [
+        {
+          "description": "Elements taproot data leaf — the only scheme the engine implements.",
+          "enum": [
+            "tapdata"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "TaprootLeafPayloadItem": {
+      "anyOf": [
+        {
+          "description": "Hex literal taken as raw bytes, e.g. \"0x01\". Whole bytes only.",
+          "pattern": "^(?:0[xX])?(?:[0-9a-fA-F]{2})*$",
+          "type": "string"
+        },
+        {
+          "description": "Computed value, resolved against the run's params/instance fields and encoded per `type` / `endian` / `pad_to`.",
+          "properties": {
+            "align": {
+              "description": "Which end of the padded field the value occupies. Defaults to `right`.",
+              "enum": [
+                "left",
+                "right"
+              ]
+            },
+            "endian": {
+              "description": "Byte order for the integer types. Defaults to little-endian.",
+              "enum": [
+                "be",
+                "le"
+              ]
+            },
+            "pad_to": {
+              "description": "Pad the encoded value to this width in bytes — 32 for a slot the program hashes with `sha_256_ctx_8_add_32`.",
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "u8",
+                "u16",
+                "u32",
+                "u64",
+                "bytes32",
+                "bytes",
+                "pubkey"
+              ]
+            },
+            "value": {
+              "description": "`params.X`, `instance.X`, `<input_id>.<field>`, a bare param name, or a literal.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Reference to a `state_vars` entry; its `default_value` is encoded as a single u8.",
+          "properties": {
+            "state_var": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state_var"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "One item of a taproot leaf payload. Items are concatenated, in order, into the bytes that get hashed as the leaf."
+    },
     "TaprootLeafSpec": {
       "additionalProperties": false,
-      "description": "Describes one additional taproot leaf appended to the Simplicity program leaf.",
+      "description": "Describes one additional taproot leaf appended to the Simplicity program leaf.\n\nEach leaf's payload is hashed as `tapdata` — `SHA256(SHA256(\"TapData\") ‖ SHA256(\"TapData\") ‖ payload)`, which is the value a program computes with `jet::tapdata_init()`, `sha_256_ctx_8_add_*` and `finalize` — then folded into the tap tree with `TapBranch/elements` in declaration order, matching `jet::build_tapbranch`. The payload's **width must match what the `.simf` hashes**: `sha_256_ctx_8_add_32` wants exactly 32 bytes, `add_8` exactly 8. A mismatch yields a perfectly valid address that the covenant then refuses to recognize as its own.",
       "properties": {
         "$comment": {
           "description": "Documentation only; ignored by the engine.",
           "type": "string"
         },
         "payload": {
-          "description": "Ordered payload items: each is either a hex literal string (\"0x01\") or a state_var reference ({\"state_var\": \"name\"}).",
-          "items": true,
+          "description": "Ordered payload items, concatenated into this leaf's byte string.",
+          "items": {
+            "$ref": "#/definitions/TaprootLeafPayloadItem"
+          },
           "type": "array"
         },
         "type": {
-          "type": "string"
+          "allOf": [
+            {
+              "$ref": "#/definitions/TaprootLeafKind"
+            }
+          ],
+          "description": "How the payload is hashed. Only `tapdata` is implemented, and it was previously accepted as a free string — so any other spelling was silently hashed as tapdata anyway, producing an address whose derivation nobody had written down."
         }
       },
       "required": [
@@ -728,6 +892,37 @@
       ],
       "type": "string"
     },
+    "UtxoParamDef": {
+      "additionalProperties": false,
+      "description": "One entry of a [`UtxoType::params`] interface.",
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "default": {
+          "description": "Value to use when a site binds no `args` entry for this param.\n\nEvaluated in **instance scope**: a literal, or `instance.X` naming a field fixed when the contract was instantiated. Action scope is deliberately unreachable — a value that varies per run is exactly what a site must bind explicitly.\n\nWithout a default, every site must bind it, and `validate` says which ones don't.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "description": "Manifest type, used as the compile-param type hint (`u64`, `bytes32`, `liquid.asset_id`, …) — the same vocabulary action params use.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
     "UtxoScript": {
       "additionalProperties": false,
       "properties": {
@@ -787,6 +982,16 @@
         },
         "description": {
           "type": "string"
+        },
+        "params": {
+          "additionalProperties": {
+            "$ref": "#/definitions/UtxoParamDef"
+          },
+          "description": "This type's parameter interface — everything the address derivation may read.\n\nDeclaring it switches the type to a **closed scope**: `script.compile_params` and `extra_leaves` resolve `params.X` against *these* params and nothing else. A site binds them with `args` (`{\"utxo_type\": \"t\", \"args\": {\"STATE\": \"params.x\"}}`), whose values are expressions evaluated in the *action's* scope.\n\nWithout it, the type keeps the legacy behaviour: leaves and compile params resolve against whatever is ambient at each mention. That is what makes one `utxo_type` derive two different addresses in two actions — `params.foo` means one thing where the action declares `foo` and something else where it does not — with no error, because an address is a hash and a wrong one looks exactly like a right one.",
+          "type": [
+            "object",
+            "null"
+          ]
         },
         "script": {
           "anyOf": [

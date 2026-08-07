@@ -151,10 +151,58 @@ pub fn encode_leaf_value(
 ) -> Result<Vec<u8>> {
     let value_ref = item.get("value").and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("taproot leaf value item needs 'value': {item}"))?;
-    let resolved = resolve_ref(value_ref, ctx)
-        .unwrap_or_else(|| value_ref.trim_matches(['"', '\'']).to_string());
+    let resolved = match resolve_ref(value_ref, ctx) {
+        Some(resolved) => resolved,
+        // An explicitly namespaced reference that does not resolve is a *missing value*,
+        // never a literal. Falling through to the literal made the encoder report
+        // `invalid hex 'params.x'`, which sends the reader to inspect their hex when the
+        // real problem is that the action being run never sets `x`.
+        None if NAMESPACED_REF_PREFIXES.iter().any(|p| value_ref.starts_with(p)) => {
+            bail!(
+                "taproot leaf value '{value_ref}' does not resolve in this action. Every \
+                 action that builds this utxo_type's address has to supply it — declare it \
+                 as a param (or an instance field) there, or give this leaf a constant."
+            )
+        }
+        None => value_ref.trim_matches(['"', '\'']).to_string(),
+    };
     encode_leaf_bytes(item, &resolved)
 }
+
+/// Value prefixes that mark a string as a reference rather than a literal. A bare word is
+/// deliberately absent: `resolve_ref` accepts one as a param name, so it stays ambiguous
+/// with a literal and keeps the old fall-through.
+const NAMESPACED_REF_PREFIXES: [&str; 4] =
+    ["params.", "instance.", "compile_params.", "inputs."];
+
+/// Evaluate a site `args` expression in the action's scope.
+///
+/// Like [`resolve_compile_param_value`], except an explicitly namespaced reference that
+/// does not resolve is an error rather than its own name taken as a literal. A binding is
+/// the one place a site states what it means; silently passing `"params.foo"` through as
+/// the string `params.foo` would derive a real address for a value nobody supplied.
+pub fn resolve_site_arg(expr: &str, ctx: &ExecutionContext) -> Result<String> {
+    let expr = expr.trim();
+    if let Some(resolved) = resolve_ref(expr, ctx) {
+        return Ok(resolved);
+    }
+    if !expr.contains('.') {
+        if let Some(cp) = ctx.get_compile_param(expr) {
+            return Ok(cp.to_string());
+        }
+    }
+    if NAMESPACED_REF_PREFIXES.iter().any(|p| expr.starts_with(p)) {
+        bail!("'{expr}' does not resolve in this action");
+    }
+    Ok(expr.trim_matches(['"', '\'']).to_string())
+}
+
+/// The `type` values a computed taproot leaf payload item may declare.
+///
+/// Lives next to the encoder that implements them, and is what the published schema
+/// enumerates, so the two cannot drift; `leaf_value_types_are_all_encodable` pins that.
+pub const LEAF_VALUE_TYPES: [&str; 7] =
+    ["u8", "u16", "u32", "u64", "bytes32", "bytes", "pubkey"];
 
 /// Encode a taproot leaf payload item given its already-resolved `value` string.
 /// Split from [`encode_leaf_value`] so callers that resolve `value` themselves (e.g.
@@ -746,6 +794,58 @@ fn substitute_vars(expr: &str, ctx: &ExecutionContext) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod leaf_value_type_tests {
+    use super::*;
+
+    /// The published schema enumerates [`LEAF_VALUE_TYPES`], so a name listed there but
+    /// not handled by the encoder would be a schema that green-lights a manifest the
+    /// engine then rejects mid-run.
+    #[test]
+    fn leaf_value_types_are_all_encodable() {
+        for ty in LEAF_VALUE_TYPES {
+            // One value that is legal for every listed type: hex types want hex, integer
+            // types want digits, and "1" reads as both.
+            let value = if ty.starts_with('u') { "1" } else { "0x01" };
+            let item = serde_json::json!({ "value": value, "type": ty });
+            assert!(
+                encode_leaf_bytes(&item, value).is_ok(),
+                "schema advertises leaf value type '{ty}' but the encoder rejects it"
+            );
+        }
+        // And the converse: a type the schema does not list is not quietly encodable.
+        let bogus = serde_json::json!({ "value": "1", "type": "u512" });
+        assert!(encode_leaf_bytes(&bogus, "1").is_err());
+    }
+
+    /// An unresolved `params.X` in a leaf must say so, not be encoded as its own name.
+    ///
+    /// The literal fall-through is for genuine literals; for a namespaced reference it
+    /// produced `invalid hex 'params.dest_addr_script_hash'` — an error about hex, for a
+    /// problem that is entirely about a param the running action does not declare.
+    #[test]
+    fn unresolved_namespaced_leaf_reference_names_the_reference() {
+        let ctx = crate::context::ExecutionContext::new();
+        let item = serde_json::json!({ "value": "params.dest_addr_script_hash", "type": "bytes32" });
+        let err = encode_leaf_value(&item, &ctx).expect_err("unresolved ref must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("params.dest_addr_script_hash"), "{msg}");
+        assert!(msg.contains("does not resolve"), "should not blame the hex: {msg}");
+
+        // A resolved one still encodes...
+        let mut ctx = crate::context::ExecutionContext::new();
+        ctx.set_param("dest_addr_script_hash", format!("0x{}", "11".repeat(32)));
+        assert_eq!(encode_leaf_value(&item, &ctx).unwrap().len(), 32);
+
+        // ...and a real literal still falls through untouched.
+        let literal = serde_json::json!({ "value": "0x01", "type": "bytes" });
+        assert_eq!(
+            encode_leaf_value(&literal, &ExecutionContext::new()).unwrap(),
+            vec![0x01]
+        );
+    }
 }
 
 #[cfg(test)]

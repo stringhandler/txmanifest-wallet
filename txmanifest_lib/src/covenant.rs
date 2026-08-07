@@ -1097,11 +1097,15 @@ mod tests {
     /// be decorative — the gate silently open for every program in the repo.
     #[test]
     fn unstable_features_gate_a_program_that_uses_enums() {
+        // The manifest is inline rather than read from examples/prize_contest: this test is
+        // about the plumbing from the `simplicity_hl` block to the compiler, and reading a
+        // live example would make it fail for whatever that example happens to say today.
+        let manifest = crate::manifest::Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t",
+                 "simplicity_hl": { "unstable_features": ["enums"] } }"#,
+        )
+        .expect("manifest should parse");
         let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let manifest_path = crate_dir.join("../examples/prize_contest/txmanifest.json");
-        let raw = std::fs::read_to_string(&manifest_path).expect("read prize manifest");
-        let manifest =
-            crate::manifest::Manifest::from_json_str(&raw).expect("parse prize manifest");
         let simf_path = crate_dir.join("../examples/prize_contest/prize.simf");
         let (params, hints) = (HashMap::new(), HashMap::new());
 
@@ -1675,3 +1679,4 @@ mod tests {
         );
     }
 }
+

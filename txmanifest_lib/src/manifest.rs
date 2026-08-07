@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
+use anyhow::Context as _;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use simplicityhl::{UnstableFeature, UnstableFeatures};
@@ -708,8 +709,8 @@ impl Input {
 pub struct Output {
     pub id: String,
     pub description: Option<String>,
-    /// "change" | "params.<name>" | {"utxo_type": "..."} | {"type": "burn"} | conditional
-    pub destination: serde_json::Value,
+    /// Where this output's value goes. See [`OutputDestination`] for the accepted forms.
+    pub destination: OutputDestination,
     pub amount_sat: Option<serde_json::Value>,
     pub asset: Option<serde_json::Value>,
     pub optional: Option<bool>,
@@ -730,6 +731,156 @@ pub struct Output {
     pub ui: Option<UiSpec>,
 }
 
+/// Where an [`Output`]'s value goes, in any of these forms:
+///
+/// | form | meaning |
+/// |---|---|
+/// | `"change"` | wallet change; the amount is whatever is left, so `amount_sat` is omitted |
+/// | `"wallet"` | a fresh receive address from this wallet |
+/// | any other string | an address, or a `params.X` / `instance.X` reference resolving to one |
+/// | `{"utxo_type": "<name>"}` | the covenant address for that `utxo_type`; may carry per-site `compile_params` |
+/// | `{"script_hash": "<ref>"}` | P2TR built from a 32-byte script hash |
+/// | `{"type": "op_return"\|"burn"}` | data-carrying / burn output; bytes come from the output's own `data` field |
+/// | `{"type": "fee"}` | the explicit fee leg — declares intent, produces no PSET output |
+/// | `{"if": …}` | conditional — **parsed but NOT implemented**; the engine skips such an output |
+///
+/// Kept as a raw [`serde_json::Value`] (the arms read their own keys), but the shape is
+/// checked at load: an object matching none of these used to reach the build and be
+/// skipped with a `[TODO]` line, which silently drops a declared output.
+#[derive(Debug, Clone)]
+pub struct OutputDestination(pub serde_json::Value);
+
+impl std::ops::Deref for OutputDestination {
+    type Target = serde_json::Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Destination `type` values the engine implements. Kept next to the parser so the schema,
+/// the parser and `validate` cannot drift apart.
+const DESTINATION_TYPES: [&str; 3] = ["op_return", "burn", "fee"];
+
+impl<'de> Deserialize<'de> for OutputDestination {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match &value {
+            serde_json::Value::String(_) => Ok(Self(value)),
+            serde_json::Value::Object(map) => {
+                if let Some(ty) = map.get("type").and_then(|v| v.as_str()) {
+                    if !DESTINATION_TYPES.contains(&ty) {
+                        return Err(serde::de::Error::custom(format!(
+                            "unknown destination type '{ty}'; expected one of: {}",
+                            DESTINATION_TYPES.join(", ")
+                        )));
+                    }
+                    Ok(Self(value))
+                } else if map.contains_key("utxo_type")
+                    || map.contains_key("script_hash")
+                    || map.contains_key("if")
+                {
+                    Ok(Self(value))
+                } else {
+                    Err(serde::de::Error::custom(format!(
+                        "unrecognized destination object {value}; expected \
+                         {{\"utxo_type\": ...}}, {{\"script_hash\": ...}}, or \
+                         {{\"type\": \"op_return\"|\"burn\"|\"fee\"}}"
+                    )))
+                }
+            }
+            other => Err(serde::de::Error::custom(format!(
+                "destination must be a string or an object, got {other}"
+            ))),
+        }
+    }
+}
+
+impl JsonSchema for OutputDestination {
+    fn schema_name() -> String {
+        "OutputDestination".to_string()
+    }
+
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        subschema(serde_json::json!({
+            "description":
+                "Where this output's value goes. A string is `change` (wallet change, \
+                 amount auto-computed), `wallet` (a fresh receive address), or an \
+                 address / `params.X` reference resolving to one.",
+            // `anyOf`, not `oneOf`: the string forms overlap by construction, and the
+            // schema must never reject what the parser accepts.
+            "anyOf": [
+                {
+                    "type": "string",
+                    "description":
+                        "`change`, `wallet`, a literal address, or a `params.X` / \
+                         `instance.X` reference that resolves to one.",
+                    "examples": ["change", "wallet", "params.receive_address"]
+                },
+                {
+                    "type": "object",
+                    "description": "The covenant address derived for a declared `utxo_type`.",
+                    "required": ["utxo_type"],
+                    "properties": {
+                        "utxo_type": { "type": "string" },
+                        "args": {
+                            "type": "object",
+                            "description":
+                                "Binds the utxo_type's declared `params` for this site. Values \
+                                 are expressions in the ACTION's scope (`params.X`, \
+                                 `instance.X`, a literal). Every param without a default has \
+                                 to be bound here.",
+                            "additionalProperties": { "type": "string" }
+                        },
+                        "compile_params": {
+                            "type": "object",
+                            "description":
+                                "Per-site compile-param overrides for this destination, \
+                                 resolved against the action's params.",
+                            "additionalProperties": { "type": "string" }
+                        }
+                    }
+                },
+                {
+                    "type": "object",
+                    "description": "P2TR output built from a 32-byte script hash.",
+                    "required": ["script_hash"],
+                    "properties": {
+                        "script_hash": {
+                            "type": "string",
+                            "description": "32-byte hex, or a reference resolving to it."
+                        }
+                    }
+                },
+                {
+                    "type": "object",
+                    "description":
+                        "`op_return` / `burn` embed the output's own `data` field (bare \
+                         OP_RETURN when absent). `fee` declares the fee leg and produces \
+                         no PSET output of its own.",
+                    "required": ["type"],
+                    "properties": { "type": { "enum": DESTINATION_TYPES } }
+                },
+                {
+                    "type": "object",
+                    "description":
+                        "Conditional destination. Parsed but NOT implemented — the engine \
+                         has no arm for it and skips the output entirely.",
+                    "required": ["if"]
+                }
+            ]
+        }))
+    }
+}
+
+/// Deserialize a hand-written JSON Schema fragment into schemars' representation.
+///
+/// The alternative is assembling `SchemaObject`s field by field, which for a `anyOf` of
+/// object shapes is several times the code and reads nothing like the schema it produces.
+fn subschema(value: serde_json::Value) -> schemars::schema::Schema {
+    serde_json::from_value(value).expect("hand-written subschema is a valid JSON Schema")
+}
+
 impl Output {
     /// This output's short human-readable label, if it declares one.
     /// See [`Input::ui_label`] for why `description` is not a fallback here.
@@ -744,7 +895,7 @@ impl Output {
 
     /// Human-readable summary of the destination.
     pub fn destination_summary(&self) -> String {
-        match &self.destination {
+        match &*self.destination {
             serde_json::Value::String(s) => s.clone(),
             serde_json::Value::Object(map) => {
                 if let Some(ut) = map.get("utxo_type") {
@@ -899,14 +1050,130 @@ pub struct UtxoScript {
 }
 
 /// Describes one additional taproot leaf appended to the Simplicity program leaf.
+///
+/// Each leaf's payload is hashed as `tapdata` — `SHA256(SHA256("TapData") ‖
+/// SHA256("TapData") ‖ payload)`, which is the value a program computes with
+/// `jet::tapdata_init()`, `sha_256_ctx_8_add_*` and `finalize` — then folded into the tap
+/// tree with `TapBranch/elements` in declaration order, matching `jet::build_tapbranch`.
+/// The payload's **width must match what the `.simf` hashes**:
+/// `sha_256_ctx_8_add_32` wants exactly 32 bytes, `add_8` exactly 8. A mismatch yields a
+/// perfectly valid address that the covenant then refuses to recognize as its own.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TaprootLeafSpec {
+    /// How the payload is hashed. Only `tapdata` is implemented, and it was previously
+    /// accepted as a free string — so any other spelling was silently hashed as tapdata
+    /// anyway, producing an address whose derivation nobody had written down.
     #[serde(rename = "type")]
-    pub type_: String,
-    /// Ordered payload items: each is either a hex literal string ("0x01")
-    /// or a state_var reference ({"state_var": "name"}).
-    pub payload: Vec<serde_json::Value>,
+    pub type_: TaprootLeafKind,
+    /// Ordered payload items, concatenated into this leaf's byte string.
+    pub payload: Vec<TaprootLeafPayloadItem>,
+}
+
+/// The hashing scheme for a [`TaprootLeafSpec`]'s payload.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub enum TaprootLeafKind {
+    /// Elements taproot data leaf — the only scheme the engine implements.
+    #[serde(rename = "tapdata")]
+    Tapdata,
+}
+
+/// One item of a [`TaprootLeafSpec::payload`], in any of the three accepted forms:
+///
+/// - a **hex literal** — `"0xff…"`, taken as raw bytes;
+/// - a **computed value** — `{"value": <ref>, "type": "u64", "endian": "be", "pad_to": 32}`,
+///   where `<ref>` resolves as `params.X` / `instance.X` / `<input_id>.<field>` / a bare
+///   param name, falling back to the literal string (see [`crate::eval::encode_leaf_value`]);
+/// - a **state var reference** — `{"state_var": "name"}`, that var's `default_value` as a
+///   single `u8`.
+///
+/// Kept as a raw [`serde_json::Value`] because the computed form's optional keys are read
+/// by the encoder, but the *shape* is checked here: an item in none of these forms used to
+/// parse happily and then fail mid-run, after prompting, with `Unsupported taproot payload
+/// item`.
+#[derive(Debug, Clone)]
+pub struct TaprootLeafPayloadItem(pub serde_json::Value);
+
+impl<'de> Deserialize<'de> for TaprootLeafPayloadItem {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match &value {
+            serde_json::Value::String(_) => Ok(Self(value)),
+            serde_json::Value::Object(map)
+                if map.contains_key("value") || map.contains_key("state_var") =>
+            {
+                Ok(Self(value))
+            }
+            other => Err(serde::de::Error::custom(format!(
+                "taproot leaf payload item must be a hex literal (\"0x01\"), a computed \
+                 value ({{\"value\": ..., \"type\": ...}}), or a state var reference \
+                 ({{\"state_var\": \"name\"}}), got {other}"
+            ))),
+        }
+    }
+}
+
+impl JsonSchema for TaprootLeafPayloadItem {
+    fn schema_name() -> String {
+        "TaprootLeafPayloadItem".to_string()
+    }
+
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        subschema(serde_json::json!({
+            "description":
+                "One item of a taproot leaf payload. Items are concatenated, in order, \
+                 into the bytes that get hashed as the leaf.",
+            // `anyOf` rather than `oneOf`: an object carrying both `value` and `state_var`
+            // is nonsense, but the parser takes it (`value` wins), and the schema must not
+            // reject what the parser accepts.
+            "anyOf": [
+                {
+                    "type": "string",
+                    "description": "Hex literal taken as raw bytes, e.g. \"0x01\". Whole bytes only.",
+                    "pattern": "^(?:0[xX])?(?:[0-9a-fA-F]{2})*$"
+                },
+                {
+                    "type": "object",
+                    "description":
+                        "Computed value, resolved against the run's params/instance fields \
+                         and encoded per `type` / `endian` / `pad_to`.",
+                    "required": ["value"],
+                    "properties": {
+                        "value": {
+                            "type": "string",
+                            "description":
+                                "`params.X`, `instance.X`, `<input_id>.<field>`, a bare param \
+                                 name, or a literal."
+                        },
+                        "type": { "enum": crate::eval::LEAF_VALUE_TYPES },
+                        "endian": {
+                            "enum": ["be", "le"],
+                            "description": "Byte order for the integer types. Defaults to little-endian."
+                        },
+                        "pad_to": {
+                            "type": "integer",
+                            "description":
+                                "Pad the encoded value to this width in bytes — 32 for a slot \
+                                 the program hashes with `sha_256_ctx_8_add_32`."
+                        },
+                        "align": {
+                            "enum": ["left", "right"],
+                            "description":
+                                "Which end of the padded field the value occupies. Defaults to `right`."
+                        }
+                    }
+                },
+                {
+                    "type": "object",
+                    "description":
+                        "Reference to a `state_vars` entry; its `default_value` is encoded as a \
+                         single u8.",
+                    "required": ["state_var"],
+                    "properties": { "state_var": { "type": "string" } }
+                }
+            ]
+        }))
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -916,13 +1183,114 @@ pub struct UtxoType {
     pub script: Option<UtxoScript>,
     pub asset: Option<String>,
     pub state_vars: Option<serde_json::Value>,
+    /// This type's parameter interface — everything the address derivation may read.
+    ///
+    /// Declaring it switches the type to a **closed scope**: `script.compile_params` and
+    /// `extra_leaves` resolve `params.X` against *these* params and nothing else. A site
+    /// binds them with `args` (`{"utxo_type": "t", "args": {"STATE": "params.x"}}`), whose
+    /// values are expressions evaluated in the *action's* scope.
+    ///
+    /// Without it, the type keeps the legacy behaviour: leaves and compile params resolve
+    /// against whatever is ambient at each mention. That is what makes one `utxo_type`
+    /// derive two different addresses in two actions — `params.foo` means one thing where
+    /// the action declares `foo` and something else where it does not — with no error,
+    /// because an address is a hash and a wrong one looks exactly like a right one.
+    pub params: Option<BTreeMap<String, UtxoParamDef>>,
     /// Whether UTXOs of this type are confidential (blinded). Defaults to false — covenant
     /// UTXOs are explicit so the spending Simplicity program can introspect value and asset.
     #[serde(default)]
     pub confidential: bool,
 }
 
+/// One entry of a [`UtxoType::params`] interface.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UtxoParamDef {
+    /// Manifest type, used as the compile-param type hint (`u64`, `bytes32`,
+    /// `liquid.asset_id`, …) — the same vocabulary action params use.
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub description: Option<String>,
+    /// Value to use when a site binds no `args` entry for this param.
+    ///
+    /// Evaluated in **instance scope**: a literal, or `instance.X` naming a field fixed
+    /// when the contract was instantiated. Action scope is deliberately unreachable —
+    /// a value that varies per run is exactly what a site must bind explicitly.
+    ///
+    /// Without a default, every site must bind it, and `validate` says which ones don't.
+    pub default: Option<String>,
+}
+
+/// The key a site uses to bind a [`UtxoType`]'s params.
+pub const SITE_ARGS_KEY: &str = "args";
+
 impl UtxoType {
+    /// True when this type declares a parameter interface, and therefore resolves its
+    /// address from that interface alone. See [`UtxoType::params`].
+    pub fn is_closed(&self) -> bool {
+        self.params.is_some()
+    }
+
+    /// Bind this type's declared params for one site.
+    ///
+    /// `site` is the `destination` / `utxo_source` object the type was named from; its
+    /// `args` entries are expressions evaluated by `eval_arg` in the **action's** scope.
+    /// A param with no binding falls back to its `default`, evaluated by `eval_default` in
+    /// **instance** scope. A param with neither is an error naming the param — the failure
+    /// that used to be a silently different address.
+    ///
+    /// Returns the param values and their declared types (the compile-param type hints).
+    pub fn bind_site_params(
+        &self,
+        site: Option<&serde_json::Value>,
+        eval_arg: &dyn Fn(&str) -> anyhow::Result<String>,
+        eval_default: &dyn Fn(&str) -> anyhow::Result<String>,
+    ) -> anyhow::Result<(
+        std::collections::HashMap<String, String>,
+        std::collections::HashMap<String, String>,
+    )> {
+        let declared = self.params.as_ref().map(|p| p.iter().collect::<Vec<_>>()).unwrap_or_default();
+        let args = site
+            .and_then(|s| s.get(SITE_ARGS_KEY))
+            .and_then(|a| a.as_object());
+
+        // A bound name that matches no declared param is a typo that would otherwise do
+        // nothing at all — the site would derive the default address and look fine.
+        if let Some(args) = args {
+            for name in args.keys() {
+                if !self.params.as_ref().is_some_and(|p| p.contains_key(name)) {
+                    anyhow::bail!(
+                        "'{name}' is not a param of this utxo_type; declared: [{}]",
+                        declared.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+                    );
+                }
+            }
+        }
+
+        let mut values = std::collections::HashMap::new();
+        let mut hints = std::collections::HashMap::new();
+        for (name, def) in declared {
+            let raw = args.and_then(|a| a.get(name));
+            let value = match (raw, &def.default) {
+                (Some(expr), _) => {
+                    let expr = expr.as_str().ok_or_else(|| {
+                        anyhow::anyhow!("arg '{name}' must be a string expression")
+                    })?;
+                    eval_arg(expr).with_context(|| format!("arg '{name}' = '{expr}'"))?
+                }
+                (None, Some(default)) => eval_default(default)
+                    .with_context(|| format!("default for param '{name}' = '{default}'"))?,
+                (None, None) => anyhow::bail!(
+                    "param '{name}' is not bound here and has no default — every site that \
+                     names this utxo_type has to supply it (\"args\": {{\"{name}\": …}})"
+                ),
+            };
+            values.insert(name.clone(), value);
+            hints.insert(name.clone(), def.type_.clone());
+        }
+        Ok((values, hints))
+    }
+
     /// Resolve `script.extra_leaves` to concrete byte vectors.
     ///
     /// Each payload item is one of:
@@ -942,7 +1310,7 @@ impl UtxoType {
         let mut result = Vec::new();
         for leaf in extra_leaves {
             let mut bytes: Vec<u8> = Vec::new();
-            for item in &leaf.payload {
+            for TaprootLeafPayloadItem(item) in &leaf.payload {
                 match item {
                     serde_json::Value::String(s) => {
                         let hex = s.trim_start_matches("0x").trim_start_matches("0X");
@@ -1313,6 +1681,149 @@ mod tests {
         let absent =
             Manifest::from_json_str(r#"{ "manifest_version": "1", "protocol": "t" }"#).unwrap();
         assert!(!absent.include_debug_symbols());
+    }
+
+    /// The destination forms the schema advertises are exactly the ones that parse, and
+    /// nothing else does. Before this, `destination` was an untyped `Value`: a typo like
+    /// `{"utxo_typ": …}` parsed happily and was then skipped at build time with a `[TODO]`
+    /// line, silently dropping a declared output from the transaction.
+    #[test]
+    fn destination_accepts_exactly_the_documented_forms() {
+        let parse = |dest: &str| {
+            Manifest::from_json_str(&format!(
+                r#"{{ "manifest_version": "1", "protocol": "t", "actions": {{ "A": {{ "outputs": [
+                     {{ "id": "o0", "amount_sat": "1", "destination": {dest} }} ] }} }} }}"#
+            ))
+        };
+
+        for ok in [
+            r#""change""#,
+            r#""wallet""#,
+            r#""params.receive_address""#,
+            r#""tex1p0000""#,
+            r#"{ "utxo_type": "vault" }"#,
+            r#"{ "utxo_type": "vault", "compile_params": { "X": "params.x" } }"#,
+            r#"{ "script_hash": "instance.COV_HASH" }"#,
+            r#"{ "type": "op_return" }"#,
+            r#"{ "type": "burn" }"#,
+            r#"{ "type": "fee" }"#,
+            r#"{ "if": "params.flag" }"#,
+        ] {
+            assert!(parse(ok).is_ok(), "should parse: {ok}");
+        }
+
+        // A misspelled key is no longer an output that quietly disappears...
+        let err = parse(r#"{ "utxo_typ": "vault" }"#).expect_err("typo must not parse");
+        assert!(err.to_string().contains("utxo_type"), "{err}");
+
+        // ...nor is a destination type the engine has no arm for.
+        let err = parse(r#"{ "type": "p2pkh" }"#).expect_err("unknown type must not parse");
+        assert!(err.to_string().contains("p2pkh"), "{err}");
+
+        // Non-string, non-object destinations were never meaningful.
+        assert!(parse("42").is_err());
+        assert!(parse(r#"["change"]"#).is_err());
+    }
+
+    /// A closed `utxo_type` derives its address from its own params — and only those.
+    ///
+    /// This is the whole point of the boundary: the same type mentioned in two actions
+    /// used to mean two different addresses, because a leaf reading `params.x` picked up
+    /// whichever action happened to declare `x`. Now the site says what it means, and a
+    /// site that says nothing gets the declared default, in every action alike.
+    #[test]
+    fn closed_utxo_type_binds_params_from_the_site_not_the_action() {
+        let manifest = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t", "utxo_types": { "vault": {
+                 "description": "d",
+                 "params": {
+                   "STATE": { "type": "bytes32", "default": "0xff" },
+                   "OWNER": { "type": "bytes32", "default": "instance.OWNER_KEY" }
+                 },
+                 "script": { "type": "simplicity", "source": "./x.simf" } } } }"#,
+        )
+        .expect("manifest should parse");
+        let ut = manifest.utxo_type("vault").unwrap();
+        assert!(ut.is_closed());
+
+        let arg = |expr: &str| Ok(format!("arg:{expr}"));
+        let default = |expr: &str| Ok(format!("default:{expr}"));
+
+        // No site args: every param takes its default.
+        let (values, hints) = ut.bind_site_params(None, &arg, &default).unwrap();
+        assert_eq!(values["STATE"], "default:0xff");
+        assert_eq!(values["OWNER"], "default:instance.OWNER_KEY");
+        assert_eq!(hints["STATE"], "bytes32");
+
+        // A site binds one and inherits the other.
+        let site = serde_json::json!({ "utxo_type": "vault", "args": { "STATE": "params.claim" } });
+        let (values, _) = ut.bind_site_params(Some(&site), &arg, &default).unwrap();
+        assert_eq!(values["STATE"], "arg:params.claim");
+        assert_eq!(values["OWNER"], "default:instance.OWNER_KEY");
+
+        // Binding a name the type does not declare is a typo that would otherwise be a
+        // no-op — the site would silently derive the default address.
+        let typo = serde_json::json!({ "utxo_type": "vault", "args": { "STAT": "0x00" } });
+        let err = ut.bind_site_params(Some(&typo), &arg, &default).unwrap_err();
+        assert!(err.to_string().contains("STAT"), "{err}");
+    }
+
+    /// A param with no default must be bound at the site, and say so when it isn't.
+    #[test]
+    fn unbound_param_without_a_default_is_an_error_naming_it() {
+        let manifest = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t", "utxo_types": { "vault": {
+                 "description": "d",
+                 "params": { "DEBT": { "type": "u64" } },
+                 "script": { "type": "simplicity", "source": "./x.simf" } } } }"#,
+        )
+        .unwrap();
+        let ut = manifest.utxo_type("vault").unwrap();
+        let id = |expr: &str| Ok(expr.to_string());
+
+        let err = ut.bind_site_params(None, &id, &id).unwrap_err();
+        assert!(err.to_string().contains("DEBT"), "{err}");
+        assert!(err.to_string().contains("args"), "should say how to fix it: {err}");
+
+        let site = serde_json::json!({ "utxo_type": "vault", "args": { "DEBT": "1000" } });
+        let (values, _) = ut.bind_site_params(Some(&site), &id, &id).unwrap();
+        assert_eq!(values["DEBT"], "1000");
+    }
+
+    /// Same contract for taproot leaf payload items.
+    #[test]
+    fn leaf_payload_items_accept_exactly_the_documented_forms() {
+        let parse = |item: &str| {
+            Manifest::from_json_str(&format!(
+                r#"{{ "manifest_version": "1", "protocol": "t", "utxo_types": {{ "u": {{
+                     "description": "d",
+                     "script": {{ "type": "simplicity", "source": "./x.simf",
+                                  "extra_leaves": [ {{ "type": "tapdata", "payload": [{item}] }} ] }} }} }} }}"#
+            ))
+        };
+
+        for ok in [
+            r#""0x01""#,
+            r#"{ "value": "instance.CURRENT_DEBT", "type": "u64", "endian": "be", "pad_to": 32 }"#,
+            r#"{ "state_var": "state" }"#,
+        ] {
+            assert!(parse(ok).is_ok(), "should parse: {ok}");
+        }
+
+        // Used to parse, then fail mid-run with "Unsupported taproot payload item".
+        assert!(parse("1").is_err());
+        assert!(parse(r#"{ "val": "x" }"#).is_err());
+
+        // `tapdata` is the only hashing scheme implemented; anything else was silently
+        // hashed as tapdata anyway.
+        let err = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t", "utxo_types": { "u": {
+                 "description": "d",
+                 "script": { "type": "simplicity", "source": "./x.simf",
+                             "extra_leaves": [ { "type": "tapscript", "payload": ["0x01"] } ] } } } }"#,
+        )
+        .expect_err("unknown leaf kind must not parse");
+        assert!(err.to_string().contains("tapdata"), "{err}");
     }
 
     #[test]

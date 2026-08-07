@@ -149,11 +149,11 @@ fn check_hook(
 pub fn validate(manifest: &Manifest) -> Report {
     let mut report = Report::default();
 
-    let utxo_types: BTreeSet<&str> = manifest
+    let no_types = std::collections::BTreeMap::new();
+    let utxo_types: &std::collections::BTreeMap<String, crate::manifest::UtxoType> = manifest
         .utxo_types
         .as_ref()
-        .map(|m| m.keys().map(String::as_str).collect())
-        .unwrap_or_default();
+        .unwrap_or(&no_types);
 
     // Collect every action, whether top-level or a class method, tagged with a
     // dot-path location and its bare name (for lifecycle cross-checks).
@@ -210,13 +210,13 @@ pub fn validate(manifest: &Manifest) -> Report {
     let mut referenced: BTreeSet<String> = BTreeSet::new();
 
     for (loc, _bare, action, field_types, in_template) in &actions {
-        check_action(&mut report, &utxo_types, &mut referenced, loc, action, *in_template);
+        check_action(&mut report, utxo_types, &mut referenced, loc, action, *in_template);
         check_ui(&mut report, loc, action, field_types);
     }
 
     // --- Unreferenced UTXO types -----------------------------------------
-    for name in &utxo_types {
-        if !referenced.contains(*name) {
+    for name in utxo_types.keys() {
+        if !referenced.contains(name.as_str()) {
             report.warn(
                 format!("utxo_types.{name}"),
                 "declared but never referenced by any action",
@@ -229,7 +229,7 @@ pub fn validate(manifest: &Manifest) -> Report {
 
 fn check_action(
     report: &mut Report,
-    utxo_types: &BTreeSet<&str>,
+    utxo_types: &std::collections::BTreeMap<String, crate::manifest::UtxoType>,
     referenced: &mut BTreeSet<String>,
     loc: &str,
     action: &Action,
@@ -249,15 +249,26 @@ fn check_action(
                     match m["utxo_type"].as_str() {
                         Some(name) => {
                             referenced.insert(name.to_string());
-                            if !utxo_types.contains(name) {
+                            if !utxo_types.contains_key(name) {
                                 report.error(&iloc, format!("references unknown utxo_type '{name}'"));
                             }
+                            check_utxo_site(report, utxo_types, &iloc, name, &input.utxo_source);
                         }
                         None => report.error(&iloc, "utxo_source.utxo_type is not a string"),
                     }
                 }
                 Value::Object(m) if m.contains_key("if") => {} // conditional — not checked
-                other => report.warn(&iloc, format!("unrecognized utxo_source: {other}")),
+                // An error, not a warning: the engine refuses to build with one of these
+                // (it cannot tell where the UTXO comes from), so a warning would
+                // understate a manifest that simply does not run.
+                other => report.error(
+                    &iloc,
+                    format!(
+                        "unrecognized utxo_source: {other} — expected \"wallet\" or \
+                         {{\"utxo_type\": \"<name>\"}}; a bare \"<name>\" string is not a \
+                         utxo_type reference"
+                    ),
+                ),
             }
             check_witnesses(report, &format!("{iloc}.witnesses"), &input.witnesses);
             check_issuance(report, &format!("{iloc}.issuance"), &input.issuance);
@@ -272,7 +283,7 @@ fn check_action(
                 report.error(format!("{loc}.outputs"), format!("duplicate output id '{}'", output.id));
             }
             let oloc = format!("{loc}.outputs.{}", output.id);
-            let requires_amount = check_destination(report, utxo_types, referenced, &oloc, &output.destination);
+            let requires_amount = check_destination(report, utxo_types, referenced, &oloc, &output.destination.0);
             let optional = output.optional.unwrap_or(false);
             if requires_amount && output.amount_sat.is_none() && !optional {
                 report.error(oloc, "missing amount_sat (required for this destination)");
@@ -604,12 +615,84 @@ fn check_witnesses(report: &mut Report, loc: &str, witnesses: &Option<Value>) {
     }
 }
 
+/// Check one site's `args` against the `utxo_type` it names.
+///
+/// This is the check the whole params/args boundary exists to make possible. Before it, a
+/// site supplied nothing and the derivation quietly read whatever the running action
+/// happened to have in scope, so a missing value was not an error — it was a different
+/// covenant address, which looks exactly like a correct one.
+fn check_utxo_site(
+    report: &mut Report,
+    utxo_types: &std::collections::BTreeMap<String, crate::manifest::UtxoType>,
+    loc: &str,
+    type_name: &str,
+    site: &Value,
+) {
+    let Some(ut) = utxo_types.get(type_name) else { return };
+    let args = site
+        .get(crate::manifest::SITE_ARGS_KEY)
+        .and_then(Value::as_object);
+
+    let Some(declared) = ut.params.as_ref() else {
+        // `args` against a type with no interface binds nothing at all. Silently ignoring
+        // it would leave the author believing they had set something.
+        if args.is_some() {
+            report.error(
+                loc.to_string(),
+                format!(
+                    "'args' has nothing to bind: utxo_type '{type_name}' declares no `params`"
+                ),
+            );
+        }
+        return;
+    };
+
+    if let Some(args) = args {
+        for name in args.keys() {
+            if !declared.contains_key(name) {
+                report.error(
+                    loc.to_string(),
+                    format!(
+                        "binds '{name}', which utxo_type '{type_name}' does not declare;                          declared: [{}]",
+                        declared.keys().cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                );
+            }
+        }
+        for (name, value) in args {
+            if !value.is_string() {
+                report.error(
+                    loc.to_string(),
+                    format!("arg '{name}' must be a string expression, got {value}"),
+                );
+            }
+        }
+    }
+
+    let missing: Vec<&str> = declared
+        .iter()
+        .filter(|(name, def)| {
+            def.default.is_none() && !args.is_some_and(|a| a.contains_key(name.as_str()))
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !missing.is_empty() {
+        report.error(
+            loc.to_string(),
+            format!(
+                "does not bind [{}] of utxo_type '{type_name}', and they have no default —                  the address cannot be derived here",
+                missing.join(", ")
+            ),
+        );
+    }
+}
+
 /// Validate an output `destination` and return whether it requires an explicit
 /// `amount_sat` (covenant, wallet, address, and script_hash destinations do;
 /// change, op_return/burn, fee, and conditional destinations do not).
 fn check_destination(
     report: &mut Report,
-    utxo_types: &BTreeSet<&str>,
+    utxo_types: &std::collections::BTreeMap<String, crate::manifest::UtxoType>,
     referenced: &mut BTreeSet<String>,
     oloc: &str,
     destination: &Value,
@@ -621,9 +704,10 @@ fn check_destination(
         Value::Object(m) => {
             if let Some(name) = m.get("utxo_type").and_then(Value::as_str) {
                 referenced.insert(name.to_string());
-                if !utxo_types.contains(name) {
+                if !utxo_types.contains_key(name) {
                     report.error(oloc.to_string(), format!("destination references unknown utxo_type '{name}'"));
                 }
+                check_utxo_site(report, utxo_types, oloc, name, destination);
                 true
             } else if m.contains_key("script_hash") {
                 true
@@ -653,6 +737,57 @@ fn check_destination(
 mod tests {
     use super::*;
     use crate::manifest::Manifest;
+
+    /// Every site that names a closed `utxo_type` must bind what that type requires —
+    /// statically, before a run derives an address from a value nobody supplied.
+    #[test]
+    fn sites_must_bind_a_closed_utxo_types_required_params() {
+        let validate_site = |dest: &str| {
+            let manifest = Manifest::from_json_str(&format!(
+                r#"{{ "manifest_version": "1", "protocol": "t",
+                      "actions": {{ "A": {{
+                        "params": {{ "claim": {{ "type": "bytes32" }} }},
+                        "outputs": [ {{ "id": "o0", "amount_sat": "1", "destination": {dest} }} ] }} }},
+                      "utxo_types": {{ "vault": {{
+                        "description": "d",
+                        "params": {{ "STATE": {{ "type": "bytes32", "default": "0xff" }},
+                                     "DEBT":  {{ "type": "u64" }} }},
+                        "script": {{ "type": "simplicity", "source": "./x.simf" }} }} }} }}"#
+            ))
+            .expect("manifest should parse");
+            validate(&manifest)
+        };
+
+        // `DEBT` has no default and is not bound.
+        let report = validate_site(r#"{ "utxo_type": "vault" }"#);
+        let msg = report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n");
+        assert!(!report.is_ok(), "unbound required param must be an error");
+        assert!(msg.contains("DEBT"), "{msg}");
+        assert!(!msg.contains("STATE"), "STATE has a default: {msg}");
+
+        // Bound → clean. `STATE` still takes its default.
+        let report = validate_site(r#"{ "utxo_type": "vault", "args": { "DEBT": "params.claim" } }"#);
+        assert!(report.is_ok(), "{:?}", report.issues);
+
+        // A misspelled binding is an error, not a silent no-op.
+        let report =
+            validate_site(r#"{ "utxo_type": "vault", "args": { "DEBT": "1", "STAT": "0x00" } }"#);
+        let msg = report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n");
+        assert!(msg.contains("STAT"), "{msg}");
+
+        // `args` against a type with no interface binds nothing — say so.
+        let manifest = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t",
+                 "actions": { "A": { "outputs": [ { "id": "o0", "amount_sat": "1",
+                   "destination": { "utxo_type": "plain", "args": { "X": "1" } } } ] } },
+                 "utxo_types": { "plain": { "description": "d",
+                   "script": { "type": "simplicity", "source": "./x.simf" } } } }"#,
+        )
+        .unwrap();
+        let report = validate(&manifest);
+        let msg = report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n");
+        assert!(msg.contains("declares no `params`"), "{msg}");
+    }
 
     /// Build a manifest with a single action whose one wallet input carries the
     /// given `witnesses` JSON, then validate it.
