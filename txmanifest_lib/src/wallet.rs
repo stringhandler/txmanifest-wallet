@@ -331,6 +331,24 @@ pub fn wallet_info(wallet: &WalletFile) -> Result<WalletInfo> {
 /// collateral funded into the wallet naturally lives at the same scriptPubKey the
 /// covenant commits to — which is what lets a third-party lender (e.g. the
 /// `simplicity-lending` CLI) reconstruct and spend the offer.
+/// `sha256(scriptPubKey)` of an address, lowercase hex in natural byte order — the value
+/// the Simplicity `input_script_hash` / `output_script_hash` jets return for a UTXO paying
+/// that address.
+///
+/// Confidential and unconfidential forms of an address share a scriptPubKey (the blinding
+/// key travels beside it, not in it), so both produce the same hash. A covenant can
+/// therefore commit to a payout target without caring whether the recipient blinds it.
+pub fn script_hash_of_address(address: &str) -> Result<String> {
+    use lwk_wollet::elements::hashes::{sha256, Hash};
+
+    let address: lwk_wollet::elements::Address = address
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("'{}' is not a valid address: {e}", address.trim()))?;
+    let hash = sha256::Hash::hash(address.script_pubkey().as_bytes());
+    Ok(hash.to_byte_array().iter().map(|b| format!("{b:02x}")).collect())
+}
+
 pub fn committed_output(wallet: &WalletFile) -> Result<(String, String)> {
     use lwk_wollet::elements::hashes::{sha256, Hash};
 
@@ -425,5 +443,40 @@ mod tests {
         let unknown = "b".repeat(64);
         let err = sign_schnorr_for_pubkey(&wallet, &unknown, &[0u8; 32]).unwrap_err();
         assert!(err.to_string().contains("does not match"));
+    }
+
+    /// The address → script-hash conversion a covenant's payout target depends on.
+    ///
+    /// Two claims are pinned because both are load-bearing and neither is obvious:
+    /// the hash is `sha256(scriptPubKey)` in natural byte order (what the Simplicity
+    /// `output_script_hash` jet returns), and a confidential address hashes identically
+    /// to its unconfidential form — so an author may paste either and the covenant that
+    /// commits to the hash still matches the output that pays it.
+    #[test]
+    fn address_script_hash_ignores_blinding() {
+        use lwk_wollet::elements::hashes::{sha256, Hash};
+
+        // A confidential Liquid testnet address.
+        let confidential = "tlq1qq2tmze58e74rl0tw9cx23j47zxk0ddas95gdy0j2wzkcuejxwj8yypv93ju8yay2s3r4y6fwpuw0l322965qvse6u6zdd5mf5";
+        let parsed: lwk_wollet::elements::Address = confidential.parse().expect("valid address");
+        assert!(parsed.blinding_pubkey.is_some(), "fixture must be confidential");
+
+        let hash = script_hash_of_address(confidential).expect("hash");
+        let expected: String = sha256::Hash::hash(parsed.script_pubkey().as_bytes())
+            .to_byte_array()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(hash, expected);
+        assert_eq!(hash.len(), 64);
+
+        // Stripping the blinding key must not move the hash.
+        let explicit = parsed.to_unconfidential().to_string();
+        assert_eq!(script_hash_of_address(&explicit).unwrap(), hash);
+
+        // Surrounding whitespace is tolerated; a non-address is an error naming itself.
+        assert_eq!(script_hash_of_address(&format!("  {confidential} ")).unwrap(), hash);
+        let err = script_hash_of_address("not-an-address").unwrap_err();
+        assert!(err.to_string().contains("not-an-address"), "{err}");
     }
 }

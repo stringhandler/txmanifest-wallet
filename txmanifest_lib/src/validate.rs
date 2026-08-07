@@ -137,9 +137,11 @@ fn check_hook(
                 tloc,
                 "`{\"type\": \"hook\"}` declares that a hook SUPPLIES a param; it is not a value a hook can set. Put it on the param declaration and give the hook a real expression",
             ),
-            ParamCompute::Tapleaf { .. } | ParamCompute::SimfFn { .. } => report.error(
+            ParamCompute::Tapleaf { .. }
+            | ParamCompute::SimfFn { .. }
+            | ParamCompute::ScriptHash { .. } => report.error(
                 tloc,
-                "only expression values run in a hook; compute a tapleaf or simf_fn as an action param or a create_instance field instead",
+                "only expression values run in a hook; compute a tapleaf, simf_fn or script_hash as an action param or a create_instance field instead",
             ),
         }
     }

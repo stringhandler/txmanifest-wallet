@@ -549,6 +549,31 @@
         },
         {
           "additionalProperties": false,
+          "description": "`sha256(scriptPubKey)` of an address — the exact value the Simplicity `output_script_hash` / `input_script_hash` jets return for a UTXO paying it.\n\nAn address and its script hash are two views of one destination: the covenant commits to the hash, the transaction pays to the address, and if they ever disagree the spend fails on-chain. Deriving one from the other is the only way to keep that true — a manifest that asks for both separately is asking to be given two values that must match and cannot be checked.\n\nBlinding is irrelevant here: a confidential address has the same scriptPubKey as its unconfidential form, so both hash alike (`script_hash_of_address` pins this).",
+          "properties": {
+            "$comment": {
+              "description": "Documentation only; ignored by the engine.",
+              "type": "string"
+            },
+            "address": {
+              "description": "An address, or a reference resolving to one (`params.payout_address`).",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "script_hash"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "address",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "A value a **hook** supplies later in this run — declared here, set by an `on_resolved` / `on_pre_broadcast` block targeting `params.<name>`.\n\nThis exists so a hook cannot invent an identifier. Without it, `\"set\": { \"params.YES_TOKN_ASSET\": \"asset\" }` is accepted, fills a slot nobody reads, and surfaces as a wrong covenant address much later; with it, `validate` rejects the typo and the declaration carries the `type` that byte-order handling depends on.\n\nIt lives under `compute` rather than as a separate `deferred: true` flag because `compute` already means exactly \"this value is derived, do not prompt for it\" — the only thing that differs here is *who* derives it. A second flag would need its own prompt-suppression path and would have to define what it means alongside a `compute` that is also present.",
           "properties": {
             "$comment": {

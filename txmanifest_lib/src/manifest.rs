@@ -253,6 +253,14 @@ impl ComputeSpec {
         }
     }
 
+    /// The address whose script hash this param computes, if it is a `script_hash` spec.
+    pub fn as_script_hash_address(&self) -> Option<&str> {
+        match self.as_spec() {
+            Some(ParamCompute::ScriptHash { address }) => Some(address.as_str()),
+            _ => None,
+        }
+    }
+
     /// True when this is a `simf_fn` spec, which resolves only after inputs do.
     pub fn is_simf_fn(&self) -> bool {
         matches!(self.as_spec(), Some(ParamCompute::SimfFn { .. }))
@@ -311,6 +319,21 @@ pub enum ParamCompute {
         /// such as `CURRENT_DEBT`.
         #[serde(default)]
         extra_leaves: Option<Vec<TaprootLeafSpec>>,
+    },
+    /// `sha256(scriptPubKey)` of an address — the exact value the Simplicity
+    /// `output_script_hash` / `input_script_hash` jets return for a UTXO paying it.
+    ///
+    /// An address and its script hash are two views of one destination: the covenant
+    /// commits to the hash, the transaction pays to the address, and if they ever
+    /// disagree the spend fails on-chain. Deriving one from the other is the only way to
+    /// keep that true — a manifest that asks for both separately is asking to be given
+    /// two values that must match and cannot be checked.
+    ///
+    /// Blinding is irrelevant here: a confidential address has the same scriptPubKey as
+    /// its unconfidential form, so both hash alike (`script_hash_of_address` pins this).
+    ScriptHash {
+        /// An address, or a reference resolving to one (`params.payout_address`).
+        address: String,
     },
     /// A value a **hook** supplies later in this run — declared here, set by an
     /// `on_resolved` / `on_pre_broadcast` block targeting `params.<name>`.

@@ -854,7 +854,6 @@ fn build_witness_values_from_types(
 ) -> Result<WitnessValues> {
     use simplicityhl::parse::ParseFromStr as _;
     use simplicityhl::str::WitnessName;
-    use simplicityhl::value::Value;
 
     let obj = witnesses.and_then(|v| v.as_object());
 
@@ -875,9 +874,7 @@ fn build_witness_values_from_types(
             let Some(ty) = witness_types.get(&witness_name) else {
                 continue;
             };
-            let value = Value::parse_from_str(value_str, ty).map_err(|e| {
-                anyhow::anyhow!("Cannot parse witness '{name}' = '{value_str}': {e}")
-            })?;
+            let value = parse_witness_value(name, value_str, ty)?;
             map.insert(witness_name, value);
         }
     }
@@ -892,6 +889,63 @@ fn build_witness_values_from_types(
     }
 
     Ok(WitnessValues::from(map))
+}
+
+/// Parse one witness value against the type the compiled program declares for it,
+/// accepting an unprefixed hex literal for the integer types.
+///
+/// SimplicityHL literals need `0x`; without it a hash reads as an *identifier* and fails
+/// with `Variable \`ea0b…\` is not defined`, which says nothing about the real problem.
+/// Meanwhile every hash this crate produces — `script_hash_of_address`, `committed_output`,
+/// a tapleaf compute — is bare hex, and `build_args_json` already normalizes exactly this
+/// for compile params. Witnesses were the one path left where the same value had to be
+/// spelled differently.
+///
+/// The prefix is only tried **after** a plain parse fails, and only when the string is
+/// hex of exactly the type's width. That ordering is what keeps it safe: `"100"` for a
+/// u64 parses as decimal 100 and is never reinterpreted as 0x100.
+fn parse_witness_value(
+    name: &str,
+    value_str: &str,
+    ty: &simplicityhl::ResolvedType,
+) -> Result<simplicityhl::Value> {
+    use simplicityhl::value::Value;
+
+    let first_error = match Value::parse_from_str(value_str, ty) {
+        Ok(value) => return Ok(value),
+        Err(e) => e,
+    };
+
+    if let Some(hex_digits) = uint_hex_width(ty) {
+        let bare = value_str.trim();
+        if bare.len() == hex_digits && bare.chars().all(|c| c.is_ascii_hexdigit()) {
+            if let Ok(value) = Value::parse_from_str(&format!("0x{bare}"), ty) {
+                return Ok(value);
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "Cannot parse witness '{name}' = '{value_str}': {first_error}"
+    ))
+}
+
+/// Hex digits in a full-width literal of an unsigned integer type, or `None` for any
+/// other type (a tuple, an enum, `Either` — where a bare hex string is meaningless).
+fn uint_hex_width(ty: &simplicityhl::ResolvedType) -> Option<usize> {
+    use simplicityhl::types::{TypeInner, UIntType};
+
+    match ty.as_inner() {
+        TypeInner::UInt(uint_ty) => Some(match uint_ty {
+            UIntType::U1 | UIntType::U2 | UIntType::U4 | UIntType::U8 => 2,
+            UIntType::U16 => 4,
+            UIntType::U32 => 8,
+            UIntType::U64 => 16,
+            UIntType::U128 => 32,
+            UIntType::U256 => 64,
+        }),
+        _ => None,
+    }
 }
 
 /// Produce a structurally-valid zero/default value for a SimplicityHL `ResolvedType`.
@@ -1088,6 +1142,60 @@ fn network_to_params(network: lwk_wollet::ElementsNetwork) -> &'static AddressPa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A witness may be written as bare hex — but a decimal must never become hex.
+    ///
+    /// Every hash this crate hands to a manifest is unprefixed (`script_hash_of_address`,
+    /// `committed_output`), and compile params already accept that spelling, so a witness
+    /// carrying one used to die with `Variable \`ea0b…\` is not defined` — an error about
+    /// an undefined variable, for a value that was never meant to be a name.
+    ///
+    /// The second half is the one that could do damage: `"100"` is legal hex *and* legal
+    /// decimal, and reading it as `0x100` would silently substitute 256 for 100 in a
+    /// covenant. The prefix is only ever tried after a plain parse fails, which is what
+    /// makes that impossible.
+    #[test]
+    fn witness_values_accept_bare_hex_without_reinterpreting_decimals() {
+        use simplicityhl::types::{ResolvedType, TypeConstructible as _, UIntType};
+        use simplicityhl::value::Value;
+
+        let u256 = ResolvedType::from(UIntType::U256);
+        let hash = "ea0b31e6e0b85a6bcca7130df0ee49958670920378e5e31370ad885a157cfd46";
+        let parsed = parse_witness_value("DEST_ADDR_SCRIPT_HASH", hash, &u256)
+            .expect("bare hex hash should parse");
+        assert_eq!(
+            parsed,
+            Value::parse_from_str(&format!("0x{hash}"), &u256).unwrap(),
+            "bare hex must mean exactly what the 0x form means"
+        );
+        // The explicit spelling keeps working.
+        assert_eq!(
+            parse_witness_value("W", &format!("0x{hash}"), &u256).unwrap(),
+            parsed
+        );
+
+        // The dangerous case: for a u8, "12" is both legal decimal and a legal 2-digit
+        // hex literal. It parses as decimal on the first attempt, so the retry never
+        // runs and the value stays 12 — not 0x12, which is 18.
+        let u8_ty = ResolvedType::from(UIntType::U8);
+        assert_eq!(
+            parse_witness_value("W", "12", &u8_ty).unwrap(),
+            Value::parse_from_str("12", &u8_ty).unwrap()
+        );
+        assert_ne!(
+            parse_witness_value("W", "12", &u8_ty).unwrap(),
+            Value::parse_from_str("0x12", &u8_ty).unwrap()
+        );
+
+        // Hex of the wrong width is not silently padded, and the error still names the
+        // witness and its value rather than the retry.
+        let err = parse_witness_value("W", "ea0b31", &u256).unwrap_err();
+        assert!(err.to_string().contains('W') && err.to_string().contains("ea0b31"), "{err}");
+
+        // Non-integer types never get the retry: a name is a name there.
+        let err = parse_witness_value("ACTION", "deadbeef", &ResolvedType::unit()).unwrap_err();
+        assert!(err.to_string().contains("ACTION"), "{err}");
+    }
 
     /// End-to-end proof that `simplicity_hl.unstable_features` reaches the compiler:
     /// `prize.simf` declares `enum Action`, which is gated syntax.

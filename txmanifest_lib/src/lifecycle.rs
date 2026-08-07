@@ -75,6 +75,79 @@ fn resolve_input_sequence(inp: &Input, ctx: &ExecutionContext) -> Result<Option<
     Ok(Some(seq))
 }
 
+/// Read a pinned outpoint's explicit amount and asset from the chain.
+///
+/// Best-effort by design: this is one network round-trip in the middle of input
+/// resolution, and a run that is offline, pointed at a lagging server, or spending a
+/// still-unconfirmed output must keep working from the manifest's declared values. So a
+/// failure warns and returns `None` rather than aborting — but when the chain does answer,
+/// it wins over everything else, because it is the only source that cannot be wrong.
+fn fetch_onchain_txout(
+    txid: &str,
+    vout: u32,
+    network: ElementsNetwork,
+) -> Option<(u64, String)> {
+    use crate::backend::{Backend, BackendKind};
+
+    let parsed = lwk_wollet::elements::Txid::from_str(txid).ok()?;
+    let cfg = crate::config::load();
+    let kind = cfg.backend_kind();
+    let url = match kind {
+        BackendKind::Esplora => cfg.esplora_url().to_string(),
+        BackendKind::Electrum => cfg.electrum_url().to_string(),
+    };
+
+    let result = Backend::connect(kind, &url, network)
+        .and_then(|backend| backend.fetch_explicit_txout(parsed, vout));
+    match result {
+        Ok(Some((amount, asset))) => Some((amount, asset.to_string())),
+        Ok(None) => {
+            println!(
+                "  {} {txid}:{vout} is confidential — falling back to the declared amount and asset.",
+                style("[warn]").yellow()
+            );
+            None
+        }
+        Err(e) => {
+            println!(
+                "  {} Cannot read {txid}:{vout} from the chain ({e}) — falling back to the declared amount and asset.",
+                style("[warn]").yellow()
+            );
+            None
+        }
+    }
+}
+
+/// The blinding key for an address destination, honouring the output's `confidential` flag.
+///
+/// A confidential address carries its own blinding key, and using it is the right default.
+/// But `confidential: false` has to win, because a covenant that reads the output amount
+/// (`unwrap_right` on `Amount1`, as `prize.simf`'s `claim` does) can only do so when the
+/// output is explicit — and the payee's address is usually confidential. Ignoring the flag
+/// here, as this arm did, made that combination unspendable: the covenant hits the pruned
+/// confidential branch and fails with `Execution reached a pruned branch`.
+///
+/// Stripping the blinding key does not change the scriptPubKey, so a covenant committed to
+/// `sha256(spk)` still matches the output — see `wallet::script_hash_of_address`.
+fn address_blinding_key(
+    output: &crate::manifest::Output,
+    addr: &lwk_wollet::elements::Address,
+) -> Option<lwk_wollet::elements::bitcoin::PublicKey> {
+    if output.confidential == Some(false) {
+        return None;
+    }
+    addr.blinding_pubkey
+        .map(|pk| lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true })
+}
+
+/// Resolve a `script_hash` compute: `address` is a reference or a literal address, and the
+/// result is `sha256(scriptPubKey)` — what the covenant's `output_script_hash` jet returns.
+fn resolve_address_script_hash(address_ref: &str, ctx: &ExecutionContext) -> Result<String> {
+    let address = eval::eval_destination_str(address_ref, ctx)
+        .unwrap_or_else(|| address_ref.trim().to_string());
+    crate::wallet::script_hash_of_address(&address)
+}
+
 /// The ids of declared inputs that never made it into the PSET.
 ///
 /// A dropped input is the most dangerous failure this engine has, because it is not a
@@ -404,6 +477,9 @@ pub fn run(
         if !params.is_empty() {
             println!();
             println!("  {}", style("Action params:").bold());
+            // `script_hash` params whose address was not resolvable on the first pass —
+            // typically because the address is a param prompted later in the map.
+            let mut deferred_script_hashes: Vec<(String, String)> = Vec::new();
             for (name, def) in params {
                 if let Some(expr) = def.compute.as_ref().and_then(|c| c.as_expr()) {
                     println!(
@@ -486,6 +562,28 @@ pub fn run(
                         style("[from --params]").dim(),
                     );
                     ov.to_string()
+                } else if let Some(address_ref) =
+                    def.compute.as_ref().and_then(|c| c.as_script_hash_address())
+                {
+                    // The address may be a param declared later in the map, so a failure to
+                    // resolve here is not final — collect it and retry once the loop ends,
+                    // rather than making the value depend on alphabetical order.
+                    match resolve_address_script_hash(address_ref, &ctx) {
+                        Ok(hash) => {
+                            println!(
+                                "  {} {} = {}  {}",
+                                style("✓").green(),
+                                style(name).bold().cyan(),
+                                style(&hash).yellow(),
+                                style(format!("[script_hash of {address_ref}]")).dim(),
+                            );
+                            hash
+                        }
+                        Err(_) => {
+                            deferred_script_hashes.push((name.clone(), address_ref.to_string()));
+                            continue;
+                        }
+                    }
                 } else if let Some(expr) = def.compute.as_ref().and_then(|c| c.as_expr()) {
                     let computed = eval::eval_expr_str(expr, &ctx)?;
                     println!(
@@ -505,6 +603,23 @@ pub fn run(
                 // (step 3b tapleaf derives) see the fresh value, not a stale one
                 // that may have been loaded from a previous instance file.
                 ctx.set_compile_param(name, value);
+            }
+
+            // Second pass for the deferred `script_hash` params, now that everything they
+            // could name has been prompted or computed.
+            for (name, address_ref) in deferred_script_hashes {
+                let hash = resolve_address_script_hash(&address_ref, &ctx).with_context(|| {
+                    format!("param '{name}' computes script_hash of '{address_ref}'")
+                })?;
+                println!(
+                    "  {} {} = {}  {}",
+                    style("✓").green(),
+                    style(&name).bold().cyan(),
+                    style(&hash).yellow(),
+                    style(format!("[script_hash of {address_ref}]")).dim(),
+                );
+                ctx.set_param(&name, hash.clone());
+                ctx.set_compile_param(&name, hash);
             }
         }
     }
@@ -529,14 +644,27 @@ pub fn run(
                 let state_utxo = contract_state.as_ref().and_then(|s| {
                     s.utxos.iter().find(|u| u.txid == ov.txid && u.vout == ov.vout)
                 });
-                let asset = ov
-                    .asset
-                    .clone()
+                // The UTXO itself is the authority on what it holds. An outpoint is a
+                // fact about the chain, so reading the amount and asset off it beats any
+                // number the manifest or the operator supplies — those can be wrong, and
+                // a wrong amount is the value the sighash commits to.
+                let onchain = fetch_onchain_txout(
+                    &ov.txid,
+                    ov.vout,
+                    loaded_wallet.as_ref().map(wallet::elements_network)
+                        .unwrap_or(ElementsNetwork::LiquidTestnet),
+                );
+                let asset = onchain
+                    .as_ref()
+                    .map(|(_, asset)| asset.clone())
+                    .or_else(|| ov.asset.clone())
                     .or_else(|| state_utxo.map(|u| u.asset.clone()))
                     .or_else(|| input.asset.as_ref().and_then(|v| eval::eval_asset_label(v, &ctx).ok()))
                     .unwrap_or_else(|| "lbtc".to_string());
-                let amount_sat = ov
-                    .amount_sat
+                let amount_sat = onchain
+                    .as_ref()
+                    .map(|(amount, _)| *amount)
+                    .or(ov.amount_sat)
                     .or_else(|| state_utxo.map(|u| u.amount_sat))
                     .or_else(|| input.amount_sat.as_ref().and_then(|v| eval::eval_amount(v, &ctx).ok()))
                     .unwrap_or(0);
@@ -548,7 +676,7 @@ pub fn run(
                     ov.vout,
                     style(amount_sat).yellow(),
                     style(&asset).dim(),
-                    style("[override]").cyan(),
+                    style(if onchain.is_some() { "[override, on-chain]" } else { "[override]" }).cyan(),
                 );
                 ResolvedInput {
                     id: input.id.clone(),
@@ -1426,7 +1554,13 @@ pub fn run(
                                 continue;
                             }
                         };
-                        let bpk = addr.blinding_pubkey.map(|pk| lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true });
+                        let bpk = address_blinding_key(output, &addr);
+                        if bpk.is_none() && addr.blinding_pubkey.is_some() {
+                            println!(
+                                "  {} Output '{}' pays a confidential address explicitly (confidential: false) — the amount and asset stay in the clear.",
+                                style("·").dim(), output.id
+                            );
+                        }
                         println!(
                             "  {} Output '{}': {} sat {} → {}…",
                             style("+").green(), output.id, style(amount).yellow(), asset_label,
@@ -3372,6 +3506,22 @@ fn eval_create_instance_fields(
                         crate::manifest::ParamCompute::Expr { expr } => {
                             eval::eval_expr_str(expr, ctx).ok()
                         }
+                        // Reproducible from the manifest and cheap, so it belongs on an
+                        // instance field as much as on an action param: an instance that
+                        // commits to a payout target commits to its hash.
+                        crate::manifest::ParamCompute::ScriptHash { address } => {
+                            let key = address
+                                .strip_prefix("params.")
+                                .or_else(|| address.strip_prefix("instance."))
+                                .unwrap_or(address);
+                            let resolved = fields
+                                .get(key)
+                                .cloned()
+                                .or_else(|| eval::eval_destination_str(address, ctx))
+                                .unwrap_or_else(|| address.trim().to_string());
+                            // `None` defers to a later pass, same as an unresolved leaf ref.
+                            crate::wallet::script_hash_of_address(&resolved).ok()
+                        }
                         crate::manifest::ParamCompute::SimfFn { .. } => {
                             // SimfFn is only valid on action params, not create_instance fields.
                             None
@@ -3567,6 +3717,56 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use crate::manifest::{ComputeSpec, InstanceCreate};
+
+    /// `confidential: false` must beat a confidential address's own blinding key.
+    ///
+    /// The covenant case that forces it: `prize.simf`'s `claim` does `unwrap_right` on
+    /// `jet::output_amount(0)`, which only exists when the output is explicit. Paying a
+    /// blinded output to a `tlq1…` address makes the program hit the pruned confidential
+    /// branch — "Execution reached a pruned branch" — with nothing pointing at blinding as
+    /// the cause. The flag was honoured for `wallet` destinations and ignored for address
+    /// ones, so the manifest could ask for this and be quietly overruled.
+    #[test]
+    fn confidential_false_strips_an_addresss_blinding_key() {
+        // Parsed from JSON rather than hand-built, so the test exercises the same
+        // `confidential` field an author actually writes.
+        let manifests: Vec<Manifest> = [None, Some(true), Some(false)]
+            .iter()
+            .map(|confidential| {
+                let extra = match confidential {
+                    Some(v) => format!(r#", "confidential": {v}"#),
+                    None => String::new(),
+                };
+                Manifest::from_json_str(&format!(
+                    r#"{{ "manifest_version": "1", "protocol": "t", "actions": {{ "A": {{ "outputs": [
+                         {{ "id": "o0", "amount_sat": "1", "destination": "params.a"{extra} }} ] }} }} }}"#
+                ))
+                .expect("manifest should parse")
+            })
+            .collect();
+        let output = |i: usize| &manifests[i].actions["A"].outputs.as_ref().unwrap()[0];
+        let (default, yes, no) = (output(0), output(1), output(2));
+
+        let confidential: lwk_wollet::elements::Address =
+            "tlq1qq2tmze58e74rl0tw9cx23j47zxk0ddas95gdy0j2wzkcuejxwj8yypv93ju8yay2s3r4y6fwpuw0l322965qvse6u6zdd5mf5"
+                .parse()
+                .expect("valid address");
+        assert!(confidential.blinding_pubkey.is_some());
+        let explicit = confidential.to_unconfidential();
+
+        // The default and an explicit `true` both blind, as before.
+        assert!(address_blinding_key(default, &confidential).is_some());
+        assert!(address_blinding_key(yes, &confidential).is_some());
+        // `false` wins over the address's own key.
+        assert!(address_blinding_key(no, &confidential).is_none());
+        // An unconfidential address has nothing to strip, whatever the flag says.
+        assert!(address_blinding_key(default, &explicit).is_none());
+        assert!(address_blinding_key(yes, &explicit).is_none());
+
+        // Stripping must not move the scriptPubKey, or the covenant's committed
+        // sha256(spk) would stop matching the output that pays it.
+        assert_eq!(confidential.script_pubkey(), explicit.script_pubkey());
+    }
 
     /// The end this boundary exists for: one closed `utxo_type`, two sites, two states —
     /// and the state each site commits to comes from the site, not from whatever the
