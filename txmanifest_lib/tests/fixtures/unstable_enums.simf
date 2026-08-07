@@ -1,0 +1,20 @@
+simc "0.7.0";
+
+// Fixture for `unstable_features_gate_a_program_that_uses_enums`.
+//
+// The only thing that matters here is that the program uses gated syntax: `enum`
+// declarations and `Enum::Variant` matches require `-Z enums`, so this compiles when the
+// manifest enables that feature and fails when it does not. Kept deliberately trivial —
+// a test about a feature gate should not also depend on a covenant being correct.
+
+enum Choice {
+    Left,
+    Right(u32),
+}
+
+fn main() {
+    match witness::CHOICE {
+        Choice::Left => (),
+        Choice::Right(n: u32) => assert!(jet::le_32(n, 1000)),
+    }
+}

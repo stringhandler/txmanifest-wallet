@@ -1197,31 +1197,31 @@ mod tests {
         assert!(err.to_string().contains("ACTION"), "{err}");
     }
 
-    /// End-to-end proof that `simplicity_hl.unstable_features` reaches the compiler:
-    /// `prize.simf` declares `enum Action`, which is gated syntax.
+    /// End-to-end proof that `simplicity_hl.unstable_features` reaches the compiler.
     ///
-    /// Both directions matter. Compiling *with* the feature shows the manifest can
-    /// enable it at all; compiling *without* must still fail, or the manifest key would
-    /// be decorative — the gate silently open for every program in the repo.
+    /// Both directions matter. Compiling *with* the feature shows the manifest can enable
+    /// it at all; compiling *without* must still fail, or the manifest key would be
+    /// decorative — the gate silently open for every program in the repo.
+    ///
+    /// Manifest and program are both fixtures of this crate rather than an example under
+    /// `examples/`: a test about feature plumbing should not fail because an example was
+    /// edited, and should not stop working if one is ever moved or dropped.
     #[test]
     fn unstable_features_gate_a_program_that_uses_enums() {
-        // The manifest is inline rather than read from examples/prize_contest: this test is
-        // about the plumbing from the `simplicity_hl` block to the compiler, and reading a
-        // live example would make it fail for whatever that example happens to say today.
         let manifest = crate::manifest::Manifest::from_json_str(
             r#"{ "manifest_version": "1", "protocol": "t",
                  "simplicity_hl": { "unstable_features": ["enums"] } }"#,
         )
         .expect("manifest should parse");
-        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let simf_path = crate_dir.join("../examples/prize_contest/prize.simf");
+        let simf_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/unstable_enums.simf");
         let (params, hints) = (HashMap::new(), HashMap::new());
 
         check_compile(&simf_path, &params, &hints, manifest.compile_opts())
-            .expect("prize.simf should compile with the manifest's unstable features");
+            .expect("the fixture should compile with the manifest's unstable features");
 
         let err = check_compile(&simf_path, &params, &hints, CompileOpts::default())
-            .expect_err("prize.simf must not compile with no unstable features enabled");
+            .expect_err("gated syntax must not compile with no unstable features enabled");
         assert!(
             err.to_string().contains("enums"),
             "error should name the missing feature: {err}"

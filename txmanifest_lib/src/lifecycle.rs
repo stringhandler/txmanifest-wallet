@@ -122,7 +122,7 @@ fn fetch_onchain_txout(
 ///
 /// A confidential address carries its own blinding key, and using it is the right default.
 /// But `confidential: false` has to win, because a covenant that reads the output amount
-/// (`unwrap_right` on `Amount1`, as `prize.simf`'s `claim` does) can only do so when the
+/// (`unwrap_right` on `Amount1`, the usual way to read a payout) can only do so when the
 /// output is explicit — and the payee's address is usually confidential. Ignoring the flag
 /// here, as this arm did, made that combination unspendable: the covenant hits the pruned
 /// confidential branch and fails with `Execution reached a pruned branch`.
@@ -3720,7 +3720,7 @@ mod tests {
 
     /// `confidential: false` must beat a confidential address's own blinding key.
     ///
-    /// The covenant case that forces it: `prize.simf`'s `claim` does `unwrap_right` on
+    /// The covenant case that forces it: a payout check does `unwrap_right` on
     /// `jet::output_amount(0)`, which only exists when the output is explicit. Paying a
     /// blinded output to a `tlq1…` address makes the program hit the pruned confidential
     /// branch — "Execution reached a pruned branch" — with nothing pointing at blinding as
