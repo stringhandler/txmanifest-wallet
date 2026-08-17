@@ -197,6 +197,56 @@ pub fn resolve_site_arg(expr: &str, ctx: &ExecutionContext) -> Result<String> {
     Ok(expr.trim_matches(['"', '\'']).to_string())
 }
 
+/// Evaluate a blinding-factor field → a 32-byte scalar in big-endian order.
+///
+/// Accepts a JSON number, a decimal string, a `0x`-prefixed hex string of up to 32 bytes,
+/// or a reference (`params.X`, `instance.X`, …) resolving to either spelling. Both ends
+/// matter: a covenant's bootstrap constant is written `"1"`, while a factor recovered
+/// from a previous spend's witness arrives as a full 64-char scalar.
+///
+/// Short values are right-aligned — `"1"` is the scalar one, not one followed by 31 zero
+/// bytes — which is the same convention `witness` `u256` values and the covenant's own
+/// arithmetic use.
+pub fn eval_scalar32(value: &serde_json::Value, ctx: &ExecutionContext) -> Result<[u8; 32]> {
+    let text = match value {
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => {
+            let s = s.trim();
+            resolve_ref(s, ctx).unwrap_or_else(|| s.to_string())
+        }
+        other => bail!("Unsupported blinding factor value: {other}"),
+    };
+    let text = text.trim();
+
+    let bytes = if text.starts_with("0x") || text.starts_with("0X") {
+        hex_to_bytes(text)?
+    } else if text.chars().all(|c| c.is_ascii_digit()) && !text.is_empty() {
+        let n: u128 = text.parse().map_err(|_| {
+            anyhow::anyhow!(
+                "Blinding factor '{text}' is too large to write in decimal — use a \
+                 0x-prefixed 64-char hex scalar"
+            )
+        })?;
+        n.to_be_bytes().to_vec()
+    } else {
+        bail!("Blinding factor '{text}' is neither a decimal integer nor 0x-prefixed hex");
+    };
+
+    if bytes.len() > 32 {
+        bail!("Blinding factor '{text}' is {} bytes, must be at most 32", bytes.len());
+    }
+    let mut out = [0u8; 32];
+    out[32 - bytes.len()..].copy_from_slice(&bytes);
+    if out == [0u8; 32] {
+        bail!(
+            "Blinding factor is zero. Zero is not a valid scalar, and a zero asset \
+             blinding factor makes the output explicit — which is the one thing a \
+             reissuance token may not be."
+        );
+    }
+    Ok(out)
+}
+
 /// The `type` values a computed taproot leaf payload item may declare.
 ///
 /// Lives next to the encoder that implements them, and is what the published schema
@@ -845,6 +895,49 @@ mod leaf_value_type_tests {
             encode_leaf_value(&literal, &ExecutionContext::new()).unwrap(),
             vec![0x01]
         );
+    }
+}
+
+#[cfg(test)]
+mod scalar32_tests {
+    use super::*;
+    use crate::context::ExecutionContext;
+
+    /// The bootstrap constant. `"1"` has to mean the scalar one — right-aligned — because
+    /// that is what the covenant adds to and what Elements compares the reissuance nonce
+    /// against; left-aligning it would silently produce a different, unreproducible factor.
+    #[test]
+    fn decimal_one_is_right_aligned() {
+        let ctx = ExecutionContext::new();
+        let mut expected = [0u8; 32];
+        expected[31] = 1;
+        assert_eq!(eval_scalar32(&serde_json::json!("1"), &ctx).unwrap(), expected);
+        assert_eq!(eval_scalar32(&serde_json::json!(1), &ctx).unwrap(), expected);
+    }
+
+    #[test]
+    fn hex_and_refs_resolve() {
+        let mut ctx = ExecutionContext::new();
+        ctx.set_compile_param("YES_ABF", "0x02");
+        let mut expected = [0u8; 32];
+        expected[31] = 2;
+        assert_eq!(eval_scalar32(&serde_json::json!("0x02"), &ctx).unwrap(), expected);
+        assert_eq!(eval_scalar32(&serde_json::json!("instance.YES_ABF"), &ctx).unwrap(), expected);
+
+        // A factor recovered from a previous spend's witness arrives full-width.
+        let full = format!("0x{}", "ab".repeat(32));
+        assert_eq!(eval_scalar32(&serde_json::json!(full), &ctx).unwrap(), [0xabu8; 32]);
+    }
+
+    #[test]
+    fn rejects_zero_and_oversized() {
+        let ctx = ExecutionContext::new();
+        // Zero is not a scalar, and a zero abf is what makes an output explicit — the one
+        // thing a reissuance token may not be.
+        assert!(eval_scalar32(&serde_json::json!("0"), &ctx).is_err());
+        assert!(eval_scalar32(&serde_json::json!(format!("0x{}", "00".repeat(32))), &ctx).is_err());
+        assert!(eval_scalar32(&serde_json::json!(format!("0x{}", "11".repeat(33))), &ctx).is_err());
+        assert!(eval_scalar32(&serde_json::json!("not-a-scalar"), &ctx).is_err());
     }
 }
 

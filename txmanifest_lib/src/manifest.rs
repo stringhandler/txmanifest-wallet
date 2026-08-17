@@ -761,8 +761,45 @@ pub struct Output {
     /// Defaults to `true` (confidential) for wallet destinations. Has no effect on
     /// covenant (`utxo_type`) outputs — those are controlled by the `utxo_type.confidential` flag.
     pub confidential: Option<bool>,
+    /// Pin this confidential output's blinding factors instead of letting the builder
+    /// pick them. See [`OutputBlinding`].
+    pub blinding: Option<OutputBlinding>,
     /// Clear-signing UI hint for this output (net-effect credit line).
     pub ui: Option<UiSpec>,
+}
+
+/// Blinding factors pinned by the manifest for one confidential output.
+///
+/// A wallet normally draws both factors at random, which is right when nothing but the
+/// receiver ever reads them. It is wrong when a *covenant* reads them: a program that
+/// checks its own outputs' commitments (deadcat_v3 requires each recreated reissuance
+/// token to advance both factors by exactly one) can only be satisfied by factors the
+/// spender chose deliberately. Elements' `blind_last` offers no way to say which, so the
+/// engine runs its own blinding pass whenever this field appears.
+///
+/// Each factor is a 32-byte scalar written as a small decimal (`"1"`), a `0x`-prefixed
+/// hex string of up to 64 chars, or a reference (`params.X`, `instance.X`) resolving to
+/// either. Omitting one leaves it random; omitting both makes the field a no-op.
+///
+/// **One confidential output must keep a free `value_bf`.** The transaction's blinding
+/// factors have to sum to zero, and the builder solves the last free `value_bf` to make
+/// that true — pin every one of them and the transaction is unbalanceable. In practice
+/// the change output is the one left free.
+///
+/// The factors are public to anyone who reads them here, so this trades the output's
+/// confidentiality for reissuability: it hides nothing, it only keeps the commitment
+/// well-formed. Elements has no explicit reissuance token
+/// (`confidential_validation.cpp` rebuilds the spent token's generator from the blinding
+/// nonce and byte-compares it), so a token that must stay reissuable must stay blinded,
+/// with a factor its next spender can reproduce.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OutputBlinding {
+    /// Asset blinding factor (`abf`). Also the value Elements requires as the
+    /// `assetBlindingNonce` of any later reissuance spending this output.
+    pub asset_bf: Option<serde_json::Value>,
+    /// Value blinding factor (`vbf`).
+    pub value_bf: Option<serde_json::Value>,
 }
 
 /// Where an [`Output`]'s value goes, in any of these forms:

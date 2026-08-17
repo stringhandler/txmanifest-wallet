@@ -140,6 +140,46 @@ fn address_blinding_key(
         .map(|pk| lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true })
 }
 
+/// Resolve an output's pinned blinding factors, if it declared any.
+///
+/// The manifest writes scalars; the builder wants `secp` tweaks, and a factor that is not
+/// a valid scalar (zero, or ≥ the curve order) has to fail here rather than deep inside
+/// the blinder, where the message would name neither the output nor the field.
+fn resolve_output_blinding(
+    output: &crate::manifest::Output,
+    ctx: &ExecutionContext,
+) -> Result<Option<pset_builder::PinnedBlinding>> {
+    use lwk_wollet::elements::confidential::{AssetBlindingFactor, ValueBlindingFactor};
+
+    let Some(spec) = output.blinding.as_ref() else {
+        return Ok(None);
+    };
+    let asset_bf = match spec.asset_bf.as_ref() {
+        None => None,
+        Some(v) => {
+            let bytes = eval::eval_scalar32(v, ctx)
+                .with_context(|| format!("output '{}' asset_bf", output.id))?;
+            Some(AssetBlindingFactor::from_slice(&bytes).map_err(|e| {
+                anyhow::anyhow!("output '{}' asset_bf is not a valid scalar: {e}", output.id)
+            })?)
+        }
+    };
+    let value_bf = match spec.value_bf.as_ref() {
+        None => None,
+        Some(v) => {
+            let bytes = eval::eval_scalar32(v, ctx)
+                .with_context(|| format!("output '{}' value_bf", output.id))?;
+            Some(ValueBlindingFactor::from_slice(&bytes).map_err(|e| {
+                anyhow::anyhow!("output '{}' value_bf is not a valid scalar: {e}", output.id)
+            })?)
+        }
+    };
+    if asset_bf.is_none() && value_bf.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(pset_builder::PinnedBlinding { asset_bf, value_bf }))
+}
+
 /// Resolve a `script_hash` compute: `address` is a reference or a literal address, and the
 /// result is `sha256(scriptPubKey)` — what the covenant's `output_script_hash` jet returns.
 fn resolve_address_script_hash(address_ref: &str, ctx: &ExecutionContext) -> Result<String> {
@@ -1413,8 +1453,31 @@ pub fn run(
                     }
                 };
 
+                // Pinned blinding factors, if the manifest wrote any. Resolved before the
+                // destination arms because a pin that cannot be honoured (an explicit
+                // output, a covenant output) is an error in every arm, not a warning.
+                let pinned_blinding = match resolve_output_blinding(output, &ctx) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        println!("  {} Output '{}' blinding: {e}", style("[error]").red(), output.id);
+                        collect_outputs_ok = false;
+                        break;
+                    }
+                };
+
                 match &*output.destination {
                     serde_json::Value::String(dest) if dest == "change" => {
+                        if pinned_blinding.is_some() {
+                            println!(
+                                "  {} Output '{}' pins blinding factors on a change output. Change \
+                                 is built by the engine, and its value blinding factor is the one \
+                                 solved to balance the transaction — it is the output that must \
+                                 stay free.",
+                                style("[error]").red(), output.id
+                            );
+                            collect_outputs_ok = false;
+                            break;
+                        }
                         println!("  {} Output '{}' → change (auto).", style("·").dim(), output.id);
                         change_assets.insert(asset_id);
                         continue;
@@ -1442,8 +1505,16 @@ pub fn run(
                             "  {} Output '{}': {} sat {} → OP_RETURN{}",
                             style("+").green(), output.id, style(amount).yellow(), asset_label, data_note
                         );
+                        if pinned_blinding.is_some() {
+                            println!(
+                                "  {} Output '{}' pins blinding factors on an OP_RETURN/burn output, which is never blinded.",
+                                style("[error]").red(), output.id
+                            );
+                            collect_outputs_ok = false;
+                            break;
+                        }
                         pset_outputs.push(pset_builder::PsetOutputSpec {
-                            script_pubkey, amount, asset: asset_id, blinding_key: None,
+                            script_pubkey, amount, asset: asset_id, blinding_key: None, blinding: None,
                         });
                     }
                     serde_json::Value::Object(m) if m.contains_key("utxo_type") => {
@@ -1504,6 +1575,15 @@ pub fn run(
                             "  {} Output '{}': {} sat {} → covenant ({}, {})",
                             style("+").green(), output.id, style(amount).yellow(), asset_label, type_name, conf_label
                         );
+                        if pinned_blinding.is_some() && blinding_key.is_none() {
+                            println!(
+                                "  {} Output '{}' pins blinding factors, but covenant outputs are \
+                                 built explicit — confidential covenant outputs are not supported yet.",
+                                style("[error]").red(), output.id
+                            );
+                            collect_outputs_ok = false;
+                            break;
+                        }
                         covenant_output_meta.push(CovenantOutputMeta {
                             utxo_type: type_name.to_string(),
                             output_id: output.id.clone(),
@@ -1512,7 +1592,7 @@ pub fn run(
                             asset: asset_id,
                         });
                         pset_outputs.push(pset_builder::PsetOutputSpec {
-                            script_pubkey, amount, asset: asset_id, blinding_key,
+                            script_pubkey, amount, asset: asset_id, blinding_key, blinding: pinned_blinding,
                         });
                     }
                     serde_json::Value::String(dest) if dest == "wallet" => {
@@ -1534,14 +1614,24 @@ pub fn run(
                         } else {
                             None
                         };
+                        if pinned_blinding.is_some() && bpk.is_none() {
+                            println!(
+                                "  {} Output '{}' pins blinding factors but is explicit (confidential: false) — there is nothing to blind.",
+                                style("[error]").red(), output.id
+                            );
+                            collect_outputs_ok = false;
+                            break;
+                        }
                         let addr_str = addr.to_string();
                         println!(
-                            "  {} Output '{}': {} sat {} → wallet ({}…)",
+                            "  {} Output '{}': {} sat {} → wallet ({}…){}",
                             style("+").green(), output.id, style(amount).yellow(), asset_label,
-                            &addr_str[..addr_str.len().min(24)]
+                            &addr_str[..addr_str.len().min(24)],
+                            if pinned_blinding.is_some() { ", pinned blinding factors" } else { "" }
                         );
                         pset_outputs.push(pset_builder::PsetOutputSpec {
                             script_pubkey: addr.script_pubkey(), amount, asset: asset_id, blinding_key: bpk,
+                            blinding: pinned_blinding,
                         });
                     }
                     serde_json::Value::String(dest) => {
@@ -1561,6 +1651,14 @@ pub fn run(
                                 style("·").dim(), output.id
                             );
                         }
+                        if pinned_blinding.is_some() && bpk.is_none() {
+                            println!(
+                                "  {} Output '{}' pins blinding factors but is explicit — there is nothing to blind.",
+                                style("[error]").red(), output.id
+                            );
+                            collect_outputs_ok = false;
+                            break;
+                        }
                         println!(
                             "  {} Output '{}': {} sat {} → {}…",
                             style("+").green(), output.id, style(amount).yellow(), asset_label,
@@ -1568,6 +1666,7 @@ pub fn run(
                         );
                         pset_outputs.push(pset_builder::PsetOutputSpec {
                             script_pubkey: addr.script_pubkey(), amount, asset: asset_id, blinding_key: bpk,
+                            blinding: pinned_blinding,
                         });
                     }
                     serde_json::Value::Object(m) if m.contains_key("script_hash") => {
@@ -1603,8 +1702,16 @@ pub fn run(
                             style("+").green(), output.id, style(amount).yellow(), asset_label,
                             &clean[..16]
                         );
+                        if pinned_blinding.is_some() {
+                            println!(
+                                "  {} Output '{}' pins blinding factors, but a script_hash output is built explicit.",
+                                style("[error]").red(), output.id
+                            );
+                            collect_outputs_ok = false;
+                            break;
+                        }
                         pset_outputs.push(pset_builder::PsetOutputSpec {
-                            script_pubkey, amount, asset: asset_id, blinding_key: None,
+                            script_pubkey, amount, asset: asset_id, blinding_key: None, blinding: None,
                         });
                     }
                     other => {

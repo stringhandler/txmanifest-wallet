@@ -109,10 +109,37 @@ The recon compiles v3, derives all four addresses, and asserts each **differs** 
 matching `deadcat` address — if they ever collide the fork silently stopped being a fork —
 then checks the four output witnesses are gone and the four input ones survive.
 
+## Pinning the factors
+
+`blind_last` cannot be told "use this abf for output 0" — it picks every factor itself. So
+an output may now name its own, and the engine runs a hand-written blinding pass instead:
+
+```json
+"blinding": { "asset_bf": "1", "value_bf": "1" }
+```
+
+Either half may be given; either may be a decimal, a `0x` scalar, or a `params.X` /
+`instance.X` reference. The pass blinds every pinned output with the stated factors and
+solves the last *unpinned* `value_bf` so the transaction balances — which is why the rule
+above matters in code and not just in the argument: pin every `value_bf` and the build
+fails with that error rather than producing a transaction a node rejects.
+
+`IssueReissuanceTokens` pins both tokens at the constant pair, so the chain now starts from
+a value the next spender can reproduce. Its `lbtc_change` output is the one left free.
+
 ## Still needed before this runs
 
-The engine has to blind covenant outputs, and `blind_last` cannot be told "use `abf_in + 1`
-for output 0" — it picks abfs itself. That needs a hand-written blinding pass: choose the
-abfs, blind all but one output, solve the last vbf. `pset_builder::apply_reissuance` also
-still writes the placeholder nonce `[0…0, 1]`; it must write the real abf of the token UTXO,
-which under this fork is a derivable constant rather than a stored secret.
+**Confidential covenant outputs.** `utxo_type.confidential` is still ignored — the builder
+warns and pays explicit — so `CreateMarket` cannot yet park a *blinded* token at the state-0
+address, and pinning factors on a covenant output is rejected rather than silently dropped.
+That is the step that moves the constant to where the covenant actually reads it: the abf
+`InitialIssuance` spends is the abf `CreateMarket` wrote, not the one the wallet held.
+
+**The reissuance nonce.** `pset_builder::apply_reissuance` still writes the placeholder
+`[0…0, 1]`. Under this fork that value happens to be right for the first reissuance — the
+convention makes the first abf exactly 1 — but it must read the spent token's real abf, or
+every later spend in the `+1` chain writes the wrong nonce.
+
+**The four input witnesses.** `YES_/NO_REISSUANCE_INPUT_ABF/VBF` are the previous spend's
+factors. `InitialIssuance` can state the constant once the two items above land; the later
+paths need them read off the prior witness and incremented, which nothing does yet.

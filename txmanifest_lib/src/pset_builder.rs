@@ -7,9 +7,9 @@ use lwk_wollet::{
         confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor},
         hashes::{sha256, Hash as _},
         pset::{Input, Output, PartiallySignedTransaction},
-        secp256k1_zkp::{RangeProof, SurjectionProof, Tweak},
+        secp256k1_zkp::{RangeProof, SecretKey, SurjectionProof, Tweak},
         AssetId, ContractHash, OutPoint, Script, Sequence, Txid, TxOut, TxOutWitness,
-        BlindAssetProofs, BlindValueProofs, TxOutSecrets,
+        BlindAssetProofs, BlindValueProofs, RangeProofMessage, SurjectionInput, TxOutSecrets,
     },
     ElementsNetwork, WalletTxOut, Wollet, EC,
 };
@@ -72,6 +72,21 @@ pub struct PsetOutputSpec {
     pub asset: AssetId,
     /// Set for confidential outputs; None for explicit outputs.
     pub blinding_key: Option<lwk_wollet::elements::bitcoin::PublicKey>,
+    /// Blinding factors the manifest pinned for this output. `None` (the usual case)
+    /// leaves both to the blinder. See [`PinnedBlinding`].
+    pub blinding: Option<PinnedBlinding>,
+}
+
+/// Blinding factors chosen by the manifest rather than by the blinder.
+///
+/// Needed when a covenant *reads* an output's factors — deadcat_v3 requires each
+/// recreated reissuance token to advance both by exactly one — because `blind_last`
+/// picks every factor itself and offers no way to say which. A pinned factor is used
+/// verbatim; an unpinned one is drawn at random as usual.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PinnedBlinding {
+    pub asset_bf: Option<AssetBlindingFactor>,
+    pub value_bf: Option<ValueBlindingFactor>,
 }
 
 pub struct BuildPsetRequest {
@@ -149,8 +164,22 @@ pub fn build_pset(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRequ
     // has nothing to blind; `blind_last` errors if asked to blind with no
     // confidential output, so only blind when one is present.
     if pset_has_confidential_output(&pset) {
-        pset.blind_last(&mut rng, &secp, &inp_txout_sec)
-            .map_err(|e| anyhow::anyhow!("PSET blinding failed: {e}"))?;
+        // `build_inner` appends the declared outputs first, in order, so a declared
+        // output's index in `req.outputs` is its index in the PSET. Change and fee land
+        // after them and are never pinned.
+        let pins: HashMap<usize, PinnedBlinding> = req
+            .outputs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| o.blinding.map(|b| (i, b)))
+            .collect();
+        if pins.is_empty() {
+            pset.blind_last(&mut rng, &secp, &inp_txout_sec)
+                .map_err(|e| anyhow::anyhow!("PSET blinding failed: {e}"))?;
+        } else {
+            blind_with_pinned_factors(&mut pset, &secp, &mut rng, &inp_txout_sec, &pins)
+                .context("PSET blinding failed")?;
+        }
     }
 
     Ok(BuildPsetResult { pset, issuances })
@@ -160,6 +189,189 @@ pub fn build_pset(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRequ
 /// transactions need no blinding pass.
 fn pset_has_confidential_output(pset: &PartiallySignedTransaction) -> bool {
     pset.outputs().iter().any(|o| o.blinding_key.is_some())
+}
+
+/// Blind every confidential output, using the manifest's factors where it pinned them.
+///
+/// This is `blind_last` rewritten with a seam. The upstream routine draws every abf/vbf
+/// itself and solves the *last* output's vbf so the transaction balances; here the pinned
+/// factors are used verbatim, and the balancing role moves to the last output whose vbf
+/// is still free. Everything else — the surjection domain, the rangeproof message, the
+/// explicit blind_{asset,value} proofs — is the same work in the same order, because a
+/// PSET blinded any other way is not a PSET Elements will accept.
+///
+/// The residue has to land somewhere: blinding factors sum to zero across a transaction,
+/// so at least one confidential output must keep a free vbf for the solver. Pinning all
+/// of them is not a tighter transaction, it is an unsatisfiable one.
+fn blind_with_pinned_factors(
+    pset: &mut PartiallySignedTransaction,
+    secp: &lwk_wollet::elements::secp256k1_zkp::Secp256k1<lwk_wollet::elements::secp256k1_zkp::All>,
+    rng: &mut (impl rand::RngCore + rand::CryptoRng),
+    inp_txout_sec: &HashMap<usize, TxOutSecrets>,
+    pins: &HashMap<usize, PinnedBlinding>,
+) -> Result<()> {
+    for (i, inp) in pset.inputs().iter().enumerate() {
+        if inp.has_issuance() && inp.blinded_issuance.unwrap_or(1) == 1 {
+            anyhow::bail!("Input {i} asks for a blinded issuance, which is not supported");
+        }
+    }
+
+    // Which outputs get blinded, by the same rule `blind_last` applies: a blinding key, a
+    // blinder_index in range, and secrets for the input it names.
+    let mut to_blind: Vec<usize> = Vec::new();
+    for (i, out) in pset.outputs().iter().enumerate() {
+        if out.blinding_key.is_none() {
+            continue;
+        }
+        let blinder = out
+            .blinder_index
+            .ok_or_else(|| anyhow::anyhow!("Output {i} is confidential but names no blinder input"))?
+            as usize;
+        if blinder >= pset.inputs().len() {
+            anyhow::bail!("Output {i} names blinder input {blinder}, which does not exist");
+        }
+        if inp_txout_sec.contains_key(&blinder) {
+            to_blind.push(i);
+        }
+    }
+    for i in pins.keys() {
+        if !to_blind.contains(i) {
+            anyhow::bail!(
+                "Output {i} pins blinding factors but is not being blinded — a pinned factor \
+                 only means something on a confidential output"
+            );
+        }
+    }
+
+    // The balancer: the last output whose vbf nobody pinned. An output may pin only its
+    // abf (the half Elements reads as a reissuance's nonce) and still take this role.
+    let free = to_blind
+        .iter()
+        .rev()
+        .copied()
+        .find(|i| pins.get(i).is_none_or(|p| p.value_bf.is_none()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Every confidential output pins its value blinding factor, so nothing is left \
+                 to absorb the balance residue and the transaction cannot be blinded.\n\
+                 Leave one output — normally the change — with its `value_bf` unpinned."
+            )
+        })?;
+
+    let surject_inputs = pset
+        .surjection_inputs(inp_txout_sec)
+        .map_err(|e| anyhow::anyhow!("surjection inputs: {e}"))?;
+
+    // Blind everything but the balancer, collecting the secrets the solver needs.
+    let mut out_secrets: Vec<(u64, AssetBlindingFactor, ValueBlindingFactor)> = Vec::new();
+    for &i in &to_blind {
+        if i == free {
+            continue;
+        }
+        let pin = pins.get(&i).copied().unwrap_or_default();
+        let abf = pin.asset_bf.unwrap_or_else(|| AssetBlindingFactor::new(rng));
+        let vbf = pin.value_bf.unwrap_or_else(|| ValueBlindingFactor::new(rng));
+        let value = blind_one_output(pset, i, secp, rng, &surject_inputs, abf, vbf)?;
+        out_secrets.push((value, abf, vbf));
+    }
+
+    // Explicit outputs (the fee, any `confidential: false` leg) carry zero factors and so
+    // contribute nothing to the sum, but the solver is given the whole output set.
+    for (i, out) in pset.outputs().iter().enumerate() {
+        if to_blind.contains(&i) {
+            continue;
+        }
+        let amount = out
+            .amount
+            .ok_or_else(|| anyhow::anyhow!("Explicit output {i} has no amount"))?;
+        out_secrets.push((amount, AssetBlindingFactor::zero(), ValueBlindingFactor::zero()));
+    }
+
+    let inp_secrets: Vec<(u64, AssetBlindingFactor, ValueBlindingFactor)> = inp_txout_sec
+        .values()
+        .map(|s| (s.value, s.asset_bf, s.value_bf))
+        .collect();
+
+    let free_abf = pins
+        .get(&free)
+        .and_then(|p| p.asset_bf)
+        .unwrap_or_else(|| AssetBlindingFactor::new(rng));
+    let free_value = pset.outputs()[free]
+        .amount
+        .ok_or_else(|| anyhow::anyhow!("Output {free} has no explicit amount to blind"))?;
+    let free_vbf =
+        ValueBlindingFactor::last(secp, free_value, free_abf, &inp_secrets, &out_secrets);
+    blind_one_output(pset, free, secp, rng, &surject_inputs, free_abf, free_vbf)?;
+
+    // Nothing was left for another blinder to finish, so no scalar is carried.
+    Ok(())
+}
+
+/// Blind one PSET output with the given factors, writing back the commitments and all
+/// four proofs. Returns the output's explicit amount, which the balance solver needs.
+fn blind_one_output(
+    pset: &mut PartiallySignedTransaction,
+    idx: usize,
+    secp: &lwk_wollet::elements::secp256k1_zkp::Secp256k1<lwk_wollet::elements::secp256k1_zkp::All>,
+    rng: &mut (impl rand::RngCore + rand::CryptoRng),
+    surject_inputs: &[SurjectionInput],
+    abf: AssetBlindingFactor,
+    vbf: ValueBlindingFactor,
+) -> Result<u64> {
+    let out = &pset.outputs()[idx];
+    let asset_id = out
+        .asset
+        .ok_or_else(|| anyhow::anyhow!("Output {idx} has no explicit asset to blind"))?;
+    let value = out
+        .amount
+        .ok_or_else(|| anyhow::anyhow!("Output {idx} has no explicit amount to blind"))?;
+    let blinding_pk = out
+        .blinding_key
+        .ok_or_else(|| anyhow::anyhow!("Output {idx} has no blinding key"))?
+        .inner;
+    let script_pubkey = out.script_pubkey.clone();
+
+    let (asset_comm, surjection_proof) = Asset::Explicit(asset_id)
+        .blind(rng, secp, abf, surject_inputs)
+        .map_err(|e| anyhow::anyhow!("Output {idx} asset blinding failed: {e}"))?;
+    let (value_comm, nonce, rangeproof) = Value::Explicit(value)
+        .blind(
+            secp,
+            vbf,
+            blinding_pk,
+            SecretKey::new(rng),
+            &script_pubkey,
+            &RangeProofMessage { asset: asset_id, bf: abf },
+        )
+        .map_err(|e| anyhow::anyhow!("Output {idx} value blinding failed: {e}"))?;
+
+    let asset_gen = asset_comm
+        .commitment()
+        .ok_or_else(|| anyhow::anyhow!("Output {idx} asset commitment missing"))?;
+    let value_commitment = value_comm
+        .commitment()
+        .ok_or_else(|| anyhow::anyhow!("Output {idx} value commitment missing"))?;
+    // The explicit-value / explicit-asset proofs: what lets a verifier check the
+    // commitments against the amounts the PSET still states in the clear.
+    let blind_asset_proof = SurjectionProof::blind_asset_proof(rng, secp, asset_id, abf)
+        .map_err(|e| anyhow::anyhow!("Output {idx} blind_asset_proof failed: {e}"))?;
+    let blind_value_proof =
+        RangeProof::blind_value_proof(rng, secp, value, value_commitment, asset_gen, vbf)
+            .map_err(|e| anyhow::anyhow!("Output {idx} blind_value_proof failed: {e}"))?;
+
+    let out = &mut pset.outputs_mut()[idx];
+    out.value_rangeproof = Some(Box::new(rangeproof));
+    out.asset_surjection_proof = Some(Box::new(surjection_proof));
+    out.amount_comm = Some(value_commitment);
+    out.asset_comm = Some(asset_gen);
+    out.ecdh_pubkey = nonce.commitment().map(|pk| lwk_wollet::elements::bitcoin::PublicKey {
+        inner: pk,
+        compressed: true,
+    });
+    out.blind_asset_proof = Some(Box::new(blind_asset_proof));
+    out.blind_value_proof = Some(Box::new(blind_value_proof));
+
+    Ok(value)
 }
 
 /// Rough per-input witness weight (WU) for fee estimation. The unsigned draft PSET
@@ -646,4 +858,149 @@ pub fn decode_entropy_hex(hex: &str) -> Result<[u8; 32]> {
             .map_err(|_| anyhow::anyhow!("Invalid hex byte at position {i}"))?;
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod pinned_blinding_tests {
+    use super::*;
+    use lwk_wollet::elements::secp256k1_zkp::PublicKey;
+
+    /// The 32-byte scalar `n`, right-aligned — the spelling `"1"` resolves to.
+    fn scalar(n: u8) -> [u8; 32] {
+        let mut b = [0u8; 32];
+        b[31] = n;
+        b
+    }
+
+    fn test_asset(tag: u8) -> AssetId {
+        AssetId::from_entropy(sha256::Midstate::from_byte_array([tag; 32]))
+    }
+
+    fn test_spk(tag: u8) -> Script {
+        let mut b = Vec::with_capacity(34);
+        b.push(0x51);
+        b.push(0x20);
+        b.extend_from_slice(&[tag; 32]);
+        Script::from(b)
+    }
+
+    /// One explicit input, two confidential outputs (the first with pinned factors) and a
+    /// fee. The transaction must verify the way a node verifies it, and the pinned output
+    /// must open to exactly the factors the manifest named — the whole point being that the
+    /// next spender can reproduce them without holding a secret.
+    #[test]
+    fn pinned_factors_reach_the_chain_and_the_tx_still_balances() {
+        let secp = EC.clone();
+        let mut rng = rand::thread_rng();
+        let asset = test_asset(7);
+        let one_abf = AssetBlindingFactor::from_slice(&scalar(1)).unwrap();
+        let one_vbf = ValueBlindingFactor::from_slice(&scalar(1)).unwrap();
+
+        let prev = TxOut {
+            asset: Asset::Explicit(asset),
+            value: Value::Explicit(1000),
+            nonce: Nonce::Null,
+            script_pubkey: test_spk(1),
+            witness: TxOutWitness::default(),
+        };
+        let mut pset = PartiallySignedTransaction::new_v2();
+        let mut input = Input::from_prevout(OutPoint::new(
+            Txid::from_byte_array([1u8; 32]),
+            0,
+        ));
+        input.witness_utxo = Some(prev.clone());
+        input.asset = Some(asset);
+        input.amount = Some(1000);
+        pset.add_input(input);
+
+        let mut secrets = HashMap::new();
+        secrets.insert(0usize, TxOutSecrets {
+            value: 1000,
+            value_bf: ValueBlindingFactor::zero(),
+            asset,
+            asset_bf: AssetBlindingFactor::zero(),
+        });
+
+        let pinned_sk = SecretKey::new(&mut rng);
+        let free_sk = SecretKey::new(&mut rng);
+        pset.add_output(confidential_output(
+            test_spk(2), 600, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &pinned_sk)), 0,
+        ));
+        pset.add_output(confidential_output(
+            test_spk(3), 300, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &free_sk)), 0,
+        ));
+        pset.add_output(Output::new_explicit(Script::default(), 100, asset, None));
+
+        let pins = HashMap::from([(
+            0usize,
+            PinnedBlinding { asset_bf: Some(one_abf), value_bf: Some(one_vbf) },
+        )]);
+        blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins)
+            .expect("pinned blinding");
+
+        let tx = pset.extract_tx().expect("extract_tx");
+        tx.verify_tx_amt_proofs(&secp, &[prev])
+            .expect("rangeproofs, surjection proofs and the commitment balance must all check");
+
+        let opened = tx.output[0].unblind(&secp, pinned_sk).expect("unblind pinned output");
+        assert_eq!(opened.asset_bf, one_abf, "pinned abf must reach the chain verbatim");
+        assert_eq!(opened.value_bf, one_vbf, "pinned vbf must reach the chain verbatim");
+        assert_eq!(opened.value, 600);
+        assert_eq!(opened.asset, asset);
+    }
+
+    /// Pinning every confidential output leaves the balance residue nowhere to go. That is
+    /// unsatisfiable rather than merely unusual, so it must fail loudly at build time — not
+    /// produce a transaction a node rejects.
+    #[test]
+    fn pinning_every_value_bf_is_rejected() {
+        let secp = EC.clone();
+        let mut rng = rand::thread_rng();
+        let asset = test_asset(9);
+        let one_abf = AssetBlindingFactor::from_slice(&scalar(1)).unwrap();
+        let one_vbf = ValueBlindingFactor::from_slice(&scalar(1)).unwrap();
+
+        let prev = TxOut {
+            asset: Asset::Explicit(asset),
+            value: Value::Explicit(1000),
+            nonce: Nonce::Null,
+            script_pubkey: test_spk(1),
+            witness: TxOutWitness::default(),
+        };
+        let mut pset = PartiallySignedTransaction::new_v2();
+        let mut input = Input::from_prevout(OutPoint::new(Txid::from_byte_array([2u8; 32]), 0));
+        input.witness_utxo = Some(prev);
+        input.asset = Some(asset);
+        input.amount = Some(1000);
+        pset.add_input(input);
+
+        let mut secrets = HashMap::new();
+        secrets.insert(0usize, TxOutSecrets {
+            value: 1000,
+            value_bf: ValueBlindingFactor::zero(),
+            asset,
+            asset_bf: AssetBlindingFactor::zero(),
+        });
+
+        let sk = SecretKey::new(&mut rng);
+        pset.add_output(confidential_output(
+            test_spk(2), 900, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &sk)), 0,
+        ));
+        pset.add_output(Output::new_explicit(Script::default(), 100, asset, None));
+
+        let pins = HashMap::from([(
+            0usize,
+            PinnedBlinding { asset_bf: Some(one_abf), value_bf: Some(one_vbf) },
+        )]);
+        let err = blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins)
+            .expect_err("no output left free to balance");
+        assert!(
+            err.to_string().contains("value blinding factor"),
+            "error must name the missing free factor, got: {err}"
+        );
+    }
 }

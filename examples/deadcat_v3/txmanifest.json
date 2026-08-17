@@ -246,7 +246,12 @@
               "destination": "wallet",
               "asset": "inputs.yes_defining_in.reissuance_token",
               "amount_sat": 1,
-              "confidential": false,
+              "confidential": true,
+              "blinding": {
+                "$comment": "The genesis of the +1 chain. Both factors are the constant 1, the documented starting pair — every later spend reads the previous witness and adds one, so this is the single value nothing on chain can supply. It also has to be non-zero and known: Elements rebuilds a reissuance token's generator from `assetBlindingNonce` = the abf of the UTXO being spent, so an explicit (abf = 0) token is unreissuable and a randomly-blinded one is only reissuable by whoever kept the secret. The change output below stays unpinned — its value blinding factor is the one solved to balance the transaction.",
+                "asset_bf": "1",
+                "value_bf": "1"
+              },
               "required_index": 0,
               "ui": {
                 "label": "YES minting right, held by you",
@@ -259,7 +264,12 @@
               "destination": "wallet",
               "asset": "inputs.no_defining_in.reissuance_token",
               "amount_sat": 1,
-              "confidential": false,
+              "confidential": true,
+              "blinding": {
+                "$comment": "The same constant pair as the YES token. Two outputs sharing a factor pair is fine — they carry different assets, so the commitments differ regardless, and neither factor was ever secret: the constant is published here precisely so the next spender can reproduce it.",
+                "asset_bf": "1",
+                "value_bf": "1"
+              },
               "required_index": 1,
               "ui": {
                 "label": "NO minting right, held by you",
@@ -268,7 +278,7 @@
             },
             {
               "id": "lbtc_change",
-              "description": "L-BTC change from the two defining inputs.",
+              "description": "L-BTC change from the two defining inputs. Load-bearing, despite being optional: both token outputs pin their blinding factors, so this is the only output left whose value blinding factor the builder can solve for. Without it the transaction's factors do not sum to zero and it cannot be blinded at all — so a run whose defining inputs leave no change will fail rather than build.",
               "destination": "change",
               "asset": "lbtc",
               "optional": true,
@@ -344,6 +354,11 @@
               "asset": "instance.YES_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 0,
+                "confidential": true,
+              "blinding": {
+                "asset_bf": "1",
+                "value_bf": "1" 
+              },
               "ui": {
                 "label": "YES minting right, locked in the market",
                 "role": "reissuance_token"
@@ -358,6 +373,11 @@
               "asset": "instance.NO_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 1,
+                "confidential": true,
+              "blinding": {
+                "asset_bf": "1",
+                "value_bf": "1" 
+              },
               "ui": {
                 "label": "NO minting right, locked in the market",
                 "role": "reissuance_token"
@@ -490,8 +510,12 @@
                   "simplicity_type": "u256",
                   "value": "0"
                 },
+                "YES_REISSUANCE_INPUT_ABF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"},
+                "YES_REISSUANCE_INPUT_VBF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"},
+                "NO_REISSUANCE_INPUT_ABF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"},
+                "NO_REISSUANCE_INPUT_VBF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"},
                 "BURN_TOKEN_ASSET": "unused",
-                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_OUTCOME_YES":"unused",
                 "ORACLE_SIGNATURE": "unused",
                 "PAIRS_BURNED": "unused",
                 "TOKENS_BURNED": "unused"
@@ -549,14 +573,14 @@
                   "value": "0"
                 },
                 "BURN_TOKEN_ASSET": "unused",
-                "NO_REISSUANCE_INPUT_ABF": "unused",
-                "NO_REISSUANCE_INPUT_VBF": "unused",
+                "NO_REISSUANCE_INPUT_ABF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"},
+                "NO_REISSUANCE_INPUT_VBF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"},
                 "ORACLE_OUTCOME_YES": "unused",
                 "ORACLE_SIGNATURE": "unused",
                 "PAIRS_BURNED": "unused",
                 "TOKENS_BURNED": "unused",
-                "YES_REISSUANCE_INPUT_ABF": "unused",
-                "YES_REISSUANCE_INPUT_VBF": "unused"
+                "YES_REISSUANCE_INPUT_ABF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"},
+                "YES_REISSUANCE_INPUT_VBF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"}
               },
               "ui": {
                 "label": "NO minting right",
@@ -588,6 +612,11 @@
               "asset": "instance.YES_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 0,
+              "confidential": true,
+              "blinding": {
+                "asset_bf": "2",
+                "value_bf": "2" 
+              },
               "ui": {
                 "label": "YES minting right, market now live",
                 "role": "reissuance_token"
@@ -602,6 +631,11 @@
               "asset": "instance.NO_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 1,
+                "confidential": true,
+              "blinding": {
+                "asset_bf": "2",
+                "value_bf": "2" 
+              },
               "ui": {
                 "label": "NO minting right, market now live",
                 "role": "reissuance_token"
