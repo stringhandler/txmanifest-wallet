@@ -22,9 +22,9 @@ let asset_commitment: (u1, u256) = unwrap_left::<u256>(unwrap(jet::input_asset(i
 ```
 
 `unwrap_left` demands a *confidential* asset commitment, so the token UTXOs must be blinded.
-The engine emits every covenant output explicit (`pset_builder` warns and falls back when a
-`utxo_type` sets `confidential: true`), so the Right branch is taken, and since that branch
-was pruned during witness satisfaction you get:
+The engine emits every covenant output explicit (an output asking for `confidential: true`
+at a `utxo_type` destination is rejected), so the Right branch is taken, and since that
+branch was pruned during witness satisfaction you get:
 
 ```
 Execution reached a pruned branch: 744339c859e7ff6f8d33f9afa73734e1c908684feedc8c4d0a6112d3bf361317

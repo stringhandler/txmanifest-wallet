@@ -17,8 +17,7 @@
                     "INHERIT_BLOCKS": "INHERIT_BLOCKS"
                 }
             },
-            "asset": "lbtc",
-            "confidential": false
+            "asset": "lbtc"
         }
     },
     "contract_templates": {

@@ -129,11 +129,13 @@ a value the next spender can reproduce. Its `lbtc_change` output is the one left
 
 ## Still needed before this runs
 
-**Confidential covenant outputs.** `utxo_type.confidential` is still ignored — the builder
-warns and pays explicit — so `CreateMarket` cannot yet park a *blinded* token at the state-0
-address, and pinning factors on a covenant output is rejected rather than silently dropped.
-That is the step that moves the constant to where the covenant actually reads it: the abf
-`InitialIssuance` spends is the abf `CreateMarket` wrote, not the one the wallet held.
+**Confidential covenant outputs.** An output declares its own `confidential` — the flag on
+`utxo_type` is gone, because the state-1 address holds blinded tokens beside an explicit
+collateral UTXO and one answer cannot serve both. `true` on a covenant output is currently
+an error, not a silent downgrade, so `CreateMarket` and `InitialIssuance` stop rather than
+building a UTXO the covenant cannot spend. That is the step that moves the constant to where
+the covenant actually reads it: the abf `InitialIssuance` spends is the abf `CreateMarket`
+wrote, not the one the wallet held.
 
 **The reissuance nonce.** `pset_builder::apply_reissuance` still writes the placeholder
 `[0…0, 1]`. Under this fork that value happens to be right for the first reissuance — the

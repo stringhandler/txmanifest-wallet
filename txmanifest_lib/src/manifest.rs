@@ -757,9 +757,17 @@ pub struct Output {
     /// binary layouts — LE integers, `program_id`, asset-internal bytes). Evaluated to raw
     /// bytes and embedded after `OP_RETURN`. Omit for a bare data-less OP_RETURN (NFT burns).
     pub data: Option<serde_json::Value>,
-    /// When `false`, wallet outputs are built with no blinding key (explicit amount/asset).
-    /// Defaults to `true` (confidential) for wallet destinations. Has no effect on
-    /// covenant (`utxo_type`) outputs — those are controlled by the `utxo_type.confidential` flag.
+    /// Whether this output is blinded. The only place confidentiality is declared: a
+    /// `utxo_type` describes an address, and two outputs paying the same covenant address
+    /// need not agree — deadcat_v3's state-1 address holds blinded reissuance tokens
+    /// beside an explicit collateral UTXO, because the program introspects one as a
+    /// Pedersen commitment and the other as a plain amount.
+    ///
+    /// Defaults to `true` for wallet and address destinations on Liquid, and to `false`
+    /// for covenant (`utxo_type`) destinations, where a Simplicity program usually has to
+    /// read the value and asset. `true` on a covenant output is not supported yet and is
+    /// an error rather than a silent downgrade — the address it produces would be right
+    /// and the UTXO at it unspendable by the paths that expect a commitment.
     pub confidential: Option<bool>,
     /// Pin this confidential output's blinding factors instead of letting the builder
     /// pick them. See [`OutputBlinding`].
@@ -1267,10 +1275,6 @@ pub struct UtxoType {
     /// the action declares `foo` and something else where it does not — with no error,
     /// because an address is a hash and a wrong one looks exactly like a right one.
     pub params: Option<BTreeMap<String, UtxoParamDef>>,
-    /// Whether UTXOs of this type are confidential (blinded). Defaults to false — covenant
-    /// UTXOs are explicit so the spending Simplicity program can introspect value and asset.
-    #[serde(default)]
-    pub confidential: bool,
 }
 
 /// One entry of a [`UtxoType::params`] interface.
@@ -1675,6 +1679,16 @@ mod tests {
             "actions": { "A": { "params": { "P": { "type": "u64", "formula": "1 + 1" } } } }
         }"#;
 
+        // `utxo_type.confidential` — a per-*type* answer to a per-*output* question. A
+        // utxo_type describes an address, and two outputs paying the same covenant
+        // address need not agree: deadcat_v3's state-1 address holds blinded reissuance
+        // tokens beside an explicit collateral UTXO. Every example set it `false`, and
+        // the builder only ever consulted it to warn. `output.confidential` says it now.
+        let utxo_type_confidential = r#"{
+            "manifest_version": "1", "protocol": "test",
+            "utxo_types": { "t": { "description": "d", "confidential": true } }
+        }"#;
+
         // `source` — folded into `compute` as its `wallet_*` variants. It answered the
         // same question ("where does this value come from, if not the user?") and its
         // name collided with `script.source`, which is a file path.
@@ -1707,6 +1721,7 @@ mod tests {
             ("compile_debug_symbols", debug_symbols),
             ("errors", errors),
             ("validations", validations),
+            ("confidential", utxo_type_confidential),
         ] {
             let err =
                 Manifest::from_json_str(json).expect_err("removed field '{name}' must not parse");

@@ -347,7 +347,7 @@
           ]
         },
         "confidential": {
-          "description": "When `false`, wallet outputs are built with no blinding key (explicit amount/asset). Defaults to `true` (confidential) for wallet destinations. Has no effect on covenant (`utxo_type`) outputs — those are controlled by the `utxo_type.confidential` flag.",
+          "description": "Whether this output is blinded. The only place confidentiality is declared: a `utxo_type` describes an address, and two outputs paying the same covenant address need not agree — deadcat_v3's state-1 address holds blinded reissuance tokens beside an explicit collateral UTXO, because the program introspects one as a Pedersen commitment and the other as a plain amount.\n\nDefaults to `true` for wallet and address destinations on Liquid, and to `false` for covenant (`utxo_type`) destinations, where a Simplicity program usually has to read the value and asset. `true` on a covenant output is not supported yet and is an error rather than a silent downgrade — the address it produces would be right and the UTXO at it unspendable by the paths that expect a commitment.",
           "type": [
             "boolean",
             "null"
@@ -1027,11 +1027,6 @@
             "string",
             "null"
           ]
-        },
-        "confidential": {
-          "default": false,
-          "description": "Whether UTXOs of this type are confidential (blinded). Defaults to false — covenant UTXOs are explicit so the spending Simplicity program can introspect value and asset.",
-          "type": "boolean"
         },
         "description": {
           "type": "string"

@@ -160,8 +160,9 @@ Deadcat client today. Five things stand between the two, four of them engine gap
 1. **Confidential reissuance tokens.** The covenant verifies the reissuance-token
    inputs and outputs as Pedersen commitments, taking the asset and value blinding factors
    as witnesses (`verify_token_commitment`). This requires those UTXOs to be *blinded*, and
-   the engine builds every covenant output explicit — `pset_builder` warns and falls back
-   when `confidential: true` is set. `unwrap_left` on an explicit asset commitment fails, so
+   the engine builds every covenant output explicit — an output declaring
+   `confidential: true` at a `utxo_type` destination is rejected outright.
+   `unwrap_left` on an explicit asset commitment fails, so
    this is not a degradation, it is a hard stop for the issuance, resolve and full-cancel
    paths. It also means the eight `*_ABF` / `*_VBF` witnesses have no manifest spelling:
    they are per-UTXO secrets, and a witness `value` can only reference values the engine

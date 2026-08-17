@@ -1533,7 +1533,10 @@ pub fn run(
                                 break;
                             }
                         };
-                        let confidential = ut.confidential;
+                        // Covenant outputs default to explicit: the program spending one
+                        // usually introspects its value and asset. The output says so, not
+                        // the type — the same address may hold both kinds.
+                        let confidential = output.confidential.unwrap_or(false);
                         let site = match resolve_utxo_site(
                             ut, Some(&output.destination), &compile_params_map,
                             &compile_param_type_hints, action, &ctx,
@@ -1562,28 +1565,34 @@ pub fn run(
                                 break;
                             }
                         };
-                        let blinding_key = if confidential {
-                            // Derive a blinding key from the covenant script pubkey bytes so the
-                            // output is confidential but deterministically re-derivable by the spender.
-                            println!("  {} Output '{}' utxo_type '{}' has confidential=true but confidential covenant outputs are not yet supported — using explicit.", style("[warn]").yellow(), output.id, type_name);
-                            None
-                        } else {
-                            None
-                        };
-                        let conf_label = if confidential { "confidential" } else { "explicit" };
-                        println!(
-                            "  {} Output '{}': {} sat {} → covenant ({}, {})",
-                            style("+").green(), output.id, style(amount).yellow(), asset_label, type_name, conf_label
-                        );
-                        if pinned_blinding.is_some() && blinding_key.is_none() {
+                        // Blinding a covenant output needs a blinding key for a receiver that
+                        // does not exist, and a spender able to rebuild the commitments it
+                        // produced. Neither is in place, so this is an error: paying explicit
+                        // instead would produce the right address holding a UTXO the paths
+                        // expecting a commitment cannot spend.
+                        if confidential {
                             println!(
-                                "  {} Output '{}' pins blinding factors, but covenant outputs are \
-                                 built explicit — confidential covenant outputs are not supported yet.",
+                                "  {} Output '{}' ({type_name}) asks to be confidential, which covenant \
+                                 outputs do not support yet.",
                                 style("[error]").red(), output.id
                             );
                             collect_outputs_ok = false;
                             break;
                         }
+                        let blinding_key = None;
+                        if pinned_blinding.is_some() {
+                            println!(
+                                "  {} Output '{}' pins blinding factors but is explicit — a covenant \
+                                 output has nothing to blind.",
+                                style("[error]").red(), output.id
+                            );
+                            collect_outputs_ok = false;
+                            break;
+                        }
+                        println!(
+                            "  {} Output '{}': {} sat {} → covenant ({}, explicit)",
+                            style("+").green(), output.id, style(amount).yellow(), asset_label, type_name
+                        );
                         covenant_output_meta.push(CovenantOutputMeta {
                             utxo_type: type_name.to_string(),
                             output_id: output.id.clone(),
@@ -4162,7 +4171,6 @@ mod tests {
             asset: None,
             state_vars: None,
             params: None,
-            confidential: false,
         };
 
         let (params, _hints) = apply_utxo_compile_params(&base, &base_hints, &ut);

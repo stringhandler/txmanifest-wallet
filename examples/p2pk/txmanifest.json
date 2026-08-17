@@ -11,8 +11,7 @@
                 "type": "simplicity",
                 "source": "./p2pk.simf"
             },
-            "asset": "lbtc",
-            "confidential": false
+            "asset": "lbtc"
         }
     },
     "actions": {

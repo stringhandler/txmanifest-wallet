@@ -11,8 +11,7 @@
         "type": "simplicity",
         "source": "./pre_lock.simf"
       },
-      "asset": "COLLATERAL_ASSET_ID",
-      "confidential": false
+      "asset": "COLLATERAL_ASSET_ID"
     },
     "lending_collateral": {
       "description": "Collateral locked in the active LendingCovenant. Released via repayment (borrower returns principal+interest, reclaims collateral) or liquidation (lender claims collateral after LOAN_EXPIRATION_TIME).",
@@ -20,8 +19,7 @@
         "type": "simplicity",
         "source": "./lending.simf"
       },
-      "asset": "COLLATERAL_ASSET_ID",
-      "confidential": false
+      "asset": "COLLATERAL_ASSET_ID"
     },
     "prelock_script_auth": {
       "description": "ScriptAuth covenant wrapping the Utility NFTs during the offer phase. Verifies co-spending with the pre_lock UTXO (input 0).",
@@ -31,8 +29,7 @@
         "compile_params": {
           "SCRIPT_HASH": "PRE_LOCK_COV_HASH"
         }
-      },
-      "confidential": false
+      }
     },
     "lending_script_auth": {
       "description": "ScriptAuth covenant wrapping the two Parameter NFTs during the active loan phase. Verifies co-spending with the lending_collateral UTXO (input 0). Unlike the standalone example, the Borrower NFT is NOT wrapped here — it lives in the borrower's wallet.",
@@ -42,8 +39,7 @@
         "compile_params": {
           "SCRIPT_HASH": "LENDING_COV_HASH"
         }
-      },
-      "confidential": false
+      }
     },
     "lender_principal_vault": {
       "description": "AssetAuth covenant holding the principal+interest payment from the borrower. The lender withdraws by co-spending and burning the Lender NFT.",
@@ -56,8 +52,7 @@
           "WITH_ASSET_BURN": "true"
         }
       },
-      "asset": "PRINCIPAL_ASSET_ID",
-      "confidential": false
+      "asset": "PRINCIPAL_ASSET_ID"
     }
   },
   "actions": {

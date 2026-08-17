@@ -39,8 +39,7 @@
           }
         ]
       },
-      "asset": "YES_REISSUANCE_TOKEN",
-      "confidential": false
+      "asset": "YES_REISSUANCE_TOKEN"
     },
     "market_unresolved": {
       "description": "STATE 1 — UNRESOLVED, the live market. Holds three UTXOs: the YES reissuance token, the NO reissuance token, and the single consolidated collateral UTXO. 'Single' is load-bearing: every issuance path must consume the existing collateral UTXO and re-emit one consolidated output, so the oracle can move the whole market to a resolved address in one transaction (design doc section 6).",
@@ -70,8 +69,7 @@
           }
         ]
       },
-      "asset": "COLLATERAL_ASSET_ID",
-      "confidential": false
+      "asset": "COLLATERAL_ASSET_ID"
     },
     "market_resolved_yes": {
       "description": "STATE 2 — RESOLVED YES. The oracle attested YES, so YES tokens redeem at 2 x COLLATERAL_PER_TOKEN each and NO tokens are worth nothing. There is no path from here to state 3: that is the whole point of committing the outcome on-chain rather than checking the oracle signature at redemption time (design doc section 9.2).",
@@ -101,8 +99,7 @@
           }
         ]
       },
-      "asset": "COLLATERAL_ASSET_ID",
-      "confidential": false
+      "asset": "COLLATERAL_ASSET_ID"
     },
     "market_resolved_no": {
       "description": "STATE 3 — RESOLVED NO. Mirror of state 2: NO tokens redeem, YES tokens are worthless.",
@@ -132,8 +129,7 @@
           }
         ]
       },
-      "asset": "COLLATERAL_ASSET_ID",
-      "confidential": false
+      "asset": "COLLATERAL_ASSET_ID"
     }
   },
   "contract_templates": {
