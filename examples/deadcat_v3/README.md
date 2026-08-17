@@ -74,12 +74,36 @@ script, so the only value that can reach a trailing output is the spender's own 
 Upstream's `num_outputs == 4` only prevented a second UTXO landing at the state address *in
 this transaction* — anyone can pay one there at any time regardless, so it bought little.
 
+## Witness declarations
+
+Every covenant input names all fifteen witnesses the program declares — `validate` compares
+the manifest's witness map against the `.simf` and errors on either half of a mismatch.
+Three kinds of entry appear:
+
+- **Real values** — `STATE`, `PATH`, and whatever the chosen path reads.
+- **`BUDGET_PAD_A`–`D`** — declared with the explicit value `0`. `main()` does read them, and
+  asserts A == B and C == D, so they are not "unused"; their *value* is simply irrelevant.
+  They exist to pad the serialized witness so the execution budget
+  (`witness_stack_bytes + 50 WU`) covers the program's cost, and a `u256` costs 256 bits
+  whatever it holds.
+- **`"unused"`** — the witnesses on branches this path never takes. `ORACLE_SIGNATURE` on an
+  issuance, `TOKENS_BURNED` on a resolve. The engine supplies the zero the pruned branch
+  wants, but the manifest still has to say so.
+
 ## Verify
 
 ```sh
 cargo run -- validate examples/deadcat_v3/txmanifest.json
 cargo run -p tx-manifest-lib --example deadcat_v3_recon
 ```
+
+`validate` currently reports **five errors**, and they are the gap this fork has not closed
+rather than a defect in the manifest: the primary input of `InitialIssuance`, `MintPairs`,
+`ResolveYes`, `ResolveNo` and `CancelAll` runs a path that calls
+`verify_input_reissuance_token`, so it genuinely reads `YES_/NO_REISSUANCE_INPUT_ABF/VBF` —
+and no value for them exists yet. Marking them `"unused"` would validate green and then fail
+on chain, which is the failure the check exists to prevent. They stay undeclared until the
+blinding work below lands; the first pair is the documented constant `abf = vbf = 1`.
 
 The recon compiles v3, derives all four addresses, and asserts each **differs** from the
 matching `deadcat` address — if they ever collide the fork silently stopped being a fork —

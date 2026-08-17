@@ -229,6 +229,155 @@ pub fn validate(manifest: &Manifest) -> Report {
     report
 }
 
+/// Cross-check every covenant input's `witnesses` map against the witness list its `.simf`
+/// program actually declares.
+///
+/// Kept out of [`validate`], which promises not to touch the filesystem or the SimplicityHL
+/// compiler. This one does both: it runs each program's front end (parse + type-check, no
+/// compile params — see [`crate::covenant::program_witness_types`]) and compares names.
+///
+/// The check is the whole point of requiring witnesses to be declared. The runtime already
+/// rejects a mismatch, but only for the one input it is finalizing, at the end of a `run`
+/// that has already selected coins and built a PSET. Here every action is checked at once,
+/// offline, against nothing but the manifest and its `.simf` files.
+///
+/// `base_dir` is the directory holding the manifest file; `script.source` paths are relative
+/// to it.
+pub fn validate_programs(manifest: &Manifest, base_dir: &std::path::Path) -> Report {
+    let mut report = Report::default();
+
+    let no_types = std::collections::BTreeMap::new();
+    let utxo_types = manifest.utxo_types.as_ref().unwrap_or(&no_types);
+    let opts = manifest.compile_opts();
+
+    // Witness list per utxo_type. Several types routinely share one `.simf` (deadcat's four
+    // market states are one program under four tapdata leaves), so parse per source path and
+    // let the types share the result.
+    let mut by_source: std::collections::BTreeMap<std::path::PathBuf, Result<std::collections::BTreeMap<String, String>, String>> =
+        std::collections::BTreeMap::new();
+    let mut by_type: std::collections::BTreeMap<&str, &std::collections::BTreeMap<String, String>> =
+        std::collections::BTreeMap::new();
+
+    for (name, ut) in utxo_types {
+        let Some(script) = &ut.script else { continue };
+        if script.type_ != "simplicity" {
+            continue;
+        }
+        let Some(source) = &script.source else {
+            report.error(
+                format!("utxo_types.{name}.script"),
+                "a simplicity script needs a \"source\" path to its .simf file",
+            );
+            continue;
+        };
+        let path = base_dir.join(source);
+        by_source.entry(path.clone()).or_insert_with(|| {
+            crate::covenant::program_witness_types(&path, &opts).map_err(|e| format!("{e:#}"))
+        });
+    }
+    for (name, ut) in utxo_types {
+        let Some(source) = ut.script.as_ref().and_then(|s| s.source.as_ref()) else { continue };
+        match by_source.get(&base_dir.join(source)) {
+            Some(Ok(types)) => {
+                by_type.insert(name.as_str(), types);
+            }
+            Some(Err(e)) => report.error(
+                format!("utxo_types.{name}.script.source"),
+                format!("cannot read witnesses from '{source}': {e}"),
+            ),
+            None => {}
+        }
+    }
+
+    let mut actions: Vec<(String, &Action)> = manifest
+        .actions
+        .iter()
+        .map(|(name, action)| (format!("actions.{name}"), action))
+        .collect();
+    if let Some(templates) = &manifest.contract_templates {
+        for (cname, cdef) in templates {
+            for (aname, method) in &cdef.actions {
+                actions.push((
+                    format!("contract_templates.{cname}.actions.{aname}"),
+                    method,
+                ));
+            }
+        }
+    }
+
+    for (loc, action) in actions {
+        for input in action.inputs.iter().flatten() {
+            let Some(type_name) = input.utxo_type_name() else { continue };
+            let Some(program) = by_type.get(type_name.as_str()) else { continue };
+            check_witnesses_against_program(
+                &mut report,
+                &format!("{loc}.inputs.{}.witnesses", input.id),
+                &type_name,
+                program,
+                &input.witnesses,
+            );
+        }
+    }
+
+    report
+}
+
+/// Compare one input's declared witnesses against the program's witness list.
+///
+/// Two directions, both of which used to be silent: a name the program declares and the
+/// manifest omits was zero-filled, and a name the manifest declares and the program does not
+/// have was dropped. The first turns a forgotten value into a covenant that fails on chain;
+/// the second turns a typo into the first.
+fn check_witnesses_against_program(
+    report: &mut Report,
+    loc: &str,
+    type_name: &str,
+    program: &std::collections::BTreeMap<String, String>,
+    witnesses: &Option<Value>,
+) {
+    let empty = serde_json::Map::new();
+    let declared = witnesses.as_ref().and_then(Value::as_object).unwrap_or(&empty);
+
+    // `taproot_leaf` selects which leaf to spend; the program never reads it.
+    let is_leaf_selector =
+        |def: &Value| def.get("type").and_then(Value::as_str) == Some("taproot_leaf");
+
+    let missing: Vec<&str> = program
+        .keys()
+        .filter(|name| !declared.contains_key(name.as_str()))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        report.error(
+            loc.to_string(),
+            format!(
+                "does not declare [{}], which '{}' declares as witnesses; give each a value, \
+                 or \"{}\" if this path never reads it",
+                missing
+                    .iter()
+                    .map(|n| format!("{n}: {}", program[*n]))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                type_name,
+                crate::covenant::UNUSED_WITNESS,
+            ),
+        );
+    }
+
+    for (name, def) in declared {
+        if is_leaf_selector(def) || program.contains_key(name) {
+            continue;
+        }
+        report.error(
+            format!("{loc}.{name}"),
+            format!(
+                "'{name}' is not a witness of utxo_type '{type_name}'; it declares [{}]",
+                program.keys().cloned().collect::<Vec<_>>().join(", ")
+            ),
+        );
+    }
+}
+
 fn check_action(
     report: &mut Report,
     utxo_types: &std::collections::BTreeMap<String, crate::manifest::UtxoType>,
@@ -503,11 +652,14 @@ const KNOWN_WITNESS_TYPES: &[&str] = &["simplicityhl", "Signature", "taproot_lea
 
 /// Validate an input's (or action's) `witnesses` map.
 ///
-/// The runtime only feeds a witness to the BitMachine when its definition is an
-/// object carrying a recognized `type`. A bare scalar (e.g. `"FOO": 1`) or an
-/// object missing/with an unknown `type` is silently dropped and zero-filled,
-/// which produces a covenant that fails at `run` time with no hint as to why —
-/// exactly the failure this check exists to surface statically.
+/// Shape only — whether each entry is something the runtime can consume. Whether the *set*
+/// of entries matches the program's witness list is [`validate_programs`], which needs the
+/// `.simf` files to answer.
+///
+/// The runtime feeds a witness to the BitMachine when its definition is an object carrying a
+/// recognized `type`, or the bare string `"unused"`. Anything else — `"FOO": 1`, an object
+/// with no `type` — is rejected at run time, but only for the input being finalized and only
+/// once a `run` has got that far, so it is worth catching here.
 /// Validate an input's `issuance` block.
 ///
 /// `entropy` gets the attention: without it a reissuance can only get its entropy from an
@@ -572,13 +724,18 @@ fn check_witnesses(report: &mut Report, loc: &str, witnesses: &Option<Value>) {
     };
     for (name, def) in map {
         let wloc = format!("{loc}.{name}");
+        // The one legal scalar: `"NAME": "unused"` declares a witness this path never reads.
+        if def.as_str() == Some(crate::covenant::UNUSED_WITNESS) {
+            continue;
+        }
         let Some(obj) = def.as_object() else {
             report.error(
                 wloc,
                 format!(
                     "witness '{name}' must be an object like \
-                     {{\"type\": \"simplicityhl\", \"simplicity_type\": \"u32\", \"value\": \"1\"}}; \
-                     a bare value is silently ignored and zero-filled at run time"
+                     {{\"type\": \"simplicityhl\", \"simplicity_type\": \"u32\", \"value\": \"1\"}}, \
+                     or the bare string \"{}\" if this path never reads it",
+                    crate::covenant::UNUSED_WITNESS
                 ),
             );
             continue;
@@ -838,6 +995,112 @@ mod tests {
             "SPEND_PATH": { "type": "taproot_leaf", "source": { "type": "formula", "expr": "leaf" } }
         }));
         assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn unused_is_the_one_legal_bare_scalar() {
+        let report = validate_with_input_witnesses(serde_json::json!({
+            "ORACLE_SIGNATURE": "unused"
+        }));
+        assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn a_misspelled_unused_is_still_a_bare_scalar() {
+        let report = validate_with_input_witnesses(serde_json::json!({
+            "ORACLE_SIGNATURE": "unusued"
+        }));
+        assert!(has_error_at(&report, "actions.A.inputs.in0.witnesses.ORACLE_SIGNATURE"));
+    }
+
+    /// The witness list a program declares, in the shape `validate_programs` reads it
+    /// off a compiled `.simf`.
+    fn program(entries: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(n, t)| ((*n).to_string(), (*t).to_string()))
+            .collect()
+    }
+
+    fn cross_check(program_witnesses: &[(&str, &str)], declared: Value) -> Report {
+        let mut report = Report::default();
+        check_witnesses_against_program(
+            &mut report,
+            "loc",
+            "vault",
+            &program(program_witnesses),
+            &Some(declared),
+        );
+        report
+    }
+
+    #[test]
+    fn a_witness_the_program_declares_must_appear() {
+        let report = cross_check(
+            &[("PATH", "Either<(), ()>"), ("SIGNATURE", "[u8; 64]")],
+            serde_json::json!({
+                "PATH": { "type": "simplicityhl", "value": "Left(())" }
+            }),
+        );
+        assert!(has_error_at(&report, "loc"), "got: {:?}", report.issues);
+        assert!(
+            report.issues[0].message.contains("SIGNATURE"),
+            "the message should name the missing witness: {}",
+            report.issues[0].message
+        );
+    }
+
+    #[test]
+    fn unused_satisfies_the_cross_check() {
+        let report = cross_check(
+            &[("PATH", "Either<(), ()>"), ("SIGNATURE", "[u8; 64]")],
+            serde_json::json!({
+                "PATH": { "type": "simplicityhl", "value": "Left(())" },
+                "SIGNATURE": "unused"
+            }),
+        );
+        assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn a_witness_the_program_does_not_have_is_flagged() {
+        // The half that used to be silent in the other direction: `witness_types.get()`
+        // returned None and the entry was dropped, so a typo read as an omission.
+        let report = cross_check(
+            &[("PATH", "Either<(), ()>")],
+            serde_json::json!({
+                "PATH": { "type": "simplicityhl", "value": "Left(())" },
+                "PTAH": { "type": "simplicityhl", "value": "Left(())" }
+            }),
+        );
+        assert!(has_error_at(&report, "loc.PTAH"), "got: {:?}", report.issues);
+    }
+
+    #[test]
+    fn taproot_leaf_is_not_matched_against_the_program() {
+        // `SPEND_PATH` picks which tap leaf to spend. It lives in the same map but the
+        // program never reads it, so it is exempt from both directions of the check.
+        let report = cross_check(
+            &[("PATH", "Either<(), ()>")],
+            serde_json::json!({
+                "PATH": { "type": "simplicityhl", "value": "Left(())" },
+                "SPEND_PATH": { "type": "taproot_leaf", "source": { "type": "formula", "expr": "leaf" } }
+            }),
+        );
+        assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn an_input_with_no_witnesses_at_all_is_flagged() {
+        let mut report = Report::default();
+        check_witnesses_against_program(
+            &mut report,
+            "loc",
+            "vault",
+            &program(&[("PATH", "Either<(), ()>")]),
+            &None,
+        );
+        assert!(has_error_at(&report, "loc"), "got: {:?}", report.issues);
     }
 
     #[test]

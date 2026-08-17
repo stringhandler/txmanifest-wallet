@@ -867,7 +867,8 @@
                   "simplicity_type": "Either<()>",
                   "value": "Left(())",
                   "description": "Selects create_lending_path (PATH::LEFT)."
-                }
+                },
+                "SIGNATURE": "unused"
               }
             },
             {

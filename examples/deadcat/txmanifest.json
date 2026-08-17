@@ -469,7 +469,32 @@
                   "simplicity_type": "Either<Either<Either<(), ()>, Either<(), ()>>, Either<Either<(), ()>, ()>>",
                   "value": "Left(Left(Left(())))",
                   "description": "Path 1 — initial issuance. The seven paths are a nested Either tree; see witness.rs::build_path_value upstream."
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "PAIRS_BURNED": "unused",
+                "TOKENS_BURNED": "unused"
               },
               "ui": {
                 "label": "YES minting right",
@@ -502,7 +527,40 @@
                   "simplicity_type": "Either<Either<Either<(), ()>, Either<(), ()>>, Either<Either<(), ()>, ()>>",
                   "value": "Right(Right(()))",
                   "description": "Path 7 — secondary covenant input."
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "NO_REISSUANCE_INPUT_ABF": "unused",
+                "NO_REISSUANCE_INPUT_VBF": "unused",
+                "NO_REISSUANCE_OUTPUT_ABF": "unused",
+                "NO_REISSUANCE_OUTPUT_VBF": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "PAIRS_BURNED": "unused",
+                "TOKENS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": "unused",
+                "YES_REISSUANCE_INPUT_VBF": "unused",
+                "YES_REISSUANCE_OUTPUT_ABF": "unused",
+                "YES_REISSUANCE_OUTPUT_VBF": "unused"
               },
               "ui": {
                 "label": "NO minting right",
@@ -630,7 +688,32 @@
                   "simplicity_type": "Either<Either<Either<(), ()>, Either<(), ()>>, Either<Either<(), ()>, ()>>",
                   "value": "Left(Left(Right(())))",
                   "description": "Path 2 — subsequent issuance."
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "PAIRS_BURNED": "unused",
+                "TOKENS_BURNED": "unused"
               },
               "ui": {
                 "label": "YES minting right",
@@ -663,7 +746,40 @@
                   "simplicity_type": "Either<Either<Either<(), ()>, Either<(), ()>>, Either<Either<(), ()>, ()>>",
                   "value": "Right(Right(()))",
                   "description": "Path 7 — secondary covenant input."
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "NO_REISSUANCE_INPUT_ABF": "unused",
+                "NO_REISSUANCE_INPUT_VBF": "unused",
+                "NO_REISSUANCE_OUTPUT_ABF": "unused",
+                "NO_REISSUANCE_OUTPUT_VBF": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "PAIRS_BURNED": "unused",
+                "TOKENS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": "unused",
+                "YES_REISSUANCE_INPUT_VBF": "unused",
+                "YES_REISSUANCE_OUTPUT_ABF": "unused",
+                "YES_REISSUANCE_OUTPUT_VBF": "unused"
               },
               "ui": {
                 "label": "NO minting right",
@@ -689,7 +805,40 @@
                   "simplicity_type": "Either<Either<Either<(), ()>, Either<(), ()>>, Either<Either<(), ()>, ()>>",
                   "value": "Right(Right(()))",
                   "description": "Path 7 — secondary covenant input."
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "NO_REISSUANCE_INPUT_ABF": "unused",
+                "NO_REISSUANCE_INPUT_VBF": "unused",
+                "NO_REISSUANCE_OUTPUT_ABF": "unused",
+                "NO_REISSUANCE_OUTPUT_VBF": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "PAIRS_BURNED": "unused",
+                "TOKENS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": "unused",
+                "YES_REISSUANCE_INPUT_VBF": "unused",
+                "YES_REISSUANCE_OUTPUT_ABF": "unused",
+                "YES_REISSUANCE_OUTPUT_VBF": "unused"
               },
               "ui": {
                 "label": "collateral already in the market",
@@ -823,7 +972,30 @@
                   "simplicity_type": "[u8; 64]",
                   "value": "params.ORACLE_SIGNATURE",
                   "description": "Substituted from the action param before the value is parsed."
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "PAIRS_BURNED": "unused",
+                "TOKENS_BURNED": "unused"
               },
               "ui": {
                 "label": "YES minting right",
@@ -849,7 +1021,40 @@
                   "type": "simplicityhl",
                   "simplicity_type": "Either<Either<Either<(), ()>, Either<(), ()>>, Either<Either<(), ()>, ()>>",
                   "value": "Right(Right(()))"
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "NO_REISSUANCE_INPUT_ABF": "unused",
+                "NO_REISSUANCE_INPUT_VBF": "unused",
+                "NO_REISSUANCE_OUTPUT_ABF": "unused",
+                "NO_REISSUANCE_OUTPUT_VBF": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "PAIRS_BURNED": "unused",
+                "TOKENS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": "unused",
+                "YES_REISSUANCE_INPUT_VBF": "unused",
+                "YES_REISSUANCE_OUTPUT_ABF": "unused",
+                "YES_REISSUANCE_OUTPUT_VBF": "unused"
               },
               "ui": {
                 "label": "NO minting right",
@@ -874,7 +1079,40 @@
                   "type": "simplicityhl",
                   "simplicity_type": "Either<Either<Either<(), ()>, Either<(), ()>>, Either<Either<(), ()>, ()>>",
                   "value": "Right(Right(()))"
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "NO_REISSUANCE_INPUT_ABF": "unused",
+                "NO_REISSUANCE_INPUT_VBF": "unused",
+                "NO_REISSUANCE_OUTPUT_ABF": "unused",
+                "NO_REISSUANCE_OUTPUT_VBF": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "PAIRS_BURNED": "unused",
+                "TOKENS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": "unused",
+                "YES_REISSUANCE_INPUT_VBF": "unused",
+                "YES_REISSUANCE_OUTPUT_ABF": "unused",
+                "YES_REISSUANCE_OUTPUT_VBF": "unused"
               },
               "ui": {
                 "label": "collateral backing the market",
@@ -969,7 +1207,30 @@
                   "type": "simplicityhl",
                   "simplicity_type": "[u8; 64]",
                   "value": "params.ORACLE_SIGNATURE"
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "PAIRS_BURNED": "unused",
+                "TOKENS_BURNED": "unused"
               },
               "ui": {
                 "label": "YES minting right",
@@ -995,7 +1256,40 @@
                   "type": "simplicityhl",
                   "simplicity_type": "Either<Either<Either<(), ()>, Either<(), ()>>, Either<Either<(), ()>, ()>>",
                   "value": "Right(Right(()))"
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "NO_REISSUANCE_INPUT_ABF": "unused",
+                "NO_REISSUANCE_INPUT_VBF": "unused",
+                "NO_REISSUANCE_OUTPUT_ABF": "unused",
+                "NO_REISSUANCE_OUTPUT_VBF": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "PAIRS_BURNED": "unused",
+                "TOKENS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": "unused",
+                "YES_REISSUANCE_INPUT_VBF": "unused",
+                "YES_REISSUANCE_OUTPUT_ABF": "unused",
+                "YES_REISSUANCE_OUTPUT_VBF": "unused"
               },
               "ui": {
                 "label": "NO minting right",
@@ -1020,7 +1314,40 @@
                   "type": "simplicityhl",
                   "simplicity_type": "Either<Either<Either<(), ()>, Either<(), ()>>, Either<Either<(), ()>, ()>>",
                   "value": "Right(Right(()))"
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "NO_REISSUANCE_INPUT_ABF": "unused",
+                "NO_REISSUANCE_INPUT_VBF": "unused",
+                "NO_REISSUANCE_OUTPUT_ABF": "unused",
+                "NO_REISSUANCE_OUTPUT_VBF": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "PAIRS_BURNED": "unused",
+                "TOKENS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": "unused",
+                "YES_REISSUANCE_INPUT_VBF": "unused",
+                "YES_REISSUANCE_OUTPUT_ABF": "unused",
+                "YES_REISSUANCE_OUTPUT_VBF": "unused"
               },
               "ui": {
                 "label": "collateral backing the market",
@@ -1111,7 +1438,39 @@
                   "simplicity_type": "u64",
                   "value": "params.TOKENS_BURNED",
                   "description": "Drives both the burn output amount and the payout; the covenant checks both against it."
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "NO_REISSUANCE_INPUT_ABF": "unused",
+                "NO_REISSUANCE_INPUT_VBF": "unused",
+                "NO_REISSUANCE_OUTPUT_ABF": "unused",
+                "NO_REISSUANCE_OUTPUT_VBF": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "PAIRS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": "unused",
+                "YES_REISSUANCE_INPUT_VBF": "unused",
+                "YES_REISSUANCE_OUTPUT_ABF": "unused",
+                "YES_REISSUANCE_OUTPUT_VBF": "unused"
               },
               "ui": {
                 "label": "collateral pool being drawn down",
@@ -1224,7 +1583,39 @@
                   "type": "simplicityhl",
                   "simplicity_type": "u64",
                   "value": "params.TOKENS_BURNED"
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "NO_REISSUANCE_INPUT_ABF": "unused",
+                "NO_REISSUANCE_INPUT_VBF": "unused",
+                "NO_REISSUANCE_OUTPUT_ABF": "unused",
+                "NO_REISSUANCE_OUTPUT_VBF": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "PAIRS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": "unused",
+                "YES_REISSUANCE_INPUT_VBF": "unused",
+                "YES_REISSUANCE_OUTPUT_ABF": "unused",
+                "YES_REISSUANCE_OUTPUT_VBF": "unused"
               },
               "ui": {
                 "label": "collateral pool being drawn down",
@@ -1351,7 +1742,38 @@
                   "simplicity_type": "u256",
                   "value": "params.BURN_TOKEN_ASSET",
                   "description": "Tells the covenant which side you are burning. It checks the value equals YES_TOKEN_ASSET or NO_TOKEN_ASSET and then holds output 1 to it."
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "NO_REISSUANCE_INPUT_ABF": "unused",
+                "NO_REISSUANCE_INPUT_VBF": "unused",
+                "NO_REISSUANCE_OUTPUT_ABF": "unused",
+                "NO_REISSUANCE_OUTPUT_VBF": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "PAIRS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": "unused",
+                "YES_REISSUANCE_INPUT_VBF": "unused",
+                "YES_REISSUANCE_OUTPUT_ABF": "unused",
+                "YES_REISSUANCE_OUTPUT_VBF": "unused"
               },
               "ui": {
                 "label": "collateral pool being drawn down",
@@ -1452,7 +1874,39 @@
                   "type": "simplicityhl",
                   "simplicity_type": "u64",
                   "value": "params.PAIRS_BURNED"
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "NO_REISSUANCE_INPUT_ABF": "unused",
+                "NO_REISSUANCE_INPUT_VBF": "unused",
+                "NO_REISSUANCE_OUTPUT_ABF": "unused",
+                "NO_REISSUANCE_OUTPUT_VBF": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "TOKENS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": "unused",
+                "YES_REISSUANCE_INPUT_VBF": "unused",
+                "YES_REISSUANCE_OUTPUT_ABF": "unused",
+                "YES_REISSUANCE_OUTPUT_VBF": "unused"
               },
               "ui": {
                 "label": "collateral pool being drawn down",
@@ -1581,7 +2035,31 @@
                   "type": "simplicityhl",
                   "simplicity_type": "u64",
                   "value": "params.PAIRS_BURNED"
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "TOKENS_BURNED": "unused"
               },
               "ui": {
                 "label": "the whole collateral pool",
@@ -1607,7 +2085,40 @@
                   "type": "simplicityhl",
                   "simplicity_type": "Either<Either<Either<(), ()>, Either<(), ()>>, Either<Either<(), ()>, ()>>",
                   "value": "Right(Right(()))"
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "NO_REISSUANCE_INPUT_ABF": "unused",
+                "NO_REISSUANCE_INPUT_VBF": "unused",
+                "NO_REISSUANCE_OUTPUT_ABF": "unused",
+                "NO_REISSUANCE_OUTPUT_VBF": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "PAIRS_BURNED": "unused",
+                "TOKENS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": "unused",
+                "YES_REISSUANCE_INPUT_VBF": "unused",
+                "YES_REISSUANCE_OUTPUT_ABF": "unused",
+                "YES_REISSUANCE_OUTPUT_VBF": "unused"
               },
               "ui": {
                 "label": "YES minting right",
@@ -1633,7 +2144,40 @@
                   "type": "simplicityhl",
                   "simplicity_type": "Either<Either<Either<(), ()>, Either<(), ()>>, Either<Either<(), ()>, ()>>",
                   "value": "Right(Right(()))"
-                }
+                },
+                "BUDGET_PAD_A": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_B": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_C": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BUDGET_PAD_D": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "0"
+                },
+                "BURN_TOKEN_ASSET": "unused",
+                "NO_REISSUANCE_INPUT_ABF": "unused",
+                "NO_REISSUANCE_INPUT_VBF": "unused",
+                "NO_REISSUANCE_OUTPUT_ABF": "unused",
+                "NO_REISSUANCE_OUTPUT_VBF": "unused",
+                "ORACLE_OUTCOME_YES": "unused",
+                "ORACLE_SIGNATURE": "unused",
+                "PAIRS_BURNED": "unused",
+                "TOKENS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": "unused",
+                "YES_REISSUANCE_INPUT_VBF": "unused",
+                "YES_REISSUANCE_OUTPUT_ABF": "unused",
+                "YES_REISSUANCE_OUTPUT_VBF": "unused"
               },
               "ui": {
                 "label": "NO minting right",

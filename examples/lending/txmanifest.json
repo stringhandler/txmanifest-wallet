@@ -870,6 +870,7 @@
                   "value": "Left(())",
                   "description": "Selects create_lending_path (PATH::LEFT)."
                 },
+                "SIGNATURE": "unused",
                 "SPEND_PATH": {
                   "type": "taproot_leaf",
                   "source": {

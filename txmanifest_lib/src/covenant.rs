@@ -170,6 +170,32 @@ pub fn check_compile(
     Ok(())
 }
 
+/// The witnesses a `.simf` program declares, as `name -> rendered type`.
+///
+/// Deliberately stops at the front end: `TemplateProgram` parses and type-checks the source
+/// on its own, and a witness's type never depends on a `param::` value, so this needs no
+/// compile params. That is what lets `validate` check witness declarations against the
+/// program at a point where instance fields and action params are still unknown.
+pub fn program_witness_types(
+    simf_path: &Path,
+    opts: impl Into<CompileOpts>,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let opts = opts.into();
+    let source = std::fs::read_to_string(simf_path)
+        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let template = simplicityhl::TemplateProgram::new_with_unstable(
+        source,
+        &opts.unstable_features,
+        Box::new(ElementsJetHinter::new()),
+    )
+    .map_err(|e| anyhow::anyhow!("SimplicityHL parse/analyse failed: {e}"))?;
+    Ok(template
+        .witness_types()
+        .iter()
+        .map(|(name, ty)| (name.to_string(), ty.to_string()))
+        .collect())
+}
+
 /// Compile a named function from a `.simf` file and return the [`CompiledFunction`].
 ///
 /// Used by the `simf_fn` compute hook to validate compilation before execution.
@@ -840,14 +866,30 @@ pub fn compute_covenant_address(
     Ok(address)
 }
 
+/// A witness the program declares but this spending path never reads, written in the
+/// manifest as the bare string `"unused"`.
+///
+/// Every witness needs a concrete bit-vector before `populate_witnesses` can run, including
+/// the ones on branches the transaction environment is about to prune — a redemption path's
+/// `ORACLE_SIGNATURE`, an issuance path's `TOKENS_BURNED`. `"unused"` supplies the zero those
+/// slots want while still making the manifest name them, which is what keeps a witness the
+/// program declares and the manifest forgets an error instead of a silent zero.
+pub const UNUSED_WITNESS: &str = "unused";
+
 /// Build `WitnessValues` from a manifest-file witness map using the compiled program's own
 /// `WitnessTypes` so the caller never needs to specify SimplicityHL type syntax.
 ///
-/// Only entries with `"type": "simplicityhl"` are processed.  Any witness declared in the
-/// program but not supplied in `witnesses` is filled with a zero value — these are typically
-/// signing witnesses (e.g. SIGNATURE) that live on branches pruned by the tx environment and
-/// are never checked by the BitMachine; we need _some_ concrete value so `populate_witnesses`
-/// can run before pruning.
+/// The manifest's witness map and the program's witness list must agree exactly: every
+/// witness the program declares has to appear here — as a `"type": "simplicityhl"` value, a
+/// `"type": "Signature"` entry already resolved by [`inject_computed_signatures`], or the
+/// bare string [`UNUSED_WITNESS`] — and every entry here has to name a witness the program
+/// declares. `"type": "taproot_leaf"` is the one exception: it selects which tap leaf to
+/// spend and is never read by the program, so it is not matched against the witness list.
+///
+/// Nothing is inferred. An earlier version zero-filled anything the manifest left out, which
+/// made a mistyped witness name and a deliberate omission produce identical transactions —
+/// the program read a zero either way, and the failure surfaced much later as a covenant
+/// that simply did not satisfy.
 fn build_witness_values_from_types(
     witnesses: Option<&serde_json::Value>,
     witness_types: &WitnessTypes,
@@ -858,34 +900,76 @@ fn build_witness_values_from_types(
     let obj = witnesses.and_then(|v| v.as_object());
 
     let mut map = std::collections::HashMap::new();
+    // Names that matched a program witness, whether or not a value came out of them —
+    // so a witness that failed for its own reason is not also reported as missing.
+    let mut declared = std::collections::HashSet::new();
+    let mut problems: Vec<String> = Vec::new();
 
-    // Parse user-provided simplicityhl witnesses.
-    if let Some(obj) = obj {
-        for (name, def) in obj {
-            if def.get("type").and_then(|v| v.as_str()) != Some("simplicityhl") {
-                continue;
-            }
-            let value_str = match def.get("value").and_then(|v| v.as_str()) {
-                Some(s) => s,
-                None => continue,
-            };
-            let witness_name = WitnessName::parse_from_str(name)
-                .map_err(|e| anyhow::anyhow!("Invalid witness name '{name}': {e}"))?;
-            let Some(ty) = witness_types.get(&witness_name) else {
-                continue;
-            };
-            let value = parse_witness_value(name, value_str, ty)?;
-            map.insert(witness_name, value);
+    for (name, def) in obj.into_iter().flatten() {
+        // A leaf selector, not a value the program reads.
+        if def.get("type").and_then(|v| v.as_str()) == Some("taproot_leaf") {
+            continue;
+        }
+
+        let witness_name = WitnessName::parse_from_str(name)
+            .map_err(|e| anyhow::anyhow!("Invalid witness name '{name}': {e}"))?;
+        let Some(ty) = witness_types.get(&witness_name) else {
+            problems.push(format!(
+                "'{name}' is declared here but the program has no such witness"
+            ));
+            continue;
+        };
+        declared.insert(witness_name.shallow_clone());
+
+        if def.as_str() == Some(UNUSED_WITNESS) {
+            map.insert(witness_name, zero_value_for_type(ty));
+            continue;
+        }
+
+        match def.get("type").and_then(|v| v.as_str()) {
+            Some("simplicityhl") => match def.get("value").and_then(|v| v.as_str()) {
+                Some(value_str) => match parse_witness_value(name, value_str, ty) {
+                    Ok(value) => {
+                        map.insert(witness_name, value);
+                    }
+                    Err(e) => problems.push(e.to_string()),
+                },
+                None => problems.push(format!("'{name}' has no string \"value\"")),
+            },
+            // Still `Signature` means `inject_computed_signatures` did not replace it, i.e.
+            // no signer was available. Zeroing it would fail deep inside `bip_0340_verify`
+            // with nothing pointing back at the missing key.
+            Some("Signature") => problems.push(format!(
+                "'{name}' is a Signature witness that was never signed — no signer was \
+                 available for this input"
+            )),
+            Some(other) => problems.push(format!(
+                "'{name}' has unrecognized type '{other}' (expected \"simplicityhl\", \
+                 \"Signature\", \"taproot_leaf\", or the bare string \"{UNUSED_WITNESS}\")"
+            )),
+            None => problems.push(format!(
+                "'{name}' must be an object carrying a \"type\", or the bare string \
+                 \"{UNUSED_WITNESS}\""
+            )),
         }
     }
 
-    // Fill zero values for any witness not supplied — these live on pruned branches
-    // (e.g. SIGNATURE on the cancel path when PATH = Left) and are never executed,
-    // but populate_witnesses needs a concrete bit-vector for every node before pruning.
-    for (name, ty) in witness_types.iter() {
-        if !map.contains_key(name) {
-            map.insert(name.shallow_clone(), zero_value_for_type(ty));
-        }
+    let missing: Vec<String> = witness_types
+        .iter()
+        .filter(|(name, _)| !declared.contains(*name))
+        .map(|(name, ty)| format!("{name}: {ty}"))
+        .collect();
+    if !missing.is_empty() {
+        problems.push(format!(
+            "{} witness(es) the program declares are missing from the manifest:\n    {}\n  \
+             Give each one a value, or `\"unused\"` if this path never reads it.",
+            missing.len(),
+            missing.join("\n    ")
+        ));
+    }
+
+    if !problems.is_empty() {
+        anyhow::bail!("Witnesses do not match the program:\n  {}", problems.join("\n  "));
     }
 
     Ok(WitnessValues::from(map))
@@ -949,7 +1033,8 @@ fn uint_hex_width(ty: &simplicityhl::ResolvedType) -> Option<usize> {
 }
 
 /// Produce a structurally-valid zero/default value for a SimplicityHL `ResolvedType`.
-/// Used to satisfy `populate_witnesses` for witnesses on pruned branches.
+/// This is what a witness declared [`UNUSED_WITNESS`] resolves to: `populate_witnesses`
+/// needs a concrete bit-vector for every node before the environment prunes the branch.
 fn zero_value_for_type(ty: &simplicityhl::ResolvedType) -> simplicityhl::Value {
     use simplicityhl::num::U256;
     use simplicityhl::types::{TypeInner, UIntType};
@@ -1142,6 +1227,73 @@ fn network_to_params(network: lwk_wollet::ElementsNetwork) -> &'static AddressPa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a `WitnessTypes` the way a compiled program hands one over.
+    fn witness_types(entries: &[(&str, simplicityhl::ResolvedType)]) -> WitnessTypes {
+        use simplicityhl::parse::ParseFromStr as _;
+        use simplicityhl::str::WitnessName;
+        WitnessTypes::from(
+            entries
+                .iter()
+                .map(|(n, ty)| (WitnessName::parse_from_str(n).unwrap(), ty.clone()))
+                .collect::<std::collections::HashMap<_, _>>(),
+        )
+    }
+
+    /// Nothing is inferred: the manifest's witness map and the program's witness list
+    /// must name exactly the same set, in both directions.
+    #[test]
+    fn every_program_witness_must_be_declared() {
+        use simplicityhl::parse::ParseFromStr as _;
+        use simplicityhl::types::{ResolvedType, UIntType};
+
+        let types = witness_types(&[
+            ("STATE", ResolvedType::from(UIntType::U64)),
+            ("TOKENS_BURNED", ResolvedType::from(UIntType::U64)),
+        ]);
+        let declared = serde_json::json!({
+            "STATE": { "type": "simplicityhl", "value": "1" }
+        });
+
+        // Missing: the old code zero-filled TOKENS_BURNED here and built a transaction
+        // that spent against a value nobody chose.
+        let err = build_witness_values_from_types(Some(&declared), &types).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("TOKENS_BURNED"), "{msg}");
+        assert!(msg.contains("unused"), "the error should name the way out: {msg}");
+
+        // `"unused"` is that way out, and resolves to the zero the pruned branch wants.
+        let declared = serde_json::json!({
+            "STATE": { "type": "simplicityhl", "value": "1" },
+            "TOKENS_BURNED": "unused"
+        });
+        let values = build_witness_values_from_types(Some(&declared), &types)
+            .expect("\"unused\" should satisfy the requirement");
+        assert_eq!(values.iter().count(), 2);
+        let burned = simplicityhl::str::WitnessName::parse_from_str("TOKENS_BURNED").unwrap();
+        assert_eq!(
+            values.get(&burned).map(ToString::to_string),
+            Some(zero_value_for_type(&ResolvedType::from(UIntType::U64)).to_string()),
+        );
+
+        // And the other direction: a name the program does not have is no longer dropped.
+        let declared = serde_json::json!({
+            "STATE": { "type": "simplicityhl", "value": "1" },
+            "TOKENS_BURNED": "unused",
+            "TOEKNS_BURNED": { "type": "simplicityhl", "value": "5" }
+        });
+        let err = build_witness_values_from_types(Some(&declared), &types).unwrap_err();
+        assert!(format!("{err:#}").contains("TOEKNS_BURNED"), "{err:#}");
+
+        // A leaf selector shares the map but is not a program witness either way.
+        let declared = serde_json::json!({
+            "STATE": { "type": "simplicityhl", "value": "1" },
+            "TOKENS_BURNED": "unused",
+            "SPEND_PATH": { "type": "taproot_leaf", "source": { "type": "formula", "expr": "leaf" } }
+        });
+        build_witness_values_from_types(Some(&declared), &types)
+            .expect("taproot_leaf should be exempt");
+    }
 
     /// A witness may be written as bare hex — but a decimal must never become hex.
     ///

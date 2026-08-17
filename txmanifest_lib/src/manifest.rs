@@ -681,6 +681,17 @@ pub struct Input {
     /// Omitted → the input stays at `Sequence::MAX` (relative locktime disabled).
     pub sequence: Option<serde_json::Value>,
     /// Simplicity witnesses for this input: map of witness name → definition.
+    ///
+    /// Must name **every** witness the input's program declares, and nothing else.
+    /// A definition is either an object carrying a `type` — `simplicityhl` (a concrete
+    /// value), `Signature` (a BIP340 signature the engine computes), `taproot_leaf` (a leaf
+    /// selector, which is not a program witness and so is exempt from both halves of that
+    /// rule) — or the bare string `"unused"` for a witness this spending path does not
+    /// depend on, which supplies the zero its pruned branch wants.
+    ///
+    /// Nothing is inferred from an omission. Anything left out is an error, at
+    /// `validate` time against the `.simf` and again at run time against the compiled
+    /// program.
     pub witnesses: Option<serde_json::Value>,
     /// Inline hook evaluated after this input's UTXO is resolved and its
     /// issuance attrs (asset, reissuance_token) are computed.

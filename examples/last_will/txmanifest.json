@@ -126,7 +126,9 @@
                                         "key": "compile_params.COLD_PUB_KEY"
                                     },
                                     "description": "BIP340 signature from the cold key."
-                                }
+                                },
+                                "HOT_SIG": "unused",
+                                "INHERITOR_SIG": "unused"
                             }
                         }
                     ],
@@ -164,7 +166,9 @@
                                         "key": "compile_params.HOT_PUB_KEY"
                                     },
                                     "description": "BIP340 signature from the hot key."
-                                }
+                                },
+                                "COLD_SIG": "unused",
+                                "INHERITOR_SIG": "unused"
                             }
                         }
                     ],
@@ -208,7 +212,9 @@
                                         "key": "compile_params.INHERITOR_PUB_KEY"
                                     },
                                     "description": "BIP340 signature from the heir's key."
-                                }
+                                },
+                                "COLD_SIG": "unused",
+                                "HOT_SIG": "unused"
                             }
                         },
                         {
