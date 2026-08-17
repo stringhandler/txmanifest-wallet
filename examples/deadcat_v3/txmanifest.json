@@ -238,16 +238,11 @@
           "outputs": [
             {
               "id": "yes_reissuance_out",
-              "description": "The YES reissuance token, 1 unit, to your wallet. The asset reference reads the id the engine derived from in[0] once it resolved. `inputs.` is the explicit spelling of an input reference; the bare `yes_defining_in.reissuance_token` also works but is ambiguous by shape with every other namespace.",
+              "description": "The YES reissuance token, 1 unit, to your wallet. The asset reference reads the id the engine derived from in[0] once it resolved. `inputs.` is the explicit spelling of an input reference; the bare `yes_defining_in.reissuance_token` also works but is ambiguous by shape with every other namespace. Blinded, but with factors the wallet picks. Pinning the protocol constant here would be both pointless and fatal: pointless because only the covenant has to reproduce a factor and the covenant never sees this UTXO — the wallet unblinds its own — and fatal because CreateMarket pays this same token to abf = 1, and an output cannot reuse the abf of the input it comes from. The surjection proof would have a zero shift to prove and no valid secret key to prove it with.",
               "destination": "wallet",
               "asset": "inputs.yes_defining_in.reissuance_token",
               "amount_sat": 1,
               "confidential": true,
-              "blinding": {
-                "$comment": "The genesis of the +1 chain. Both factors are the constant 1, the documented starting pair — every later spend reads the previous witness and adds one, so this is the single value nothing on chain can supply. It also has to be non-zero and known: Elements rebuilds a reissuance token's generator from `assetBlindingNonce` = the abf of the UTXO being spent, so an explicit (abf = 0) token is unreissuable and a randomly-blinded one is only reissuable by whoever kept the secret. The change output below stays unpinned — its value blinding factor is the one solved to balance the transaction.",
-                "asset_bf": "1",
-                "value_bf": "1"
-              },
               "required_index": 0,
               "ui": {
                 "label": "YES minting right, held by you",
@@ -261,11 +256,6 @@
               "asset": "inputs.no_defining_in.reissuance_token",
               "amount_sat": 1,
               "confidential": true,
-              "blinding": {
-                "$comment": "The same constant pair as the YES token. Two outputs sharing a factor pair is fine — they carry different assets, so the commitments differ regardless, and neither factor was ever secret: the constant is published here precisely so the next spender can reproduce it.",
-                "asset_bf": "1",
-                "value_bf": "1"
-              },
               "required_index": 1,
               "ui": {
                 "label": "NO minting right, held by you",
@@ -274,7 +264,7 @@
             },
             {
               "id": "lbtc_change",
-              "description": "L-BTC change from the two defining inputs. Load-bearing, despite being optional: both token outputs pin their blinding factors, so this is the only output left whose value blinding factor the builder can solve for. Without it the transaction's factors do not sum to zero and it cannot be blinded at all — so a run whose defining inputs leave no change will fail rather than build.",
+              "description": "L-BTC change from the two defining inputs.",
               "destination": "change",
               "asset": "lbtc",
               "optional": true,
@@ -350,10 +340,10 @@
               "asset": "instance.YES_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 0,
-                "confidential": true,
+              "confidential": true,
               "blinding": {
                 "asset_bf": "1",
-                "value_bf": "1" 
+                "value_bf": "1"
               },
               "ui": {
                 "label": "YES minting right, locked in the market",
@@ -369,10 +359,10 @@
               "asset": "instance.NO_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 1,
-                "confidential": true,
+              "confidential": true,
               "blinding": {
                 "asset_bf": "1",
-                "value_bf": "1" 
+                "value_bf": "1"
               },
               "ui": {
                 "label": "NO minting right, locked in the market",
@@ -473,6 +463,11 @@
                 "entropy": "instance.YES_ISSUANCE_ENTROPY",
                 "issued_asset": "instance.YES_TOKEN_ASSET"
               },
+              "blinding": {
+                "$comment": "The pair CreateMarket wrote. These describe the UTXO being spent, not a choice: the engine rebuilds the confidential prevout from them, and Elements takes the abf as the reissuance's assetBlindingNonce. The outputs advance both to 2.",
+                "asset_bf": "1",
+                "value_bf": "1"
+              },
               "witnesses": {
                 "STATE": {
                   "type": "simplicityhl",
@@ -506,12 +501,28 @@
                   "simplicity_type": "u256",
                   "value": "0"
                 },
-                "YES_REISSUANCE_INPUT_ABF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"},
-                "YES_REISSUANCE_INPUT_VBF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"},
-                "NO_REISSUANCE_INPUT_ABF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"},
-                "NO_REISSUANCE_INPUT_VBF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"},
+                "YES_REISSUANCE_INPUT_ABF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "1"
+                },
+                "YES_REISSUANCE_INPUT_VBF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "1"
+                },
+                "NO_REISSUANCE_INPUT_ABF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "1"
+                },
+                "NO_REISSUANCE_INPUT_VBF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "1"
+                },
                 "BURN_TOKEN_ASSET": "unused",
-                "ORACLE_OUTCOME_YES":"unused",
+                "ORACLE_OUTCOME_YES": "unused",
                 "ORACLE_SIGNATURE": "unused",
                 "PAIRS_BURNED": "unused",
                 "TOKENS_BURNED": "unused"
@@ -535,6 +546,10 @@
                 "asset_amount_sat": "params.PAIRS",
                 "entropy": "instance.NO_ISSUANCE_ENTROPY",
                 "issued_asset": "instance.NO_TOKEN_ASSET"
+              },
+              "blinding": {
+                "asset_bf": "1",
+                "value_bf": "1"
               },
               "witnesses": {
                 "STATE": {
@@ -569,14 +584,30 @@
                   "value": "0"
                 },
                 "BURN_TOKEN_ASSET": "unused",
-                "NO_REISSUANCE_INPUT_ABF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"},
-                "NO_REISSUANCE_INPUT_VBF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"},
+                "NO_REISSUANCE_INPUT_ABF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "1"
+                },
+                "NO_REISSUANCE_INPUT_VBF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "1"
+                },
                 "ORACLE_OUTCOME_YES": "unused",
                 "ORACLE_SIGNATURE": "unused",
                 "PAIRS_BURNED": "unused",
                 "TOKENS_BURNED": "unused",
-                "YES_REISSUANCE_INPUT_ABF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"},
-                "YES_REISSUANCE_INPUT_VBF": {"type": "simplicityhl", "simplicity_type": "u256", "value": "1"}
+                "YES_REISSUANCE_INPUT_ABF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "1"
+                },
+                "YES_REISSUANCE_INPUT_VBF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "1"
+                }
               },
               "ui": {
                 "label": "NO minting right",
@@ -611,7 +642,7 @@
               "confidential": true,
               "blinding": {
                 "asset_bf": "2",
-                "value_bf": "2" 
+                "value_bf": "2"
               },
               "ui": {
                 "label": "YES minting right, market now live",
@@ -627,10 +658,10 @@
               "asset": "instance.NO_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 1,
-                "confidential": true,
+              "confidential": true,
               "blinding": {
                 "asset_bf": "2",
-                "value_bf": "2" 
+                "value_bf": "2"
               },
               "ui": {
                 "label": "NO minting right, market now live",
@@ -696,6 +727,10 @@
             "PAIRS": {
               "type": "u64",
               "description": "Additional pairs to mint. You deposit PAIRS x 2 x COLLATERAL_PER_TOKEN of new collateral on top of whatever the market already holds."
+            },
+            "RT_FACTOR": {
+              "type": "u64",
+              "description": "The blinding factor the market's reissuance tokens currently carry — its spend depth. Both factors of both tokens are this one number: CreateMarket sets it to 1 and every covenant spend advances it by exactly one, so it is the count of covenant spends so far. Nothing on chain reports it in a readable form and the engine does not track it, so you supply it: read it off the previous spend's Simplicity witness on an explorer (the four *_REISSUANCE_INPUT_ABF/VBF values, plus one), or keep a note beside the market. A wrong value cannot produce a valid transaction — the rebuilt input commitments will not be the ones on chain — so it fails before signing."
             }
           },
           "inputs": [
@@ -713,6 +748,10 @@
                 "asset_amount_sat": "params.PAIRS",
                 "entropy": "instance.YES_ISSUANCE_ENTROPY",
                 "issued_asset": "instance.YES_TOKEN_ASSET"
+              },
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR",
+                "value_bf": "params.RT_FACTOR"
               },
               "witnesses": {
                 "STATE": {
@@ -750,7 +789,27 @@
                 "ORACLE_OUTCOME_YES": "unused",
                 "ORACLE_SIGNATURE": "unused",
                 "PAIRS_BURNED": "unused",
-                "TOKENS_BURNED": "unused"
+                "TOKENS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                },
+                "YES_REISSUANCE_INPUT_VBF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                },
+                "NO_REISSUANCE_INPUT_ABF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                },
+                "NO_REISSUANCE_INPUT_VBF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                }
               },
               "ui": {
                 "label": "YES minting right",
@@ -771,6 +830,10 @@
                 "asset_amount_sat": "params.PAIRS",
                 "entropy": "instance.NO_ISSUANCE_ENTROPY",
                 "issued_asset": "instance.NO_TOKEN_ASSET"
+              },
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR",
+                "value_bf": "params.RT_FACTOR"
               },
               "witnesses": {
                 "STATE": {
@@ -899,6 +962,11 @@
               "asset": "instance.YES_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 0,
+              "confidential": true,
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR + 1",
+                "value_bf": "params.RT_FACTOR + 1"
+              },
               "ui": {
                 "label": "YES minting right",
                 "role": "reissuance_token"
@@ -913,6 +981,11 @@
               "asset": "instance.NO_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 1,
+              "confidential": true,
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR + 1",
+                "value_bf": "params.RT_FACTOR + 1"
+              },
               "ui": {
                 "label": "NO minting right",
                 "role": "reissuance_token"
@@ -977,6 +1050,10 @@
             "ORACLE_SIGNATURE": {
               "type": "bytes",
               "description": "The oracle's 64-byte BIP340 signature over sha256(MARKET_ID || 0x01), where MARKET_ID = sha256(YES_TOKEN_ASSET || NO_TOKEN_ASSET) over the asset ids in internal byte order. Paste it 0x-prefixed. Produced off-chain; the wallet cannot compute it."
+            },
+            "RT_FACTOR": {
+              "type": "u64",
+              "description": "The blinding factor the market's reissuance tokens currently carry — its spend depth. Both factors of both tokens are this one number: CreateMarket sets it to 1 and every covenant spend advances it by exactly one, so it is the count of covenant spends so far. Nothing on chain reports it in a readable form and the engine does not track it, so you supply it: read it off the previous spend's Simplicity witness on an explorer (the four *_REISSUANCE_INPUT_ABF/VBF values, plus one), or keep a note beside the market. A wrong value cannot produce a valid transaction — the rebuilt input commitments will not be the ones on chain — so it fails before signing."
             }
           },
           "inputs": [
@@ -989,6 +1066,10 @@
               "asset": "instance.YES_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 0,
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR",
+                "value_bf": "params.RT_FACTOR"
+              },
               "witnesses": {
                 "STATE": {
                   "type": "simplicityhl",
@@ -1035,7 +1116,27 @@
                 },
                 "BURN_TOKEN_ASSET": "unused",
                 "PAIRS_BURNED": "unused",
-                "TOKENS_BURNED": "unused"
+                "TOKENS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                },
+                "YES_REISSUANCE_INPUT_VBF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                },
+                "NO_REISSUANCE_INPUT_ABF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                },
+                "NO_REISSUANCE_INPUT_VBF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                }
               },
               "ui": {
                 "label": "YES minting right",
@@ -1051,6 +1152,10 @@
               "asset": "instance.NO_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 1,
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR",
+                "value_bf": "params.RT_FACTOR"
+              },
               "witnesses": {
                 "STATE": {
                   "type": "simplicityhl",
@@ -1162,6 +1267,11 @@
               "asset": "instance.YES_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 0,
+              "confidential": true,
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR + 1",
+                "value_bf": "params.RT_FACTOR + 1"
+              },
               "ui": {
                 "label": "YES minting right, market resolved",
                 "role": "reissuance_token"
@@ -1176,6 +1286,11 @@
               "asset": "instance.NO_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 1,
+              "confidential": true,
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR + 1",
+                "value_bf": "params.RT_FACTOR + 1"
+              },
               "ui": {
                 "label": "NO minting right, market resolved",
                 "role": "reissuance_token"
@@ -1216,6 +1331,10 @@
             "ORACLE_SIGNATURE": {
               "type": "bytes",
               "description": "The oracle's 64-byte BIP340 signature over sha256(MARKET_ID || 0x00). Paste it 0x-prefixed."
+            },
+            "RT_FACTOR": {
+              "type": "u64",
+              "description": "The blinding factor the market's reissuance tokens currently carry — its spend depth. Both factors of both tokens are this one number: CreateMarket sets it to 1 and every covenant spend advances it by exactly one, so it is the count of covenant spends so far. Nothing on chain reports it in a readable form and the engine does not track it, so you supply it: read it off the previous spend's Simplicity witness on an explorer (the four *_REISSUANCE_INPUT_ABF/VBF values, plus one), or keep a note beside the market. A wrong value cannot produce a valid transaction — the rebuilt input commitments will not be the ones on chain — so it fails before signing."
             }
           },
           "inputs": [
@@ -1228,6 +1347,10 @@
               "asset": "instance.YES_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 0,
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR",
+                "value_bf": "params.RT_FACTOR"
+              },
               "witnesses": {
                 "STATE": {
                   "type": "simplicityhl",
@@ -1273,7 +1396,27 @@
                 },
                 "BURN_TOKEN_ASSET": "unused",
                 "PAIRS_BURNED": "unused",
-                "TOKENS_BURNED": "unused"
+                "TOKENS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                },
+                "YES_REISSUANCE_INPUT_VBF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                },
+                "NO_REISSUANCE_INPUT_ABF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                },
+                "NO_REISSUANCE_INPUT_VBF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                }
               },
               "ui": {
                 "label": "YES minting right",
@@ -1289,6 +1432,10 @@
               "asset": "instance.NO_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 1,
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR",
+                "value_bf": "params.RT_FACTOR"
+              },
               "witnesses": {
                 "STATE": {
                   "type": "simplicityhl",
@@ -1400,6 +1547,11 @@
               "asset": "instance.YES_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 0,
+              "confidential": true,
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR + 1",
+                "value_bf": "params.RT_FACTOR + 1"
+              },
               "ui": {
                 "label": "YES minting right, market resolved",
                 "role": "reissuance_token"
@@ -1414,6 +1566,11 @@
               "asset": "instance.NO_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 1,
+              "confidential": true,
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR + 1",
+                "value_bf": "params.RT_FACTOR + 1"
+              },
               "ui": {
                 "label": "NO minting right, market resolved",
                 "role": "reissuance_token"
@@ -2038,6 +2195,10 @@
             "PAIRS_BURNED": {
               "type": "u64",
               "description": "Every outstanding pair. Must equal the pool's total collateral divided by 2 x COLLATERAL_PER_TOKEN, exactly."
+            },
+            "RT_FACTOR": {
+              "type": "u64",
+              "description": "The blinding factor the market's reissuance tokens currently carry — its spend depth. Both factors of both tokens are this one number: CreateMarket sets it to 1 and every covenant spend advances it by exactly one, so it is the count of covenant spends so far. Nothing on chain reports it in a readable form and the engine does not track it, so you supply it: read it off the previous spend's Simplicity witness on an explorer (the four *_REISSUANCE_INPUT_ABF/VBF values, plus one), or keep a note beside the market. A wrong value cannot produce a valid transaction — the rebuilt input commitments will not be the ones on chain — so it fails before signing."
             }
           },
           "inputs": [
@@ -2089,7 +2250,27 @@
                 "BURN_TOKEN_ASSET": "unused",
                 "ORACLE_OUTCOME_YES": "unused",
                 "ORACLE_SIGNATURE": "unused",
-                "TOKENS_BURNED": "unused"
+                "TOKENS_BURNED": "unused",
+                "YES_REISSUANCE_INPUT_ABF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                },
+                "YES_REISSUANCE_INPUT_VBF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                },
+                "NO_REISSUANCE_INPUT_ABF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                },
+                "NO_REISSUANCE_INPUT_VBF": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RT_FACTOR"
+                }
               },
               "ui": {
                 "label": "the whole collateral pool",
@@ -2105,6 +2286,10 @@
               "asset": "instance.YES_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 1,
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR",
+                "value_bf": "params.RT_FACTOR"
+              },
               "witnesses": {
                 "STATE": {
                   "type": "simplicityhl",
@@ -2160,6 +2345,10 @@
               "asset": "instance.NO_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 2,
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR",
+                "value_bf": "params.RT_FACTOR"
+              },
               "witnesses": {
                 "STATE": {
                   "type": "simplicityhl",
@@ -2243,6 +2432,11 @@
               "asset": "instance.YES_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 0,
+              "confidential": true,
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR + 1",
+                "value_bf": "params.RT_FACTOR + 1"
+              },
               "ui": {
                 "label": "YES minting right, back to dormant",
                 "role": "reissuance_token"
@@ -2257,6 +2451,11 @@
               "asset": "instance.NO_REISSUANCE_TOKEN",
               "amount_sat": 1,
               "required_index": 1,
+              "confidential": true,
+              "blinding": {
+                "asset_bf": "params.RT_FACTOR + 1",
+                "value_bf": "params.RT_FACTOR + 1"
+              },
               "ui": {
                 "label": "NO minting right, back to dormant",
                 "role": "reissuance_token"

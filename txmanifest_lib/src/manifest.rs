@@ -696,6 +696,9 @@ pub struct Input {
     /// Inline hook evaluated after this input's UTXO is resolved and its
     /// issuance attrs (asset, reissuance_token) are computed.
     pub on_resolved: Option<HookBlock>,
+    /// The blinding factors of the covenant UTXO this input spends, when it is
+    /// confidential. Both halves are required. See [`BlindingFactors`].
+    pub blinding: Option<BlindingFactors>,
     /// Clear-signing UI hint for this input (net-effect debit line).
     pub ui: Option<UiSpec>,
 }
@@ -770,13 +773,13 @@ pub struct Output {
     /// and the UTXO at it unspendable by the paths that expect a commitment.
     pub confidential: Option<bool>,
     /// Pin this confidential output's blinding factors instead of letting the builder
-    /// pick them. See [`OutputBlinding`].
-    pub blinding: Option<OutputBlinding>,
+    /// pick them. See [`BlindingFactors`].
+    pub blinding: Option<BlindingFactors>,
     /// Clear-signing UI hint for this output (net-effect credit line).
     pub ui: Option<UiSpec>,
 }
 
-/// Blinding factors pinned by the manifest for one confidential output.
+/// The blinding factors of one confidential output or input.
 ///
 /// A wallet normally draws both factors at random, which is right when nothing but the
 /// receiver ever reads them. It is wrong when a *covenant* reads them: a program that
@@ -787,12 +790,21 @@ pub struct Output {
 ///
 /// Each factor is a 32-byte scalar written as a small decimal (`"1"`), a `0x`-prefixed
 /// hex string of up to 64 chars, or a reference (`params.X`, `instance.X`) resolving to
-/// either. Omitting one leaves it random; omitting both makes the field a no-op.
+/// either — which is how a factor an operator reads off an explorer or a side file
+/// reaches the build.
 ///
-/// **One confidential output must keep a free `value_bf`.** The transaction's blinding
-/// factors have to sum to zero, and the builder solves the last free `value_bf` to make
-/// that true — pin every one of them and the transaction is unbalanceable. In practice
-/// the change output is the one left free.
+/// **On an output** it pins what the builder would otherwise choose. Omitting one leaves
+/// it random; omitting both makes the field a no-op. One confidential output must keep a
+/// free `value_bf`: the transaction's blinding factors have to sum to zero and the
+/// builder solves the last free one to make that true, so pinning every one of them
+/// leaves the transaction unbalanceable. In practice that free output is the change.
+///
+/// **On a covenant input** it is not a choice but a statement of fact — the factors the
+/// UTXO being spent was created with. They are what lets the engine rebuild the
+/// confidential prevout the sighash and the introspection jets need, and (for a
+/// reissuance) the `assetBlindingNonce` Elements demands. Both halves are required, and a
+/// wrong value is caught before signing: the rebuilt commitments simply will not be the
+/// ones on chain.
 ///
 /// The factors are public to anyone who reads them here, so this trades the output's
 /// confidentiality for reissuability: it hides nothing, it only keeps the commitment
@@ -802,7 +814,7 @@ pub struct Output {
 /// with a factor its next spender can reproduce.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct OutputBlinding {
+pub struct BlindingFactors {
     /// Asset blinding factor (`abf`). Also the value Elements requires as the
     /// `assetBlindingNonce` of any later reissuance spending this output.
     pub asset_bf: Option<serde_json::Value>,

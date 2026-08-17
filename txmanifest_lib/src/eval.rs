@@ -204,6 +204,11 @@ pub fn resolve_site_arg(expr: &str, ctx: &ExecutionContext) -> Result<String> {
 /// matter: a covenant's bootstrap constant is written `"1"`, while a factor recovered
 /// from a previous spend's witness arrives as a full 64-char scalar.
 ///
+/// Arithmetic is accepted too — `params.RT_FACTOR + 1` is how a scheme that advances its
+/// factors expresses the output's from the input's, without the operator having to supply
+/// both. That path evaluates through the ordinary `u64` expression evaluator, so it holds
+/// only while the factors stay small; a hashed factor has to be written out in full.
+///
 /// Short values are right-aligned — `"1"` is the scalar one, not one followed by 31 zero
 /// bytes — which is the same convention `witness` `u256` values and the covenant's own
 /// arithmetic use.
@@ -229,7 +234,16 @@ pub fn eval_scalar32(value: &serde_json::Value, ctx: &ExecutionContext) -> Resul
         })?;
         n.to_be_bytes().to_vec()
     } else {
-        bail!("Blinding factor '{text}' is neither a decimal integer nor 0x-prefixed hex");
+        // Not a literal and not a bare reference: try it as an expression, so
+        // `params.RT_FACTOR + 1` resolves. `eval_expr` is u64, which is the documented
+        // ceiling on this form.
+        let n = eval_expr(text, ctx).map_err(|e| {
+            anyhow::anyhow!(
+                "Blinding factor '{text}' is not a decimal integer, 0x-prefixed hex, or an \
+                 expression this action can evaluate: {e}"
+            )
+        })?;
+        (n as u128).to_be_bytes().to_vec()
     };
 
     if bytes.len() > 32 {
@@ -927,6 +941,20 @@ mod scalar32_tests {
         // A factor recovered from a previous spend's witness arrives full-width.
         let full = format!("0x{}", "ab".repeat(32));
         assert_eq!(eval_scalar32(&serde_json::json!(full), &ctx).unwrap(), [0xabu8; 32]);
+    }
+
+    /// The `+1` chain: the operator supplies the factor the UTXO holds, and the output's
+    /// follows from it. Supplying both would be two chances to get one number right.
+    #[test]
+    fn arithmetic_over_a_param_resolves() {
+        let mut ctx = ExecutionContext::new();
+        ctx.set_param("RT_FACTOR", "4");
+        let mut expected = [0u8; 32];
+        expected[31] = 5;
+        assert_eq!(
+            eval_scalar32(&serde_json::json!("params.RT_FACTOR + 1"), &ctx).unwrap(),
+            expected
+        );
     }
 
     #[test]

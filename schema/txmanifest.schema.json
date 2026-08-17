@@ -121,6 +121,23 @@
         }
       ]
     },
+    "BlindingFactors": {
+      "additionalProperties": false,
+      "description": "The blinding factors of one confidential output or input.\n\nA wallet normally draws both factors at random, which is right when nothing but the receiver ever reads them. It is wrong when a *covenant* reads them: a program that checks its own outputs' commitments (deadcat_v3 requires each recreated reissuance token to advance both factors by exactly one) can only be satisfied by factors the spender chose deliberately. Elements' `blind_last` offers no way to say which, so the engine runs its own blinding pass whenever this field appears.\n\nEach factor is a 32-byte scalar written as a small decimal (`\"1\"`), a `0x`-prefixed hex string of up to 64 chars, or a reference (`params.X`, `instance.X`) resolving to either — which is how a factor an operator reads off an explorer or a side file reaches the build.\n\n**On an output** it pins what the builder would otherwise choose. Omitting one leaves it random; omitting both makes the field a no-op. One confidential output must keep a free `value_bf`: the transaction's blinding factors have to sum to zero and the builder solves the last free one to make that true, so pinning every one of them leaves the transaction unbalanceable. In practice that free output is the change.\n\n**On a covenant input** it is not a choice but a statement of fact — the factors the UTXO being spent was created with. They are what lets the engine rebuild the confidential prevout the sighash and the introspection jets need, and (for a reissuance) the `assetBlindingNonce` Elements demands. Both halves are required, and a wrong value is caught before signing: the rebuilt commitments simply will not be the ones on chain.\n\nThe factors are public to anyone who reads them here, so this trades the output's confidentiality for reissuability: it hides nothing, it only keeps the commitment well-formed. Elements has no explicit reissuance token (`confidential_validation.cpp` rebuilds the spent token's generator from the blinding nonce and byte-compares it), so a token that must stay reissuable must stay blinded, with a factor its next spender can reproduce.",
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "asset_bf": {
+          "description": "Asset blinding factor (`abf`). Also the value Elements requires as the `assetBlindingNonce` of any later reissuance spending this output."
+        },
+        "value_bf": {
+          "description": "Value blinding factor (`vbf`)."
+        }
+      },
+      "type": "object"
+    },
     "ComputeSpec": {
       "anyOf": [
         {
@@ -227,6 +244,17 @@
         },
         "amount_sat": true,
         "asset": true,
+        "blinding": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BlindingFactors"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The blinding factors of the covenant UTXO this input spends, when it is confidential. Both halves are required. See [`BlindingFactors`]."
+        },
         "description": {
           "type": [
             "string",
@@ -332,13 +360,13 @@
         "blinding": {
           "anyOf": [
             {
-              "$ref": "#/definitions/OutputBlinding"
+              "$ref": "#/definitions/BlindingFactors"
             },
             {
               "type": "null"
             }
           ],
-          "description": "Pin this confidential output's blinding factors instead of letting the builder pick them. See [`OutputBlinding`]."
+          "description": "Pin this confidential output's blinding factors instead of letting the builder pick them. See [`BlindingFactors`]."
         },
         "condition": {
           "type": [
@@ -403,23 +431,6 @@
         "destination",
         "id"
       ],
-      "type": "object"
-    },
-    "OutputBlinding": {
-      "additionalProperties": false,
-      "description": "Blinding factors pinned by the manifest for one confidential output.\n\nA wallet normally draws both factors at random, which is right when nothing but the receiver ever reads them. It is wrong when a *covenant* reads them: a program that checks its own outputs' commitments (deadcat_v3 requires each recreated reissuance token to advance both factors by exactly one) can only be satisfied by factors the spender chose deliberately. Elements' `blind_last` offers no way to say which, so the engine runs its own blinding pass whenever this field appears.\n\nEach factor is a 32-byte scalar written as a small decimal (`\"1\"`), a `0x`-prefixed hex string of up to 64 chars, or a reference (`params.X`, `instance.X`) resolving to either. Omitting one leaves it random; omitting both makes the field a no-op.\n\n**One confidential output must keep a free `value_bf`.** The transaction's blinding factors have to sum to zero, and the builder solves the last free `value_bf` to make that true — pin every one of them and the transaction is unbalanceable. In practice the change output is the one left free.\n\nThe factors are public to anyone who reads them here, so this trades the output's confidentiality for reissuability: it hides nothing, it only keeps the commitment well-formed. Elements has no explicit reissuance token (`confidential_validation.cpp` rebuilds the spent token's generator from the blinding nonce and byte-compares it), so a token that must stay reissuable must stay blinded, with a factor its next spender can reproduce.",
-      "properties": {
-        "$comment": {
-          "description": "Documentation only; ignored by the engine.",
-          "type": "string"
-        },
-        "asset_bf": {
-          "description": "Asset blinding factor (`abf`). Also the value Elements requires as the `assetBlindingNonce` of any later reissuance spending this output."
-        },
-        "value_bf": {
-          "description": "Value blinding factor (`vbf`)."
-        }
-      },
       "type": "object"
     },
     "OutputDestination": {

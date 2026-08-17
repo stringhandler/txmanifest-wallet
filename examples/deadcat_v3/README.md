@@ -118,30 +118,61 @@ an output may now name its own, and the engine runs a hand-written blinding pass
 "blinding": { "asset_bf": "1", "value_bf": "1" }
 ```
 
-Either half may be given; either may be a decimal, a `0x` scalar, or a `params.X` /
-`instance.X` reference. The pass blinds every pinned output with the stated factors and
-solves the last *unpinned* `value_bf` so the transaction balances — which is why the rule
-above matters in code and not just in the argument: pin every `value_bf` and the build
-fails with that error rather than producing a transaction a node rejects.
+Either half may be given; either may be a decimal, a `0x` scalar, a `params.X` /
+`instance.X` reference, or arithmetic over one (`params.RT_FACTOR + 1`, which is how an
+output states what the input's factor becomes). The pass blinds every pinned output with
+the stated factors and solves the last *unpinned* `value_bf` so the transaction balances —
+which is why the rule above matters in code and not just in the argument: pin every
+`value_bf` and the build fails with that error rather than producing a transaction a node
+rejects.
 
-`IssueReissuanceTokens` pins both tokens at the constant pair, so the chain now starts from
-a value the next spender can reproduce. Its `lbtc_change` output is the one left free.
+An **input** carries the same block, meaning something different: not a choice, but the
+factors the UTXO being spent was created with. From them the engine rebuilds the
+confidential prevout — a taproot sighash covers a spent output's asset, value and
+scriptPubKey and nothing else, and Simplicity's `ElementsUtxo` holds exactly those three,
+so `(asset, amount, abf, vbf)` reconstructs it without a network round-trip. The same abf
+is what Elements demands as the reissuance's `assetBlindingNonce`. A wrong value cannot
+produce a valid transaction: the rebuilt commitments are not the ones on chain, and the
+spend fails before it is signed.
+
+`utxo_type.confidential` is gone. Confidentiality is per output, because the state-1
+address holds two blinded reissuance tokens beside an explicit collateral UTXO — the
+program reads one as a Pedersen commitment and the other as a plain amount, and one flag
+on the address cannot say both.
+
+## A factor may not repeat across a hand-off
+
+An output's `asset_bf` must differ from that of any input carrying the same asset. A
+surjection proof is a ring signature over the difference between the output's asset
+generator and a matching input's, so an unchanged factor leaves a zero difference and no
+secret key to sign with — secp answers `CannotProveSurjection`, which explains nothing.
+The builder now catches it first and says which output and why.
+
+Advancing the factor every hop is exactly what avoids this, so the covenant spends are
+safe by construction. The bootstrap is where it bites: `IssueReissuanceTokens` therefore
+leaves its wallet-side tokens unpinned, and only `CreateMarket` writes the constant. The
+wallet unblinds its own UTXO, so nothing needed that factor to be known — pinning it there
+just collided with the `1` on the far side of the same hand-off.
+
+## Where the factor comes from
+
+The `+1` rule makes the factor a spend counter, and nothing reports it: recovering it
+on-chain means parsing the previous spend's Simplicity witness, which the engine cannot do,
+and the state file deliberately does not track it. So past the bootstrap the operator
+supplies it as `RT_FACTOR` — read the previous spend's `*_REISSUANCE_INPUT_ABF` off an
+explorer and add one, or keep a note beside the market. `CreateMarket` (1) and
+`InitialIssuance` (spends 1, writes 2) are the two that need no parameter, because their
+values are fixed by the protocol.
+
+One number drives each of the other actions: the two input `blinding` blocks, the two
+output ones as `RT_FACTOR + 1`, and the four `*_REISSUANCE_INPUT_ABF/VBF` witnesses.
 
 ## Still needed before this runs
 
-**Confidential covenant outputs.** An output declares its own `confidential` — the flag on
-`utxo_type` is gone, because the state-1 address holds blinded tokens beside an explicit
-collateral UTXO and one answer cannot serve both. `true` on a covenant output is currently
-an error, not a silent downgrade, so `CreateMarket` and `InitialIssuance` stop rather than
-building a UTXO the covenant cannot spend. That is the step that moves the constant to where
-the covenant actually reads it: the abf `InitialIssuance` spends is the abf `CreateMarket`
-wrote, not the one the wallet held.
-
-**The reissuance nonce.** `pset_builder::apply_reissuance` still writes the placeholder
-`[0…0, 1]`. Under this fork that value happens to be right for the first reissuance — the
-convention makes the first abf exactly 1 — but it must read the spent token's real abf, or
-every later spend in the `+1` chain writes the wrong nonce.
-
-**The four input witnesses.** `YES_/NO_REISSUANCE_INPUT_ABF/VBF` are the previous spend's
-factors. `InitialIssuance` can state the constant once the two items above land; the later
-paths need them read off the prior witness and incremented, which nothing does yet.
+Nothing known — this is the first version where the whole chain is expressible, and it has
+not yet been run end to end on testnet. The parts that are only argued for, not yet
+demonstrated: that `CreateMarket`'s blinded covenant outputs are accepted, and that
+`InitialIssuance` reissues against one. Both are covered by unit tests at the commitment
+level (`pset_builder`'s `rebuilt_prevout_matches_the_blinded_output_it_describes` and
+`pinned_factors_reach_the_chain_and_the_tx_still_balances`), which is not the same as a
+node accepting them.

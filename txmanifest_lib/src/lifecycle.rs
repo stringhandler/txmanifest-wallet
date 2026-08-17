@@ -145,22 +145,21 @@ fn address_blinding_key(
 /// The manifest writes scalars; the builder wants `secp` tweaks, and a factor that is not
 /// a valid scalar (zero, or ≥ the curve order) has to fail here rather than deep inside
 /// the blinder, where the message would name neither the output nor the field.
-fn resolve_output_blinding(
-    output: &crate::manifest::Output,
+fn resolve_blinding(
+    spec: Option<&crate::manifest::BlindingFactors>,
+    leg: &str,
     ctx: &ExecutionContext,
 ) -> Result<Option<pset_builder::PinnedBlinding>> {
     use lwk_wollet::elements::confidential::{AssetBlindingFactor, ValueBlindingFactor};
 
-    let Some(spec) = output.blinding.as_ref() else {
-        return Ok(None);
-    };
+    let Some(spec) = spec else { return Ok(None) };
     let asset_bf = match spec.asset_bf.as_ref() {
         None => None,
         Some(v) => {
             let bytes = eval::eval_scalar32(v, ctx)
-                .with_context(|| format!("output '{}' asset_bf", output.id))?;
+                .with_context(|| format!("{leg} asset_bf"))?;
             Some(AssetBlindingFactor::from_slice(&bytes).map_err(|e| {
-                anyhow::anyhow!("output '{}' asset_bf is not a valid scalar: {e}", output.id)
+                anyhow::anyhow!("{leg} asset_bf is not a valid scalar: {e}")
             })?)
         }
     };
@@ -168,9 +167,9 @@ fn resolve_output_blinding(
         None => None,
         Some(v) => {
             let bytes = eval::eval_scalar32(v, ctx)
-                .with_context(|| format!("output '{}' value_bf", output.id))?;
+                .with_context(|| format!("{leg} value_bf"))?;
             Some(ValueBlindingFactor::from_slice(&bytes).map_err(|e| {
-                anyhow::anyhow!("output '{}' value_bf is not a valid scalar: {e}", output.id)
+                anyhow::anyhow!("{leg} value_bf is not a valid scalar: {e}")
             })?)
         }
     };
@@ -1247,6 +1246,7 @@ pub fn run(
                                 amount: ext.unblinded.value,
                                 issuance: iso_spec,
                                 sequence: input_sequence,
+                                blinding: None,
                             });
                         } else {
                             println!(
@@ -1325,6 +1325,25 @@ pub fn run(
                     }
                 };
                 let outpoint = lwk_wollet::elements::OutPoint::new(txid, resolved.vout);
+                // The factors this UTXO was blinded with, if it is confidential. Stated,
+                // not chosen: they describe a UTXO that already exists, and the prevout
+                // the sighash and the introspection jets see is rebuilt from them.
+                let input_blinding = match resolve_blinding(
+                    inp.blinding.as_ref(), &format!("input '{}'", inp.id), &ctx,
+                ) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        println!("  {} Input '{}' blinding: {e}", style("[error]").red(), inp.id);
+                        collect_inputs_ok = false;
+                        break;
+                    }
+                };
+                if input_blinding.is_some() {
+                    println!(
+                        "  {} Input '{}' spends a confidential UTXO — prevout rebuilt from the declared factors.",
+                        style("·").dim(), inp.id
+                    );
+                }
                 pset_inputs.push(pset_builder::PsetInput::Covenant {
                     input_id: inp.id.clone(),
                     outpoint,
@@ -1333,6 +1352,7 @@ pub fn run(
                     amount: resolved.amount_sat,
                     issuance: iso_spec,
                     sequence: input_sequence,
+                    blinding: input_blinding,
                 });
             } else {
                 // Neither `"wallet"` nor `{"utxo_type": "..."}`. This arm used to be
@@ -1456,7 +1476,9 @@ pub fn run(
                 // Pinned blinding factors, if the manifest wrote any. Resolved before the
                 // destination arms because a pin that cannot be honoured (an explicit
                 // output, a covenant output) is an error in every arm, not a warning.
-                let pinned_blinding = match resolve_output_blinding(output, &ctx) {
+                let pinned_blinding = match resolve_blinding(
+                    output.blinding.as_ref(), &format!("output '{}'", output.id), &ctx,
+                ) {
                     Ok(b) => b,
                     Err(e) => {
                         println!("  {} Output '{}' blinding: {e}", style("[error]").red(), output.id);
@@ -1565,33 +1587,47 @@ pub fn run(
                                 break;
                             }
                         };
-                        // Blinding a covenant output needs a blinding key for a receiver that
-                        // does not exist, and a spender able to rebuild the commitments it
-                        // produced. Neither is in place, so this is an error: paying explicit
-                        // instead would produce the right address holding a UTXO the paths
-                        // expecting a commitment cannot spend.
-                        if confidential {
+                        // A covenant address has no owner to receive a blinding key, so the
+                        // wallet's own is used — the same choice upstream Deadcat makes.
+                        // Its only job is encrypting the rangeproof, and the factors a
+                        // covenant reads are published in the manifest anyway; the key
+                        // buys the builder a way to reopen its own output, nothing more.
+                        let blinding_key = if confidential {
+                            let change_addr = match wollet.change(None) {
+                                Ok(a) => a.address().clone(),
+                                Err(e) => {
+                                    println!("  {} Output '{}' cannot derive a blinding key: {e}", style("[error]").red(), output.id);
+                                    collect_outputs_ok = false;
+                                    break;
+                                }
+                            };
+                            match change_addr.blinding_pubkey {
+                                Some(pk) => Some(lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true }),
+                                None => {
+                                    println!(
+                                        "  {} Output '{}' is confidential but the wallet has no blinding key — not a CT descriptor.",
+                                        style("[error]").red(), output.id
+                                    );
+                                    collect_outputs_ok = false;
+                                    break;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        if pinned_blinding.is_some() && blinding_key.is_none() {
                             println!(
-                                "  {} Output '{}' ({type_name}) asks to be confidential, which covenant \
-                                 outputs do not support yet.",
-                                style("[error]").red(), output.id
-                            );
-                            collect_outputs_ok = false;
-                            break;
-                        }
-                        let blinding_key = None;
-                        if pinned_blinding.is_some() {
-                            println!(
-                                "  {} Output '{}' pins blinding factors but is explicit — a covenant \
-                                 output has nothing to blind.",
+                                "  {} Output '{}' pins blinding factors but is explicit — set \
+                                 \"confidential\": true if it is meant to be blinded.",
                                 style("[error]").red(), output.id
                             );
                             collect_outputs_ok = false;
                             break;
                         }
                         println!(
-                            "  {} Output '{}': {} sat {} → covenant ({}, explicit)",
-                            style("+").green(), output.id, style(amount).yellow(), asset_label, type_name
+                            "  {} Output '{}': {} sat {} → covenant ({}, {})",
+                            style("+").green(), output.id, style(amount).yellow(), asset_label, type_name,
+                            if confidential { "confidential" } else { "explicit" }
                         );
                         covenant_output_meta.push(CovenantOutputMeta {
                             utxo_type: type_name.to_string(),
@@ -4031,6 +4067,7 @@ mod tests {
                     amount: 1,
                     issuance: None,
                     sequence: None,
+                    blinding: None,
                 })
                 .collect()
         };
