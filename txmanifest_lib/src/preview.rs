@@ -502,7 +502,7 @@ fn build_net_effect(action: &Action, ctx: &ExecutionContext, fee_sat: Option<u64
 
 /// True when this output is wallet change (`destination: "change"`).
 fn is_change(output: &Output) -> bool {
-    matches!(&output.destination, serde_json::Value::String(s) if s == "change")
+    matches!(&*output.destination, serde_json::Value::String(s) if s == "change")
 }
 
 /// The display symbol for an output's asset (`tL-BTC`, `tUSD`, or a short id).
@@ -528,7 +528,7 @@ fn input_bucket(input: &Input, _ctx: &ExecutionContext) -> String {
 }
 
 fn output_bucket(output: &Output, ctx: &ExecutionContext) -> String {
-    match &output.destination {
+    match &*output.destination {
         serde_json::Value::String(s) if s == "wallet" || s == "change" => WALLET_BUCKET.into(),
         serde_json::Value::String(other) => {
             // A `params.X` / `instance.X` destination resolves to an address.

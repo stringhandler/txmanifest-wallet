@@ -19,8 +19,7 @@
           "MAX_FEE": "MAX_FEE"
         }
       },
-      "asset": "OFFER_ASSET_ID",
-      "confidential": false
+      "asset": "OFFER_ASSET_ID"
     },
     "maker_payout": {
       "description": "The maker's payout address — a p2pk covenant over MAKER_PUB_KEY (see maker_payout.simf for why the payout leg is a covenant and not a plain wallet address). MAKER_SPK is the sha256 of this address's scriptPubKey. Asset-agnostic: it holds ASSET_B after a Settle, or asset A after a Refund, since the program only checks a signature. The 'asset' below is the Settle case, and the Refund output overrides it.",
@@ -31,8 +30,7 @@
           "PUB_KEY": "MAKER_PUB_KEY"
         }
       },
-      "asset": "ASSET_B",
-      "confidential": false
+      "asset": "ASSET_B"
     }
   },
   "contract_templates": {

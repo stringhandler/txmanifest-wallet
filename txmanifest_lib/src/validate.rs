@@ -100,10 +100,32 @@ fn param_types(
 /// hook fires at a fixed point in the flow, with no `.simf` path, network or wallet
 /// threaded through it. Rejecting the rest here — rather than at run time — keeps a
 /// manifest from parsing cleanly and then silently skipping an assignment.
-fn check_hook(report: &mut Report, loc: &str, hook: &crate::manifest::HookBlock) {
+fn check_hook(
+    report: &mut Report,
+    loc: &str,
+    hook: &crate::manifest::HookBlock,
+    action: &Action,
+) {
     use crate::manifest::ParamCompute;
     for (target, spec) in &hook.set {
         let tloc = format!("{loc}.set.{target}");
+
+        // A `params.X` target must name a param this action declares. Undeclared, the
+        // write lands in a slot nothing reads and the failure surfaces far away — as a
+        // covenant address that is merely wrong. The declaration also carries the `type`
+        // that decides whether the value is byte-reversed on its way into a program.
+        if let Some(name) = target.strip_prefix("params.") {
+            let declared = action.params.iter().flatten().any(|(n, _)| n == name);
+            if !declared {
+                report.error(
+                    &tloc,
+                    format!(
+                        "sets 'params.{name}', but this action declares no param '{name}' — \
+                         add it with {{\"type\": …, \"compute\": {{\"type\": \"hook\"}}}}"
+                    ),
+                );
+            }
+        }
         let Some(compute) = spec.as_spec() else { continue }; // bare expression: fine
         match compute {
             ParamCompute::Expr { .. } => {}
@@ -111,9 +133,15 @@ fn check_hook(report: &mut Report, loc: &str, hook: &crate::manifest::HookBlock)
                 tloc,
                 "a hook cannot take a value from the wallet: the value would differ per user, and an `instance.*` field feeds covenant addresses that must be reproducible from the manifest alone",
             ),
-            ParamCompute::Tapleaf { .. } | ParamCompute::SimfFn { .. } => report.error(
+            ParamCompute::Hook {} => report.error(
                 tloc,
-                "only expression values run in a hook; compute a tapleaf or simf_fn as an action param or a create_instance field instead",
+                "`{\"type\": \"hook\"}` declares that a hook SUPPLIES a param; it is not a value a hook can set. Put it on the param declaration and give the hook a real expression",
+            ),
+            ParamCompute::Tapleaf { .. }
+            | ParamCompute::SimfFn { .. }
+            | ParamCompute::ScriptHash { .. } => report.error(
+                tloc,
+                "only expression values run in a hook; compute a tapleaf, simf_fn or script_hash as an action param or a create_instance field instead",
             ),
         }
     }
@@ -123,11 +151,11 @@ fn check_hook(report: &mut Report, loc: &str, hook: &crate::manifest::HookBlock)
 pub fn validate(manifest: &Manifest) -> Report {
     let mut report = Report::default();
 
-    let utxo_types: BTreeSet<&str> = manifest
+    let no_types = std::collections::BTreeMap::new();
+    let utxo_types: &std::collections::BTreeMap<String, crate::manifest::UtxoType> = manifest
         .utxo_types
         .as_ref()
-        .map(|m| m.keys().map(String::as_str).collect())
-        .unwrap_or_default();
+        .unwrap_or(&no_types);
 
     // Collect every action, whether top-level or a class method, tagged with a
     // dot-path location and its bare name (for lifecycle cross-checks).
@@ -184,13 +212,13 @@ pub fn validate(manifest: &Manifest) -> Report {
     let mut referenced: BTreeSet<String> = BTreeSet::new();
 
     for (loc, _bare, action, field_types, in_template) in &actions {
-        check_action(&mut report, &utxo_types, &mut referenced, loc, action, *in_template);
+        check_action(&mut report, utxo_types, &mut referenced, loc, action, *in_template);
         check_ui(&mut report, loc, action, field_types);
     }
 
     // --- Unreferenced UTXO types -----------------------------------------
-    for name in &utxo_types {
-        if !referenced.contains(*name) {
+    for name in utxo_types.keys() {
+        if !referenced.contains(name.as_str()) {
             report.warn(
                 format!("utxo_types.{name}"),
                 "declared but never referenced by any action",
@@ -201,9 +229,158 @@ pub fn validate(manifest: &Manifest) -> Report {
     report
 }
 
+/// Cross-check every covenant input's `witnesses` map against the witness list its `.simf`
+/// program actually declares.
+///
+/// Kept out of [`validate`], which promises not to touch the filesystem or the SimplicityHL
+/// compiler. This one does both: it runs each program's front end (parse + type-check, no
+/// compile params — see [`crate::covenant::program_witness_types`]) and compares names.
+///
+/// The check is the whole point of requiring witnesses to be declared. The runtime already
+/// rejects a mismatch, but only for the one input it is finalizing, at the end of a `run`
+/// that has already selected coins and built a PSET. Here every action is checked at once,
+/// offline, against nothing but the manifest and its `.simf` files.
+///
+/// `base_dir` is the directory holding the manifest file; `script.source` paths are relative
+/// to it.
+pub fn validate_programs(manifest: &Manifest, base_dir: &std::path::Path) -> Report {
+    let mut report = Report::default();
+
+    let no_types = std::collections::BTreeMap::new();
+    let utxo_types = manifest.utxo_types.as_ref().unwrap_or(&no_types);
+    let opts = manifest.compile_opts();
+
+    // Witness list per utxo_type. Several types routinely share one `.simf` (deadcat's four
+    // market states are one program under four tapdata leaves), so parse per source path and
+    // let the types share the result.
+    let mut by_source: std::collections::BTreeMap<std::path::PathBuf, Result<std::collections::BTreeMap<String, String>, String>> =
+        std::collections::BTreeMap::new();
+    let mut by_type: std::collections::BTreeMap<&str, &std::collections::BTreeMap<String, String>> =
+        std::collections::BTreeMap::new();
+
+    for (name, ut) in utxo_types {
+        let Some(script) = &ut.script else { continue };
+        if script.type_ != "simplicity" {
+            continue;
+        }
+        let Some(source) = &script.source else {
+            report.error(
+                format!("utxo_types.{name}.script"),
+                "a simplicity script needs a \"source\" path to its .simf file",
+            );
+            continue;
+        };
+        let path = base_dir.join(source);
+        by_source.entry(path.clone()).or_insert_with(|| {
+            crate::covenant::program_witness_types(&path, &opts).map_err(|e| format!("{e:#}"))
+        });
+    }
+    for (name, ut) in utxo_types {
+        let Some(source) = ut.script.as_ref().and_then(|s| s.source.as_ref()) else { continue };
+        match by_source.get(&base_dir.join(source)) {
+            Some(Ok(types)) => {
+                by_type.insert(name.as_str(), types);
+            }
+            Some(Err(e)) => report.error(
+                format!("utxo_types.{name}.script.source"),
+                format!("cannot read witnesses from '{source}': {e}"),
+            ),
+            None => {}
+        }
+    }
+
+    let mut actions: Vec<(String, &Action)> = manifest
+        .actions
+        .iter()
+        .map(|(name, action)| (format!("actions.{name}"), action))
+        .collect();
+    if let Some(templates) = &manifest.contract_templates {
+        for (cname, cdef) in templates {
+            for (aname, method) in &cdef.actions {
+                actions.push((
+                    format!("contract_templates.{cname}.actions.{aname}"),
+                    method,
+                ));
+            }
+        }
+    }
+
+    for (loc, action) in actions {
+        for input in action.inputs.iter().flatten() {
+            let Some(type_name) = input.utxo_type_name() else { continue };
+            let Some(program) = by_type.get(type_name.as_str()) else { continue };
+            check_witnesses_against_program(
+                &mut report,
+                &format!("{loc}.inputs.{}.witnesses", input.id),
+                &type_name,
+                program,
+                &input.witnesses,
+            );
+        }
+    }
+
+    report
+}
+
+/// Compare one input's declared witnesses against the program's witness list.
+///
+/// Two directions, both of which used to be silent: a name the program declares and the
+/// manifest omits was zero-filled, and a name the manifest declares and the program does not
+/// have was dropped. The first turns a forgotten value into a covenant that fails on chain;
+/// the second turns a typo into the first.
+fn check_witnesses_against_program(
+    report: &mut Report,
+    loc: &str,
+    type_name: &str,
+    program: &std::collections::BTreeMap<String, String>,
+    witnesses: &Option<Value>,
+) {
+    let empty = serde_json::Map::new();
+    let declared = witnesses.as_ref().and_then(Value::as_object).unwrap_or(&empty);
+
+    // `taproot_leaf` selects which leaf to spend; the program never reads it.
+    let is_leaf_selector =
+        |def: &Value| def.get("type").and_then(Value::as_str) == Some("taproot_leaf");
+
+    let missing: Vec<&str> = program
+        .keys()
+        .filter(|name| !declared.contains_key(name.as_str()))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        report.error(
+            loc.to_string(),
+            format!(
+                "does not declare [{}], which '{}' declares as witnesses; give each a value, \
+                 or \"{}\" if this path never reads it",
+                missing
+                    .iter()
+                    .map(|n| format!("{n}: {}", program[*n]))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                type_name,
+                crate::covenant::UNUSED_WITNESS,
+            ),
+        );
+    }
+
+    for (name, def) in declared {
+        if is_leaf_selector(def) || program.contains_key(name) {
+            continue;
+        }
+        report.error(
+            format!("{loc}.{name}"),
+            format!(
+                "'{name}' is not a witness of utxo_type '{type_name}'; it declares [{}]",
+                program.keys().cloned().collect::<Vec<_>>().join(", ")
+            ),
+        );
+    }
+}
+
 fn check_action(
     report: &mut Report,
-    utxo_types: &BTreeSet<&str>,
+    utxo_types: &std::collections::BTreeMap<String, crate::manifest::UtxoType>,
     referenced: &mut BTreeSet<String>,
     loc: &str,
     action: &Action,
@@ -223,17 +400,29 @@ fn check_action(
                     match m["utxo_type"].as_str() {
                         Some(name) => {
                             referenced.insert(name.to_string());
-                            if !utxo_types.contains(name) {
+                            if !utxo_types.contains_key(name) {
                                 report.error(&iloc, format!("references unknown utxo_type '{name}'"));
                             }
+                            check_utxo_site(report, utxo_types, &iloc, name, &input.utxo_source);
                         }
                         None => report.error(&iloc, "utxo_source.utxo_type is not a string"),
                     }
                 }
                 Value::Object(m) if m.contains_key("if") => {} // conditional — not checked
-                other => report.warn(&iloc, format!("unrecognized utxo_source: {other}")),
+                // An error, not a warning: the engine refuses to build with one of these
+                // (it cannot tell where the UTXO comes from), so a warning would
+                // understate a manifest that simply does not run.
+                other => report.error(
+                    &iloc,
+                    format!(
+                        "unrecognized utxo_source: {other} — expected \"wallet\" or \
+                         {{\"utxo_type\": \"<name>\"}}; a bare \"<name>\" string is not a \
+                         utxo_type reference"
+                    ),
+                ),
             }
             check_witnesses(report, &format!("{iloc}.witnesses"), &input.witnesses);
+            check_issuance(report, &format!("{iloc}.issuance"), &input.issuance);
         }
     }
 
@@ -245,7 +434,7 @@ fn check_action(
                 report.error(format!("{loc}.outputs"), format!("duplicate output id '{}'", output.id));
             }
             let oloc = format!("{loc}.outputs.{}", output.id);
-            let requires_amount = check_destination(report, utxo_types, referenced, &oloc, &output.destination);
+            let requires_amount = check_destination(report, utxo_types, referenced, &oloc, &output.destination.0);
             let optional = output.optional.unwrap_or(false);
             if requires_amount && output.amount_sat.is_none() && !optional {
                 report.error(oloc, "missing amount_sat (required for this destination)");
@@ -259,12 +448,34 @@ fn check_action(
         ("on_post_broadcast", &action.on_post_broadcast),
     ] {
         if let Some(hook) = hook {
-            check_hook(report, &format!("{loc}.{field}"), hook);
+            check_hook(report, &format!("{loc}.{field}"), hook, action);
         }
     }
     for input in action.inputs.iter().flatten() {
         if let Some(hook) = &input.on_resolved {
-            check_hook(report, &format!("{loc}.inputs.{}.on_resolved", input.id), hook);
+            check_hook(report, &format!("{loc}.inputs.{}.on_resolved", input.id), hook, action);
+        }
+    }
+
+    // The converse of the check inside `check_hook`: a param that declares
+    // `compute: {"type": "hook"}` is promising that some hook fills it. If none does, the
+    // param is simply never set — and because it is also never prompted, the run reaches
+    // PSET build with a hole in it rather than asking the user for anything.
+    let hook_targets: BTreeSet<&str> = [&action.on_pre_broadcast, &action.on_post_broadcast]
+        .into_iter()
+        .flatten()
+        .chain(action.inputs.iter().flatten().filter_map(|i| i.on_resolved.as_ref()))
+        .flat_map(|h| h.set.keys())
+        .filter_map(|t| t.strip_prefix("params."))
+        .collect();
+    for (name, def) in action.params.iter().flatten() {
+        if def.compute.as_ref().is_some_and(|c| c.is_hook()) && !hook_targets.contains(name.as_str()) {
+            report.error(
+                format!("{loc}.params.{name}"),
+                "declares compute {\"type\": \"hook\"} but no hook in this action sets \
+                 'params.{name}' — it would never be given a value, and it is not prompted for either"
+                    .replace("{name}", name),
+            );
         }
     }
 
@@ -441,11 +652,70 @@ const KNOWN_WITNESS_TYPES: &[&str] = &["simplicityhl", "Signature", "taproot_lea
 
 /// Validate an input's (or action's) `witnesses` map.
 ///
-/// The runtime only feeds a witness to the BitMachine when its definition is an
-/// object carrying a recognized `type`. A bare scalar (e.g. `"FOO": 1`) or an
-/// object missing/with an unknown `type` is silently dropped and zero-filled,
-/// which produces a covenant that fails at `run` time with no hint as to why —
-/// exactly the failure this check exists to surface statically.
+/// Shape only — whether each entry is something the runtime can consume. Whether the *set*
+/// of entries matches the program's witness list is [`validate_programs`], which needs the
+/// `.simf` files to answer.
+///
+/// The runtime feeds a witness to the BitMachine when its definition is an object carrying a
+/// recognized `type`, or the bare string `"unused"`. Anything else — `"FOO": 1`, an object
+/// with no `type` — is rejected at run time, but only for the input being finalized and only
+/// once a `run` has got that far, so it is worth catching here.
+/// Validate an input's `issuance` block.
+///
+/// `entropy` gets the attention: without it a reissuance can only get its entropy from an
+/// outpoint pin in the instance file, and that pin applies to every action sharing the
+/// input id — so it keeps resolving to a UTXO that was spent several actions ago.
+fn check_issuance(report: &mut Report, loc: &str, issuance: &Option<Value>) {
+    let Some(issuance) = issuance else { return };
+    let Some(map) = issuance.as_object() else {
+        report.error(loc.to_string(), "issuance must be an object");
+        return;
+    };
+
+    let kind = map.get("kind").and_then(Value::as_str);
+    match kind {
+        Some("new") | Some("reissue") => {}
+        Some(other) => report.error(
+            loc.to_string(),
+            format!("unknown issuance kind '{other}' (expected \"new\" or \"reissue\")"),
+        ),
+        None => report.error(
+            loc.to_string(),
+            "issuance is missing a string \"kind\" (\"new\" or \"reissue\") and will be ignored at run time",
+        ),
+    }
+
+    for key in ["entropy", "issued_asset"] {
+        let Some(v) = map.get(key) else { continue };
+        if !v.is_string() {
+            report.error(
+                format!("{loc}.{key}"),
+                format!("{key} must be a reference string, e.g. \"instance.YES_ISSUANCE_ENTROPY\""),
+            );
+        }
+        // A new issuance DERIVES its entropy from the outpoint being spent; naming one
+        // would read as pinning a value that is in fact ignored.
+        if kind == Some("new") {
+            report.error(
+                format!("{loc}.{key}"),
+                format!(
+                    "'{key}' applies to a reissuance; a new issuance derives its entropy from \
+                     the outpoint it spends"
+                ),
+            );
+        }
+    }
+
+    if kind == Some("reissue") && !map.contains_key("entropy") {
+        report.warn(
+            loc.to_string(),
+            "no \"entropy\" reference — this reissuance can only run if the instance file \
+             carries issuance_entropy under provided_inputs, which also pins the outpoint \
+             for every action sharing this input id",
+        );
+    }
+}
+
 fn check_witnesses(report: &mut Report, loc: &str, witnesses: &Option<Value>) {
     let Some(witnesses) = witnesses else { return };
     let Some(map) = witnesses.as_object() else {
@@ -454,13 +724,18 @@ fn check_witnesses(report: &mut Report, loc: &str, witnesses: &Option<Value>) {
     };
     for (name, def) in map {
         let wloc = format!("{loc}.{name}");
+        // The one legal scalar: `"NAME": "unused"` declares a witness this path never reads.
+        if def.as_str() == Some(crate::covenant::UNUSED_WITNESS) {
+            continue;
+        }
         let Some(obj) = def.as_object() else {
             report.error(
                 wloc,
                 format!(
                     "witness '{name}' must be an object like \
-                     {{\"type\": \"simplicityhl\", \"simplicity_type\": \"u32\", \"value\": \"1\"}}; \
-                     a bare value is silently ignored and zero-filled at run time"
+                     {{\"type\": \"simplicityhl\", \"simplicity_type\": \"u32\", \"value\": \"1\"}}, \
+                     or the bare string \"{}\" if this path never reads it",
+                    crate::covenant::UNUSED_WITNESS
                 ),
             );
             continue;
@@ -499,12 +774,84 @@ fn check_witnesses(report: &mut Report, loc: &str, witnesses: &Option<Value>) {
     }
 }
 
+/// Check one site's `args` against the `utxo_type` it names.
+///
+/// This is the check the whole params/args boundary exists to make possible. Before it, a
+/// site supplied nothing and the derivation quietly read whatever the running action
+/// happened to have in scope, so a missing value was not an error — it was a different
+/// covenant address, which looks exactly like a correct one.
+fn check_utxo_site(
+    report: &mut Report,
+    utxo_types: &std::collections::BTreeMap<String, crate::manifest::UtxoType>,
+    loc: &str,
+    type_name: &str,
+    site: &Value,
+) {
+    let Some(ut) = utxo_types.get(type_name) else { return };
+    let args = site
+        .get(crate::manifest::SITE_ARGS_KEY)
+        .and_then(Value::as_object);
+
+    let Some(declared) = ut.params.as_ref() else {
+        // `args` against a type with no interface binds nothing at all. Silently ignoring
+        // it would leave the author believing they had set something.
+        if args.is_some() {
+            report.error(
+                loc.to_string(),
+                format!(
+                    "'args' has nothing to bind: utxo_type '{type_name}' declares no `params`"
+                ),
+            );
+        }
+        return;
+    };
+
+    if let Some(args) = args {
+        for name in args.keys() {
+            if !declared.contains_key(name) {
+                report.error(
+                    loc.to_string(),
+                    format!(
+                        "binds '{name}', which utxo_type '{type_name}' does not declare;                          declared: [{}]",
+                        declared.keys().cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                );
+            }
+        }
+        for (name, value) in args {
+            if !value.is_string() {
+                report.error(
+                    loc.to_string(),
+                    format!("arg '{name}' must be a string expression, got {value}"),
+                );
+            }
+        }
+    }
+
+    let missing: Vec<&str> = declared
+        .iter()
+        .filter(|(name, def)| {
+            def.default.is_none() && !args.is_some_and(|a| a.contains_key(name.as_str()))
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !missing.is_empty() {
+        report.error(
+            loc.to_string(),
+            format!(
+                "does not bind [{}] of utxo_type '{type_name}', and they have no default —                  the address cannot be derived here",
+                missing.join(", ")
+            ),
+        );
+    }
+}
+
 /// Validate an output `destination` and return whether it requires an explicit
 /// `amount_sat` (covenant, wallet, address, and script_hash destinations do;
 /// change, op_return/burn, fee, and conditional destinations do not).
 fn check_destination(
     report: &mut Report,
-    utxo_types: &BTreeSet<&str>,
+    utxo_types: &std::collections::BTreeMap<String, crate::manifest::UtxoType>,
     referenced: &mut BTreeSet<String>,
     oloc: &str,
     destination: &Value,
@@ -516,9 +863,10 @@ fn check_destination(
         Value::Object(m) => {
             if let Some(name) = m.get("utxo_type").and_then(Value::as_str) {
                 referenced.insert(name.to_string());
-                if !utxo_types.contains(name) {
+                if !utxo_types.contains_key(name) {
                     report.error(oloc.to_string(), format!("destination references unknown utxo_type '{name}'"));
                 }
+                check_utxo_site(report, utxo_types, oloc, name, destination);
                 true
             } else if m.contains_key("script_hash") {
                 true
@@ -548,6 +896,57 @@ fn check_destination(
 mod tests {
     use super::*;
     use crate::manifest::Manifest;
+
+    /// Every site that names a closed `utxo_type` must bind what that type requires —
+    /// statically, before a run derives an address from a value nobody supplied.
+    #[test]
+    fn sites_must_bind_a_closed_utxo_types_required_params() {
+        let validate_site = |dest: &str| {
+            let manifest = Manifest::from_json_str(&format!(
+                r#"{{ "manifest_version": "1", "protocol": "t",
+                      "actions": {{ "A": {{
+                        "params": {{ "claim": {{ "type": "bytes32" }} }},
+                        "outputs": [ {{ "id": "o0", "amount_sat": "1", "destination": {dest} }} ] }} }},
+                      "utxo_types": {{ "vault": {{
+                        "description": "d",
+                        "params": {{ "STATE": {{ "type": "bytes32", "default": "0xff" }},
+                                     "DEBT":  {{ "type": "u64" }} }},
+                        "script": {{ "type": "simplicity", "source": "./x.simf" }} }} }} }}"#
+            ))
+            .expect("manifest should parse");
+            validate(&manifest)
+        };
+
+        // `DEBT` has no default and is not bound.
+        let report = validate_site(r#"{ "utxo_type": "vault" }"#);
+        let msg = report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n");
+        assert!(!report.is_ok(), "unbound required param must be an error");
+        assert!(msg.contains("DEBT"), "{msg}");
+        assert!(!msg.contains("STATE"), "STATE has a default: {msg}");
+
+        // Bound → clean. `STATE` still takes its default.
+        let report = validate_site(r#"{ "utxo_type": "vault", "args": { "DEBT": "params.claim" } }"#);
+        assert!(report.is_ok(), "{:?}", report.issues);
+
+        // A misspelled binding is an error, not a silent no-op.
+        let report =
+            validate_site(r#"{ "utxo_type": "vault", "args": { "DEBT": "1", "STAT": "0x00" } }"#);
+        let msg = report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n");
+        assert!(msg.contains("STAT"), "{msg}");
+
+        // `args` against a type with no interface binds nothing — say so.
+        let manifest = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t",
+                 "actions": { "A": { "outputs": [ { "id": "o0", "amount_sat": "1",
+                   "destination": { "utxo_type": "plain", "args": { "X": "1" } } } ] } },
+                 "utxo_types": { "plain": { "description": "d",
+                   "script": { "type": "simplicity", "source": "./x.simf" } } } }"#,
+        )
+        .unwrap();
+        let report = validate(&manifest);
+        let msg = report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n");
+        assert!(msg.contains("declares no `params`"), "{msg}");
+    }
 
     /// Build a manifest with a single action whose one wallet input carries the
     /// given `witnesses` JSON, then validate it.
@@ -596,6 +995,112 @@ mod tests {
             "SPEND_PATH": { "type": "taproot_leaf", "source": { "type": "formula", "expr": "leaf" } }
         }));
         assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn unused_is_the_one_legal_bare_scalar() {
+        let report = validate_with_input_witnesses(serde_json::json!({
+            "ORACLE_SIGNATURE": "unused"
+        }));
+        assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn a_misspelled_unused_is_still_a_bare_scalar() {
+        let report = validate_with_input_witnesses(serde_json::json!({
+            "ORACLE_SIGNATURE": "unusued"
+        }));
+        assert!(has_error_at(&report, "actions.A.inputs.in0.witnesses.ORACLE_SIGNATURE"));
+    }
+
+    /// The witness list a program declares, in the shape `validate_programs` reads it
+    /// off a compiled `.simf`.
+    fn program(entries: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(n, t)| ((*n).to_string(), (*t).to_string()))
+            .collect()
+    }
+
+    fn cross_check(program_witnesses: &[(&str, &str)], declared: Value) -> Report {
+        let mut report = Report::default();
+        check_witnesses_against_program(
+            &mut report,
+            "loc",
+            "vault",
+            &program(program_witnesses),
+            &Some(declared),
+        );
+        report
+    }
+
+    #[test]
+    fn a_witness_the_program_declares_must_appear() {
+        let report = cross_check(
+            &[("PATH", "Either<(), ()>"), ("SIGNATURE", "[u8; 64]")],
+            serde_json::json!({
+                "PATH": { "type": "simplicityhl", "value": "Left(())" }
+            }),
+        );
+        assert!(has_error_at(&report, "loc"), "got: {:?}", report.issues);
+        assert!(
+            report.issues[0].message.contains("SIGNATURE"),
+            "the message should name the missing witness: {}",
+            report.issues[0].message
+        );
+    }
+
+    #[test]
+    fn unused_satisfies_the_cross_check() {
+        let report = cross_check(
+            &[("PATH", "Either<(), ()>"), ("SIGNATURE", "[u8; 64]")],
+            serde_json::json!({
+                "PATH": { "type": "simplicityhl", "value": "Left(())" },
+                "SIGNATURE": "unused"
+            }),
+        );
+        assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn a_witness_the_program_does_not_have_is_flagged() {
+        // The half that used to be silent in the other direction: `witness_types.get()`
+        // returned None and the entry was dropped, so a typo read as an omission.
+        let report = cross_check(
+            &[("PATH", "Either<(), ()>")],
+            serde_json::json!({
+                "PATH": { "type": "simplicityhl", "value": "Left(())" },
+                "PTAH": { "type": "simplicityhl", "value": "Left(())" }
+            }),
+        );
+        assert!(has_error_at(&report, "loc.PTAH"), "got: {:?}", report.issues);
+    }
+
+    #[test]
+    fn taproot_leaf_is_not_matched_against_the_program() {
+        // `SPEND_PATH` picks which tap leaf to spend. It lives in the same map but the
+        // program never reads it, so it is exempt from both directions of the check.
+        let report = cross_check(
+            &[("PATH", "Either<(), ()>")],
+            serde_json::json!({
+                "PATH": { "type": "simplicityhl", "value": "Left(())" },
+                "SPEND_PATH": { "type": "taproot_leaf", "source": { "type": "formula", "expr": "leaf" } }
+            }),
+        );
+        assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn an_input_with_no_witnesses_at_all_is_flagged() {
+        let mut report = Report::default();
+        check_witnesses_against_program(
+            &mut report,
+            "loc",
+            "vault",
+            &program(&[("PATH", "Either<(), ()>")]),
+            &None,
+        );
+        assert!(has_error_at(&report, "loc"), "got: {:?}", report.issues);
     }
 
     #[test]
@@ -756,12 +1261,22 @@ mod tests {
     // -- hooks -------------------------------------------------------------
 
     /// Build a manifest whose single action carries `on_pre_broadcast.set`.
+    ///
+    /// `B` is declared as a hook param so these fixtures exercise the *value* rules
+    /// without tripping the separate target-must-be-declared rule.
     fn validate_with_hook(set: Value) -> Report {
+        validate_with_hook_and_params(
+            set,
+            serde_json::json!({ "B": { "type": "u64", "compute": { "type": "hook" } } }),
+        )
+    }
+
+    fn validate_with_hook_and_params(set: Value, params: Value) -> Report {
         let manifest: Manifest = Manifest::from_json_str(
             &serde_json::json!({
                 "manifest_version": "1",
                 "protocol": "test",
-                "actions": { "A": { "on_pre_broadcast": { "set": set } } }
+                "actions": { "A": { "params": params, "on_pre_broadcast": { "set": set } } }
             })
             .to_string(),
         )
@@ -778,6 +1293,66 @@ mod tests {
             "params.B": { "type": "expr", "expr": "params.X + 1" }
         }));
         assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn hook_target_must_name_a_declared_param() {
+        // The typo hole this rule exists to close: before it, `params.TYPO` was accepted,
+        // filled a slot nobody read, and surfaced later as a wrong covenant address.
+        let report = validate_with_hook_and_params(
+            serde_json::json!({ "params.TYPO": "params.X + 1" }),
+            serde_json::json!({ "REAL": { "type": "u64", "compute": { "type": "hook" } } }),
+        );
+        assert!(
+            errors_at(&report, "actions.A.on_pre_broadcast.set.params.TYPO")
+                .iter()
+                .any(|m| m.contains("declares no param")),
+            "expected an undeclared-target error, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn hook_param_with_no_hook_setting_it_is_an_error() {
+        // The converse: declared as hook-supplied, but nothing supplies it. Since a hook
+        // param is never prompted either, this reaches PSET build with a hole in it.
+        let report = validate_with_hook_and_params(
+            serde_json::json!({ "instance.A": "1 + 1" }),
+            serde_json::json!({ "ORPHAN": { "type": "u64", "compute": { "type": "hook" } } }),
+        );
+        assert!(
+            errors_at(&report, "actions.A.params.ORPHAN")
+                .iter()
+                .any(|m| m.contains("no hook in this action sets")),
+            "expected an orphaned-hook-param error, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn a_declared_hook_param_that_is_set_passes() {
+        let report = validate_with_hook_and_params(
+            serde_json::json!({ "params.FILLED": "params.X + 1" }),
+            serde_json::json!({ "FILLED": { "type": "u64", "compute": { "type": "hook" } } }),
+        );
+        assert_eq!(report.errors(), 0, "unexpected errors: {:?}", report.issues);
+    }
+
+    #[test]
+    fn hook_compute_is_not_a_value_a_hook_can_set() {
+        // `{"type": "hook"}` declares where a value comes FROM; it is meaningless as the
+        // value itself, and would otherwise be silently skipped at run time.
+        let report = validate_with_hook_and_params(
+            serde_json::json!({ "params.B": { "type": "hook" } }),
+            serde_json::json!({ "B": { "type": "u64", "compute": { "type": "hook" } } }),
+        );
+        assert!(
+            errors_at(&report, "actions.A.on_pre_broadcast.set.params.B")
+                .iter()
+                .any(|m| m.contains("declares that a hook SUPPLIES")),
+            "expected a hook-as-value rejection, got: {:?}",
+            report.issues
+        );
     }
 
     #[test]

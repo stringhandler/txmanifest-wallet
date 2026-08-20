@@ -75,6 +75,157 @@ fn resolve_input_sequence(inp: &Input, ctx: &ExecutionContext) -> Result<Option<
     Ok(Some(seq))
 }
 
+/// Read a pinned outpoint's explicit amount and asset from the chain.
+///
+/// Best-effort by design: this is one network round-trip in the middle of input
+/// resolution, and a run that is offline, pointed at a lagging server, or spending a
+/// still-unconfirmed output must keep working from the manifest's declared values. So a
+/// failure warns and returns `None` rather than aborting — but when the chain does answer,
+/// it wins over everything else, because it is the only source that cannot be wrong.
+fn fetch_onchain_txout(
+    txid: &str,
+    vout: u32,
+    network: ElementsNetwork,
+) -> Option<(u64, String)> {
+    use crate::backend::{Backend, BackendKind};
+
+    let parsed = lwk_wollet::elements::Txid::from_str(txid).ok()?;
+    let cfg = crate::config::load();
+    let kind = cfg.backend_kind();
+    let url = match kind {
+        BackendKind::Esplora => cfg.esplora_url().to_string(),
+        BackendKind::Electrum => cfg.electrum_url().to_string(),
+    };
+
+    let result = Backend::connect(kind, &url, network)
+        .and_then(|backend| backend.fetch_explicit_txout(parsed, vout));
+    match result {
+        Ok(Some((amount, asset))) => Some((amount, asset.to_string())),
+        Ok(None) => {
+            println!(
+                "  {} {txid}:{vout} is confidential — falling back to the declared amount and asset.",
+                style("[warn]").yellow()
+            );
+            None
+        }
+        Err(e) => {
+            println!(
+                "  {} Cannot read {txid}:{vout} from the chain ({e}) — falling back to the declared amount and asset.",
+                style("[warn]").yellow()
+            );
+            None
+        }
+    }
+}
+
+/// The blinding key for an address destination, honouring the output's `confidential` flag.
+///
+/// A confidential address carries its own blinding key, and using it is the right default.
+/// But `confidential: false` has to win, because a covenant that reads the output amount
+/// (`unwrap_right` on `Amount1`, the usual way to read a payout) can only do so when the
+/// output is explicit — and the payee's address is usually confidential. Ignoring the flag
+/// here, as this arm did, made that combination unspendable: the covenant hits the pruned
+/// confidential branch and fails with `Execution reached a pruned branch`.
+///
+/// Stripping the blinding key does not change the scriptPubKey, so a covenant committed to
+/// `sha256(spk)` still matches the output — see `wallet::script_hash_of_address`.
+fn address_blinding_key(
+    output: &crate::manifest::Output,
+    addr: &lwk_wollet::elements::Address,
+) -> Option<lwk_wollet::elements::bitcoin::PublicKey> {
+    if output.confidential == Some(false) {
+        return None;
+    }
+    addr.blinding_pubkey
+        .map(|pk| lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true })
+}
+
+/// Resolve an output's pinned blinding factors, if it declared any.
+///
+/// The manifest writes scalars; the builder wants `secp` tweaks, and a factor that is not
+/// a valid scalar (zero, or ≥ the curve order) has to fail here rather than deep inside
+/// the blinder, where the message would name neither the output nor the field.
+fn resolve_blinding(
+    spec: Option<&crate::manifest::BlindingFactors>,
+    leg: &str,
+    ctx: &ExecutionContext,
+) -> Result<Option<pset_builder::PinnedBlinding>> {
+    use lwk_wollet::elements::confidential::{AssetBlindingFactor, ValueBlindingFactor};
+
+    let Some(spec) = spec else { return Ok(None) };
+    let asset_bf = match spec.asset_bf.as_ref() {
+        None => None,
+        Some(v) => {
+            let bytes = eval::eval_scalar32(v, ctx)
+                .with_context(|| format!("{leg} asset_bf"))?;
+            Some(AssetBlindingFactor::from_slice(&bytes).map_err(|e| {
+                anyhow::anyhow!("{leg} asset_bf is not a valid scalar: {e}")
+            })?)
+        }
+    };
+    let value_bf = match spec.value_bf.as_ref() {
+        None => None,
+        Some(v) => {
+            let bytes = eval::eval_scalar32(v, ctx)
+                .with_context(|| format!("{leg} value_bf"))?;
+            Some(ValueBlindingFactor::from_slice(&bytes).map_err(|e| {
+                anyhow::anyhow!("{leg} value_bf is not a valid scalar: {e}")
+            })?)
+        }
+    };
+    if asset_bf.is_none() && value_bf.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(pset_builder::PinnedBlinding { asset_bf, value_bf }))
+}
+
+/// Resolve a `script_hash` compute: `address` is a reference or a literal address, and the
+/// result is `sha256(scriptPubKey)` — what the covenant's `output_script_hash` jet returns.
+fn resolve_address_script_hash(address_ref: &str, ctx: &ExecutionContext) -> Result<String> {
+    let address = eval::eval_destination_str(address_ref, ctx)
+        .unwrap_or_else(|| address_ref.trim().to_string());
+    crate::wallet::script_hash_of_address(&address)
+}
+
+/// The ids of declared inputs that never made it into the PSET.
+///
+/// A dropped input is the most dangerous failure this engine has, because it is not a
+/// failure anywhere the operator can see: resolution, the preview, the net-effect
+/// summary and the state file all read the manifest's legs, while only the PSET reads
+/// this list. A run that loses one still builds, signs and broadcasts — it just spends
+/// different UTXOs than the manifest describes, leaving the covenant unspent while its
+/// outputs are recreated out of wallet funds.
+///
+/// So the collection code failing loudly per branch is not enough: this asserts the
+/// result, independent of how many ways there are to miss.
+fn inputs_missing_from_pset<'a>(
+    declared: &'a [crate::manifest::Input],
+    collected: &[pset_builder::PsetInput],
+) -> Vec<&'a str> {
+    declared
+        .iter()
+        .map(|inp| inp.id.as_str())
+        .filter(|id| !collected.iter().any(|got| got.input_id() == *id))
+        .collect()
+}
+
+/// True when an output declares wallet change (`destination: "change"`).
+fn is_change_output(output: &crate::manifest::Output) -> bool {
+    output.destination.as_str() == Some("change")
+}
+
+/// Whether an output that declares no `amount_sat` is skipped outright.
+///
+/// Only `optional` outputs are. Change is the trap this exists to name: a
+/// `destination: "change"` output has no `amount_sat` *by design* — it takes whatever is
+/// left, which is why the validator does not require one — but skipping it drops its
+/// asset from the set the action permits change in, and the build then rejects the
+/// leftover with "this action does not permit L-BTC change" for a manifest that declared
+/// exactly that.
+fn skips_when_amount_absent(output: &crate::manifest::Output) -> bool {
+    !is_change_output(output) && output.optional.unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // Run output
 // ---------------------------------------------------------------------------
@@ -181,10 +332,11 @@ pub fn run(
     let manifest: Manifest = Manifest::from_json_str(&raw).with_context(|| {
         format!("Failed to parse manifest file: {}", manifest_file.display())
     })?;
-    // Whether covenants compile with SimplicityHL debug symbols (affects every CMR/address).
-    // Sourced from the manifest so interop targets (e.g. simplicity-lending) can be matched
-    // without hardcoding; defaults to false.
-    let include_debug_symbols = manifest.include_debug_symbols();
+    // How every `.simf` in this run compiles: debug symbols (which affect every CMR and
+    // address, so interop targets like simplicity-lending can be matched without
+    // hardcoding) and any unstable `-Z` features the programs need. Sourced from the
+    // manifest's `simplicity_hl` block once, then passed to every compile site.
+    let compile_opts = manifest.compile_opts();
     // INPUT paths (instance load, state load) are NEVER auto-discovered: a run only
     // loads an instance/state if one is passed explicitly (`--instance` / `--state`).
     // This keeps a stale on-disk file from silently overriding `--params` and never
@@ -364,6 +516,9 @@ pub fn run(
         if !params.is_empty() {
             println!();
             println!("  {}", style("Action params:").bold());
+            // `script_hash` params whose address was not resolvable on the first pass —
+            // typically because the address is a param prompted later in the map.
+            let mut deferred_script_hashes: Vec<(String, String)> = Vec::new();
             for (name, def) in params {
                 if let Some(expr) = def.compute.as_ref().and_then(|c| c.as_expr()) {
                     println!(
@@ -373,6 +528,21 @@ pub fn run(
                         style(expr).yellow()
                     );
                 }
+                // Hook params are filled by an on_resolved / on_pre_broadcast block later in
+                // the run. Nothing to prompt for and nothing to evaluate yet — but a
+                // --params override still wins, so a value can be pinned for a dry run.
+                if def.compute.as_ref().is_some_and(|c| c.is_hook())
+                    && overrides.get(name.as_str()).is_none()
+                {
+                    println!(
+                        "  {} {}  {}",
+                        style("○").dim(),
+                        style(name.as_str()).cyan(),
+                        style("[will be set by a hook]").dim(),
+                    );
+                    continue;
+                }
+
                 // SimfFn params are computed after inputs resolve (Step 3a). Skip here unless
                 // an explicit override is provided via --params.
                 if def.compute.as_ref().is_some_and(|c| c.is_simf_fn())
@@ -431,6 +601,28 @@ pub fn run(
                         style("[from --params]").dim(),
                     );
                     ov.to_string()
+                } else if let Some(address_ref) =
+                    def.compute.as_ref().and_then(|c| c.as_script_hash_address())
+                {
+                    // The address may be a param declared later in the map, so a failure to
+                    // resolve here is not final — collect it and retry once the loop ends,
+                    // rather than making the value depend on alphabetical order.
+                    match resolve_address_script_hash(address_ref, &ctx) {
+                        Ok(hash) => {
+                            println!(
+                                "  {} {} = {}  {}",
+                                style("✓").green(),
+                                style(name).bold().cyan(),
+                                style(&hash).yellow(),
+                                style(format!("[script_hash of {address_ref}]")).dim(),
+                            );
+                            hash
+                        }
+                        Err(_) => {
+                            deferred_script_hashes.push((name.clone(), address_ref.to_string()));
+                            continue;
+                        }
+                    }
                 } else if let Some(expr) = def.compute.as_ref().and_then(|c| c.as_expr()) {
                     let computed = eval::eval_expr_str(expr, &ctx)?;
                     println!(
@@ -450,6 +642,23 @@ pub fn run(
                 // (step 3b tapleaf derives) see the fresh value, not a stale one
                 // that may have been loaded from a previous instance file.
                 ctx.set_compile_param(name, value);
+            }
+
+            // Second pass for the deferred `script_hash` params, now that everything they
+            // could name has been prompted or computed.
+            for (name, address_ref) in deferred_script_hashes {
+                let hash = resolve_address_script_hash(&address_ref, &ctx).with_context(|| {
+                    format!("param '{name}' computes script_hash of '{address_ref}'")
+                })?;
+                println!(
+                    "  {} {} = {}  {}",
+                    style("✓").green(),
+                    style(&name).bold().cyan(),
+                    style(&hash).yellow(),
+                    style(format!("[script_hash of {address_ref}]")).dim(),
+                );
+                ctx.set_param(&name, hash.clone());
+                ctx.set_compile_param(&name, hash);
             }
         }
     }
@@ -474,14 +683,27 @@ pub fn run(
                 let state_utxo = contract_state.as_ref().and_then(|s| {
                     s.utxos.iter().find(|u| u.txid == ov.txid && u.vout == ov.vout)
                 });
-                let asset = ov
-                    .asset
-                    .clone()
+                // The UTXO itself is the authority on what it holds. An outpoint is a
+                // fact about the chain, so reading the amount and asset off it beats any
+                // number the manifest or the operator supplies — those can be wrong, and
+                // a wrong amount is the value the sighash commits to.
+                let onchain = fetch_onchain_txout(
+                    &ov.txid,
+                    ov.vout,
+                    loaded_wallet.as_ref().map(wallet::elements_network)
+                        .unwrap_or(ElementsNetwork::LiquidTestnet),
+                );
+                let asset = onchain
+                    .as_ref()
+                    .map(|(_, asset)| asset.clone())
+                    .or_else(|| ov.asset.clone())
                     .or_else(|| state_utxo.map(|u| u.asset.clone()))
                     .or_else(|| input.asset.as_ref().and_then(|v| eval::eval_asset_label(v, &ctx).ok()))
                     .unwrap_or_else(|| "lbtc".to_string());
-                let amount_sat = ov
-                    .amount_sat
+                let amount_sat = onchain
+                    .as_ref()
+                    .map(|(amount, _)| *amount)
+                    .or(ov.amount_sat)
                     .or_else(|| state_utxo.map(|u| u.amount_sat))
                     .or_else(|| input.amount_sat.as_ref().and_then(|v| eval::eval_amount(v, &ctx).ok()))
                     .unwrap_or(0);
@@ -493,7 +715,7 @@ pub fn run(
                     ov.vout,
                     style(amount_sat).yellow(),
                     style(&asset).dim(),
-                    style("[override]").cyan(),
+                    style(if onchain.is_some() { "[override, on-chain]" } else { "[override]" }).cyan(),
                 );
                 ResolvedInput {
                     id: input.id.clone(),
@@ -603,21 +825,21 @@ pub fn run(
                         &resolved.txid, resolved.vout,
                     ) {
                         ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
+                        ctx.set_input_attr(&inp.id, "issued_asset", asset_id.to_string());
                         ctx.set_input_attr(&inp.id, "reissuance_token", token_id.to_string());
                     }
                 }
             }
             Some("reissue") => {
-                let (rt_asset, entropy_hex_opt) = match ctx.get_input(&inp.id) {
-                    Some(r) => (r.asset.clone(), r.issuance_entropy.clone()),
+                let rt_asset = match ctx.get_input(&inp.id) {
+                    Some(r) => r.asset.clone(),
                     None => continue,
                 };
                 ctx.set_input_attr(&inp.id, "reissuance_token", &rt_asset);
-                if let Some(entropy_hex) = entropy_hex_opt {
-                    if let Ok(entropy) = pset_builder::decode_entropy_hex(&entropy_hex) {
-                        if let Ok(asset_id) = pset_builder::compute_asset_from_entropy(&entropy) {
-                            ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
-                        }
+                if let Ok(Some(entropy)) = resolve_issuance_entropy(inp, &ctx) {
+                    if let Ok(asset_id) = pset_builder::compute_asset_from_entropy(&entropy) {
+                        ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
+                        ctx.set_input_attr(&inp.id, "issued_asset", asset_id.to_string());
                     }
                 }
             }
@@ -707,6 +929,7 @@ pub fn run(
                 &cp_map,
                 &compile_param_type_hints,
                 input_hex,
+                &compile_opts,
             ) {
                 Ok(result_hex) => {
                     println!(
@@ -849,7 +1072,7 @@ pub fn run(
                 hints
             };
             let pre_fields = eval_create_instance_fields(
-                ci, &ctx, manifest_file, &pre_hints, net_for_hash, false, include_debug_symbols,
+                ci, &ctx, manifest_file, &pre_hints, net_for_hash, false, &compile_opts,
             );
             for (name, val) in pre_fields {
                 ctx.set_compile_param(&name, val);
@@ -898,21 +1121,21 @@ pub fn run(
                             &resolved.txid, resolved.vout
                         ) {
                             ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
+                            ctx.set_input_attr(&inp.id, "issued_asset", asset_id.to_string());
                             ctx.set_input_attr(&inp.id, "reissuance_token", token_id.to_string());
                         }
                     }
                 }
                 Some("reissue") => {
-                    let (rt_asset, entropy_hex_opt) = match ctx.get_input(&inp.id) {
-                        Some(r) => (r.asset.clone(), r.issuance_entropy.clone()),
+                    let rt_asset = match ctx.get_input(&inp.id) {
+                        Some(r) => r.asset.clone(),
                         None => continue,
                     };
                     ctx.set_input_attr(&inp.id, "reissuance_token", &rt_asset);
-                    if let Some(entropy_hex) = entropy_hex_opt {
-                        if let Ok(entropy) = pset_builder::decode_entropy_hex(&entropy_hex) {
-                            if let Ok(asset_id) = pset_builder::compute_asset_from_entropy(&entropy) {
-                                ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
-                            }
+                    if let Ok(Some(entropy)) = resolve_issuance_entropy(inp, &ctx) {
+                        if let Ok(asset_id) = pset_builder::compute_asset_from_entropy(&entropy) {
+                            ctx.set_input_attr(&inp.id, "asset", asset_id.to_string());
+                            ctx.set_input_attr(&inp.id, "issued_asset", asset_id.to_string());
                         }
                     }
                 }
@@ -956,25 +1179,24 @@ pub fn run(
                         }
                         None => 0,
                     };
-                    let entropy = if let Some(resolved) = ctx.get_input(&inp.id) {
-                        if let Some(hex) = &resolved.issuance_entropy.clone() {
-                            match pset_builder::decode_entropy_hex(hex) {
-                                Ok(e) => e,
-                                Err(err) => {
-                                    println!("  {} Input '{}' entropy decode failed: {err}", style("[error]").red(), inp.id);
-                                    collect_inputs_ok = false;
-                                    break;
-                                }
-                            }
-                        } else {
-                            println!("  {} Input '{}' is a reissuance but has no issuance_entropy — add it to the instance file.", style("[error]").red(), inp.id);
+                    let entropy = match resolve_issuance_entropy(inp, &ctx) {
+                        Ok(Some(e)) => e,
+                        Ok(None) => {
+                            println!(
+                                "  {} Input '{}' is a reissuance but no entropy was found. Give the 
+         issuance an \"entropy\" reference (e.g. \"instance.YES_ISSUANCE_ENTROPY\",
+         captured by the constructor as \"$inputs.<id>.issuance_entropy\"), or put
+         issuance_entropy on this input in the instance file's provided_inputs.",
+                                style("[error]").red(), inp.id
+                            );
                             collect_inputs_ok = false;
                             break;
                         }
-                    } else {
-                        println!("  {} Input '{}' not resolved", style("[error]").red(), inp.id);
-                        collect_inputs_ok = false;
-                        break;
+                        Err(e) => {
+                            println!("  {} Input '{}': {e}", style("[error]").red(), inp.id);
+                            collect_inputs_ok = false;
+                            break;
+                        }
                     };
                     Some(pset_builder::IssuanceKind::Reissue { asset_amount, entropy })
                 }
@@ -1024,6 +1246,7 @@ pub fn run(
                                 amount: ext.unblinded.value,
                                 issuance: iso_spec,
                                 sequence: input_sequence,
+                                blinding: None,
                             });
                         } else {
                             println!(
@@ -1044,26 +1267,24 @@ pub fn run(
                         break;
                     }
                 };
-                let leaf_payloads = match inp_ut.resolve_extra_leaf_payloads(&ctx) {
-                    Ok(p) => p,
+                let site = match resolve_utxo_site(
+                    inp_ut, Some(&inp.utxo_source), &compile_params_map,
+                    &compile_param_type_hints, action, &ctx,
+                ) {
+                    Ok(s) => s,
                     Err(e) => {
-                        println!("  {} {e}", style("[error]").red());
+                        println!("  {} Input '{}' ({type_name}): {e}", style("[error]").red(), inp.id);
                         collect_inputs_ok = false;
                         break;
                     }
                 };
+                let (leaf_payloads, inp_params, inp_hints) =
+                    (site.leaf_payloads, site.compile_params, site.type_hints);
                 let inp_simf_path = inp_ut.script.as_ref()
                     .and_then(|s| s.source.as_deref())
                     .map(|src| manifest_file.parent().unwrap_or(std::path::Path::new(".")).join(src))
                     .unwrap_or_else(|| simf_path.clone());
-                let (inp_params, inp_hints) = apply_utxo_compile_params(&compile_params_map, &compile_param_type_hints, inp_ut);
-                // Per-input `utxo_source.compile_params` overrides (resolved against action
-                // params), mirroring the output `destination.compile_params` form.
-                let (inp_params, inp_hints) = apply_site_compile_param_overrides(
-                    inp_params, inp_hints, inp.utxo_source.get("compile_params"),
-                    action, &compile_param_type_hints, &ctx,
-                );
-                let script_pubkey = match pset_builder::covenant_script_pubkey(&inp_simf_path, &inp_params, &inp_hints, &leaf_payloads, net, include_debug_symbols) {
+                let script_pubkey = match pset_builder::covenant_script_pubkey(&inp_simf_path, &inp_params, &inp_hints, &leaf_payloads, net, &compile_opts) {
                     Ok(s) => s,
                     Err(e) => {
                         println!("  {} Covenant address failed (input '{}'):", style("[error]").red(), inp.id);
@@ -1082,7 +1303,12 @@ pub fn run(
                         break;
                     }
                 };
-                let asset_id = match lwk_wollet::elements::AssetId::from_str(&resolved.asset) {
+                // A resolved input's `asset` is a *label*, not necessarily a hex id: it comes
+                // from `eval_asset_label` and falls back to the literal "lbtc" (see input
+                // resolution above). Outputs have always gone through `resolve_asset_id`;
+                // this branch parsed the raw string, so a covenant input on L-BTC —
+                // `"asset": "lbtc"`, the obvious spelling — died with "failed to parse hex".
+                let asset_id = match resolve_asset_id(&resolved.asset, net) {
                     Ok(a) => a,
                     Err(e) => {
                         println!("  {} Input '{}' asset parse failed: {e}", style("[error]").red(), inp.id);
@@ -1099,6 +1325,25 @@ pub fn run(
                     }
                 };
                 let outpoint = lwk_wollet::elements::OutPoint::new(txid, resolved.vout);
+                // The factors this UTXO was blinded with, if it is confidential. Stated,
+                // not chosen: they describe a UTXO that already exists, and the prevout
+                // the sighash and the introspection jets see is rebuilt from them.
+                let input_blinding = match resolve_blinding(
+                    inp.blinding.as_ref(), &format!("input '{}'", inp.id), &ctx,
+                ) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        println!("  {} Input '{}' blinding: {e}", style("[error]").red(), inp.id);
+                        collect_inputs_ok = false;
+                        break;
+                    }
+                };
+                if input_blinding.is_some() {
+                    println!(
+                        "  {} Input '{}' spends a confidential UTXO — prevout rebuilt from the declared factors.",
+                        style("·").dim(), inp.id
+                    );
+                }
                 pset_inputs.push(pset_builder::PsetInput::Covenant {
                     input_id: inp.id.clone(),
                     outpoint,
@@ -1107,12 +1352,50 @@ pub fn run(
                     amount: resolved.amount_sat,
                     issuance: iso_spec,
                     sequence: input_sequence,
+                    blinding: input_blinding,
                 });
+            } else {
+                // Neither `"wallet"` nor `{"utxo_type": "..."}`. This arm used to be
+                // absent, so an unrecognized source fell through and the input was simply
+                // never added — see `inputs_missing_from_pset` for why that is the worst
+                // failure mode available.
+                println!(
+                    "  {} Input '{}' has an unrecognized utxo_source: {}",
+                    style("[error]").red(), inp.id, inp.utxo_source
+                );
+                println!(
+                    "    Expected \"wallet\" or {{\"utxo_type\": \"<name>\"}}. A bare \"<name>\" \
+                     string is not a utxo_type reference."
+                );
+                collect_inputs_ok = false;
+                break;
+            }
+        }
+
+        // Backstop: every input the action declares must have reached the PSET. The
+        // branches above each fail loudly, but this is the invariant that actually
+        // matters, and it must not depend on having enumerated every way to miss it.
+        if collect_inputs_ok {
+            let declared = action.inputs.as_deref().unwrap_or_default();
+            let missing = inputs_missing_from_pset(declared, &pset_inputs);
+            if !missing.is_empty() {
+                anyhow::bail!(
+                    "Input(s) [{}] were declared by action '{action_name}' and resolved, but did \
+                     not reach the transaction.\n\
+                     Refusing to build: every other step (preview, net effect, state) reports the \
+                     action as declared, so a transaction built without them would spend and \
+                     create the wrong UTXOs while appearing correct.",
+                    missing.join(", ")
+                );
             }
         }
 
         // ---- Collect PSET outputs ----
         let mut pset_outputs: Vec<pset_builder::PsetOutputSpec> = Vec::new();
+    // Assets the action declares a `"change"` output for. Anything left over in an asset
+    // absent from this set is an error, not an output the engine invents.
+    let mut change_assets: std::collections::HashSet<lwk_wollet::elements::AssetId> =
+        std::collections::HashSet::new();
         // (output id, amount formula) for each pushed output, aligned with pset_outputs
         // by index, so amounts referencing the `fee` keyword can be re-evaluated once
         // the fee is estimated below (and the covenant state metadata kept in sync).
@@ -1126,13 +1409,17 @@ pub fn run(
         if collect_inputs_ok {
             for output in action.outputs.as_deref().unwrap_or_default() {
                 let push_start = pset_outputs.len();
-                let is_change = output.destination.as_str() == Some("change");
+                let is_change = is_change_output(output);
                 let dest_type = output.destination.get("type").and_then(|v| v.as_str());
                 let is_op_return = matches!(dest_type, Some("op_return") | Some("burn"));
                 let amount = match &output.amount_sat {
                     None => {
-                        if output.optional.unwrap_or(false) || is_change { continue; }
-                        if is_op_return { 0u64 } else {
+                        if skips_when_amount_absent(output) { continue; }
+                        // Change and OP_RETURN legs carry no declared amount. The
+                        // placeholder is never spent for change — the destination arm
+                        // below registers the asset and pushes no PSET output — and 0 is
+                        // the real amount for OP_RETURN.
+                        if is_change || is_op_return { 0u64 } else {
                             anyhow::bail!("Output '{}' has no amount_sat and is not optional.", output.id);
                         }
                     }
@@ -1150,7 +1437,9 @@ pub fn run(
                     },
                 };
 
-                if output.optional.unwrap_or(false) && amount == 0 {
+                // `!is_change`: the placeholder amount above is 0 by construction, and even
+                // an optional change output must still register its asset.
+                if output.optional.unwrap_or(false) && amount == 0 && !is_change {
                     println!("  {} Output '{}' amount=0, optional — skipping.", style("·").dim(), output.id);
                     continue;
                 }
@@ -1184,9 +1473,35 @@ pub fn run(
                     }
                 };
 
-                match &output.destination {
+                // Pinned blinding factors, if the manifest wrote any. Resolved before the
+                // destination arms because a pin that cannot be honoured (an explicit
+                // output, a covenant output) is an error in every arm, not a warning.
+                let pinned_blinding = match resolve_blinding(
+                    output.blinding.as_ref(), &format!("output '{}'", output.id), &ctx,
+                ) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        println!("  {} Output '{}' blinding: {e}", style("[error]").red(), output.id);
+                        collect_outputs_ok = false;
+                        break;
+                    }
+                };
+
+                match &*output.destination {
                     serde_json::Value::String(dest) if dest == "change" => {
+                        if pinned_blinding.is_some() {
+                            println!(
+                                "  {} Output '{}' pins blinding factors on a change output. Change \
+                                 is built by the engine, and its value blinding factor is the one \
+                                 solved to balance the transaction — it is the output that must \
+                                 stay free.",
+                                style("[error]").red(), output.id
+                            );
+                            collect_outputs_ok = false;
+                            break;
+                        }
                         println!("  {} Output '{}' → change (auto).", style("·").dim(), output.id);
+                        change_assets.insert(asset_id);
                         continue;
                     }
                     serde_json::Value::Object(m)
@@ -1212,8 +1527,16 @@ pub fn run(
                             "  {} Output '{}': {} sat {} → OP_RETURN{}",
                             style("+").green(), output.id, style(amount).yellow(), asset_label, data_note
                         );
+                        if pinned_blinding.is_some() {
+                            println!(
+                                "  {} Output '{}' pins blinding factors on an OP_RETURN/burn output, which is never blinded.",
+                                style("[error]").red(), output.id
+                            );
+                            collect_outputs_ok = false;
+                            break;
+                        }
                         pset_outputs.push(pset_builder::PsetOutputSpec {
-                            script_pubkey, amount, asset: asset_id, blinding_key: None,
+                            script_pubkey, amount, asset: asset_id, blinding_key: None, blinding: None,
                         });
                     }
                     serde_json::Value::Object(m) if m.contains_key("utxo_type") => {
@@ -1232,27 +1555,28 @@ pub fn run(
                                 break;
                             }
                         };
-                        let confidential = ut.confidential;
-                        let leaf_payloads = match ut.resolve_extra_leaf_payloads(&ctx) {
-                            Ok(p) => p,
+                        // Covenant outputs default to explicit: the program spending one
+                        // usually introspects its value and asset. The output says so, not
+                        // the type — the same address may hold both kinds.
+                        let confidential = output.confidential.unwrap_or(false);
+                        let site = match resolve_utxo_site(
+                            ut, Some(&output.destination), &compile_params_map,
+                            &compile_param_type_hints, action, &ctx,
+                        ) {
+                            Ok(s) => s,
                             Err(e) => {
-                                println!("  {} Output '{}' extra leaves error: {e}", style("[warn]").yellow(), output.id);
+                                println!("  {} Output '{}' ({type_name}): {e}", style("[error]").red(), output.id);
                                 collect_outputs_ok = false;
                                 break;
                             }
                         };
+                        let (leaf_payloads, out_params, out_hints) =
+                            (site.leaf_payloads, site.compile_params, site.type_hints);
                         let out_simf_path = ut.script.as_ref()
                             .and_then(|s| s.source.as_deref())
                             .map(|src| manifest_file.parent().unwrap_or(std::path::Path::new(".")).join(src))
                             .unwrap_or_else(|| simf_path.clone());
-                        let (out_params, out_hints) = apply_utxo_compile_params(&compile_params_map, &compile_param_type_hints, ut);
-                        // Per-output `destination.compile_params` overrides (resolved against
-                        // action params), so a covenant can be keyed by a runtime value.
-                        let (out_params, out_hints) = apply_site_compile_param_overrides(
-                            out_params, out_hints, m.get("compile_params"),
-                            action, &compile_param_type_hints, &ctx,
-                        );
-                        let script_pubkey = match pset_builder::covenant_script_pubkey(&out_simf_path, &out_params, &out_hints, &leaf_payloads, net, include_debug_symbols) {
+                        let script_pubkey = match pset_builder::covenant_script_pubkey(&out_simf_path, &out_params, &out_hints, &leaf_payloads, net, &compile_opts) {
                             Ok(s) => s,
                             Err(e) => {
                                 println!("  {} Covenant address failed (output '{}'):", style("[error]").red(), output.id);
@@ -1263,18 +1587,47 @@ pub fn run(
                                 break;
                             }
                         };
+                        // A covenant address has no owner to receive a blinding key, so the
+                        // wallet's own is used — the same choice upstream Deadcat makes.
+                        // Its only job is encrypting the rangeproof, and the factors a
+                        // covenant reads are published in the manifest anyway; the key
+                        // buys the builder a way to reopen its own output, nothing more.
                         let blinding_key = if confidential {
-                            // Derive a blinding key from the covenant script pubkey bytes so the
-                            // output is confidential but deterministically re-derivable by the spender.
-                            println!("  {} Output '{}' utxo_type '{}' has confidential=true but confidential covenant outputs are not yet supported — using explicit.", style("[warn]").yellow(), output.id, type_name);
-                            None
+                            let change_addr = match wollet.change(None) {
+                                Ok(a) => a.address().clone(),
+                                Err(e) => {
+                                    println!("  {} Output '{}' cannot derive a blinding key: {e}", style("[error]").red(), output.id);
+                                    collect_outputs_ok = false;
+                                    break;
+                                }
+                            };
+                            match change_addr.blinding_pubkey {
+                                Some(pk) => Some(lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true }),
+                                None => {
+                                    println!(
+                                        "  {} Output '{}' is confidential but the wallet has no blinding key — not a CT descriptor.",
+                                        style("[error]").red(), output.id
+                                    );
+                                    collect_outputs_ok = false;
+                                    break;
+                                }
+                            }
                         } else {
                             None
                         };
-                        let conf_label = if confidential { "confidential" } else { "explicit" };
+                        if pinned_blinding.is_some() && blinding_key.is_none() {
+                            println!(
+                                "  {} Output '{}' pins blinding factors but is explicit — set \
+                                 \"confidential\": true if it is meant to be blinded.",
+                                style("[error]").red(), output.id
+                            );
+                            collect_outputs_ok = false;
+                            break;
+                        }
                         println!(
                             "  {} Output '{}': {} sat {} → covenant ({}, {})",
-                            style("+").green(), output.id, style(amount).yellow(), asset_label, type_name, conf_label
+                            style("+").green(), output.id, style(amount).yellow(), asset_label, type_name,
+                            if confidential { "confidential" } else { "explicit" }
                         );
                         covenant_output_meta.push(CovenantOutputMeta {
                             utxo_type: type_name.to_string(),
@@ -1284,7 +1637,7 @@ pub fn run(
                             asset: asset_id,
                         });
                         pset_outputs.push(pset_builder::PsetOutputSpec {
-                            script_pubkey, amount, asset: asset_id, blinding_key,
+                            script_pubkey, amount, asset: asset_id, blinding_key, blinding: pinned_blinding,
                         });
                     }
                     serde_json::Value::String(dest) if dest == "wallet" => {
@@ -1306,14 +1659,24 @@ pub fn run(
                         } else {
                             None
                         };
+                        if pinned_blinding.is_some() && bpk.is_none() {
+                            println!(
+                                "  {} Output '{}' pins blinding factors but is explicit (confidential: false) — there is nothing to blind.",
+                                style("[error]").red(), output.id
+                            );
+                            collect_outputs_ok = false;
+                            break;
+                        }
                         let addr_str = addr.to_string();
                         println!(
-                            "  {} Output '{}': {} sat {} → wallet ({}…)",
+                            "  {} Output '{}': {} sat {} → wallet ({}…){}",
                             style("+").green(), output.id, style(amount).yellow(), asset_label,
-                            &addr_str[..addr_str.len().min(24)]
+                            &addr_str[..addr_str.len().min(24)],
+                            if pinned_blinding.is_some() { ", pinned blinding factors" } else { "" }
                         );
                         pset_outputs.push(pset_builder::PsetOutputSpec {
                             script_pubkey: addr.script_pubkey(), amount, asset: asset_id, blinding_key: bpk,
+                            blinding: pinned_blinding,
                         });
                     }
                     serde_json::Value::String(dest) => {
@@ -1326,7 +1689,21 @@ pub fn run(
                                 continue;
                             }
                         };
-                        let bpk = addr.blinding_pubkey.map(|pk| lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true });
+                        let bpk = address_blinding_key(output, &addr);
+                        if bpk.is_none() && addr.blinding_pubkey.is_some() {
+                            println!(
+                                "  {} Output '{}' pays a confidential address explicitly (confidential: false) — the amount and asset stay in the clear.",
+                                style("·").dim(), output.id
+                            );
+                        }
+                        if pinned_blinding.is_some() && bpk.is_none() {
+                            println!(
+                                "  {} Output '{}' pins blinding factors but is explicit — there is nothing to blind.",
+                                style("[error]").red(), output.id
+                            );
+                            collect_outputs_ok = false;
+                            break;
+                        }
                         println!(
                             "  {} Output '{}': {} sat {} → {}…",
                             style("+").green(), output.id, style(amount).yellow(), asset_label,
@@ -1334,6 +1711,7 @@ pub fn run(
                         );
                         pset_outputs.push(pset_builder::PsetOutputSpec {
                             script_pubkey: addr.script_pubkey(), amount, asset: asset_id, blinding_key: bpk,
+                            blinding: pinned_blinding,
                         });
                     }
                     serde_json::Value::Object(m) if m.contains_key("script_hash") => {
@@ -1369,8 +1747,16 @@ pub fn run(
                             style("+").green(), output.id, style(amount).yellow(), asset_label,
                             &clean[..16]
                         );
+                        if pinned_blinding.is_some() {
+                            println!(
+                                "  {} Output '{}' pins blinding factors, but a script_hash output is built explicit.",
+                                style("[error]").red(), output.id
+                            );
+                            collect_outputs_ok = false;
+                            break;
+                        }
                         pset_outputs.push(pset_builder::PsetOutputSpec {
-                            script_pubkey, amount, asset: asset_id, blinding_key: None,
+                            script_pubkey, amount, asset: asset_id, blinding_key: None, blinding: None,
                         });
                     }
                     other => {
@@ -1388,16 +1774,32 @@ pub fn run(
 
         // ---- Build PSET ----
         if collect_inputs_ok && collect_outputs_ok {
-            // Only build a change output if the action declared one. Otherwise the
-            // fee absorbs the surplus and the output count stays exact (recursive covenants).
-            let build_change = action.outputs.as_deref().unwrap_or_default().iter()
-                .any(|o| o.destination.as_str() == Some("change"));
+            // Change is permitted per ASSET: by an explicit `destination: "change"`
+            // output (collected while resolving outputs, above), or by the action's
+            // `allow_change` setting, which covers surpluses that cannot be predicted —
+            // chiefly the L-BTC left after a fee whose size is only known once the
+            // transaction is built.
+            let mut change_assets = change_assets;
+            match action.allow_change {
+                crate::manifest::AllowChange::None => {}
+                crate::manifest::AllowChange::LbtcOnly => {
+                    change_assets.insert(net.policy_asset());
+                }
+                crate::manifest::AllowChange::Any => {
+                    for i in &pset_inputs {
+                        if let pset_builder::PsetInput::Wallet { utxo, .. } = i {
+                            change_assets.insert(utxo.unblinded.asset);
+                        }
+                    }
+                    change_assets.insert(net.policy_asset());
+                }
+            }
             let mut req = pset_builder::BuildPsetRequest {
                 inputs: pset_inputs,
                 outputs: pset_outputs,
                 fee_rate: fee_rate as f32,
                 policy_asset: net.policy_asset(),
-                build_change,
+                change_assets: change_assets.clone(),
             };
 
             // Resolve the `fee` keyword: estimate the fee from the current (fee=0)
@@ -1444,10 +1846,21 @@ pub fn run(
                 }
                 Ok(result) => {
                     for iso in &result.issuances {
-                        println!("    Issuance '{}': asset={}, token={}", iso.input_id,
-                            style(&iso.asset_id.to_string()[..16]).yellow(),
-                            style(&iso.token_id.to_string()[..16]).yellow());
+                        // Printed in full, not elided. These ids exist nowhere else yet:
+                        // they are derived from this input's outpoint, and unless the action
+                        // is a constructor that captures them via `on_resolved`, this line is
+                        // the only record the operator will ever get. An elided id is not a
+                        // record of anything.
+                        println!("    Issuance '{}':", iso.input_id);
+                        println!("      asset             = {}", style(iso.asset_id.to_string()).yellow());
+                        println!("      reissuance_token  = {}", style(iso.token_id.to_string()).yellow());
+                        if let Some(entropy_bytes) = &iso.entropy {
+                            // Needed verbatim in the instance file's `provided_inputs` before
+                            // any later reissuance of this asset can be built.
+                            println!("      issuance_entropy  = {}", style(hex_bytes(entropy_bytes)).yellow());
+                        }
                         ctx.set_input_attr(&iso.input_id, "asset", iso.asset_id.to_string());
+                        ctx.set_input_attr(&iso.input_id, "issued_asset", iso.asset_id.to_string());
                         ctx.set_input_attr(&iso.input_id, "reissuance_token", iso.token_id.to_string());
                         if let Some(entropy_bytes) = &iso.entropy {
                             let hex = entropy_bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
@@ -1533,20 +1946,28 @@ pub fn run(
                         manifest_file.parent().unwrap_or(std::path::Path::new(".")).join(src)
                     }))
                     .unwrap_or_else(|| simf_path.clone());
-                let (check_params, check_hints) = check_ut
-                    .map(|ut| apply_utxo_compile_params(&compile_params_map, &compile_param_type_hints, ut))
-                    .unwrap_or_else(|| (compile_params_map.clone(), compile_param_type_hints.clone()));
-                let (check_params, check_hints) = apply_site_compile_param_overrides(
-                    check_params, check_hints, inp.utxo_source.get("compile_params"),
-                    action, &compile_param_type_hints, &ctx,
-                );
+                let check_site = check_ut.map(|ut| {
+                    resolve_utxo_site(
+                        ut, Some(&inp.utxo_source), &compile_params_map,
+                        &compile_param_type_hints, action, &ctx,
+                    )
+                });
+                let (check_params, check_hints) = match check_site {
+                    Some(Ok(site)) => (site.compile_params, site.type_hints),
+                    Some(Err(e)) => {
+                        println!("  {} Input '{}' ({type_name}): {e}", style("[error]").red(), inp.id);
+                        all_compiled = false;
+                        continue;
+                    }
+                    None => (compile_params_map.clone(), compile_param_type_hints.clone()),
+                };
                 print!(
                     "  {} Input '{}' ({}) — compiling… ",
                     style("·").dim(), inp.id, type_name
                 );
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
-                match covenant::check_compile(&check_simf_path, &check_params, &check_hints, include_debug_symbols) {
+                match covenant::check_compile(&check_simf_path, &check_params, &check_hints, &compile_opts) {
                     Ok(()) => println!("{}", style("OK").green()),
                     Err(e) => {
                         println!("{}", style("FAILED").red());
@@ -1603,26 +2024,26 @@ pub fn run(
                                             continue;
                                         }
                                     };
-                                    let leaf_payloads = match dry_ut.resolve_extra_leaf_payloads(&ctx) {
-                                        Ok(p) => p,
+                                    let dry_site = match resolve_utxo_site(
+                                        dry_ut, Some(&action_inp.utxo_source), &compile_params_map,
+                                        &compile_param_type_hints, action, &ctx,
+                                    ) {
+                                        Ok(s) => s,
                                         Err(e) => {
                                             println!(
-                                                "    {} leaf_payloads for '{}': {e}",
+                                                "    {} utxo_type site for '{}': {e}",
                                                 style("[error]").red(), action_inp.id
                                             );
                                             exec_all_ok = false;
                                             continue;
                                         }
                                     };
+                                    let (leaf_payloads, dry_params, dry_hints) =
+                                        (dry_site.leaf_payloads, dry_site.compile_params, dry_site.type_hints);
                                     let dry_simf_path = dry_ut.script.as_ref()
                                         .and_then(|s| s.source.as_deref())
                                         .map(|src| manifest_file.parent().unwrap_or(std::path::Path::new(".")).join(src))
                                         .unwrap_or_else(|| simf_path.clone());
-                                    let (dry_params, dry_hints) = apply_utxo_compile_params(&compile_params_map, &compile_param_type_hints, dry_ut);
-                                    let (dry_params, dry_hints) = apply_site_compile_param_overrides(
-                                        dry_params, dry_hints, action_inp.utxo_source.get("compile_params"),
-                                        action, &compile_param_type_hints, &ctx,
-                                    );
 
                                     use std::io::Write;
                                     print!(
@@ -1663,7 +2084,7 @@ pub fn run(
                                         pset_idx as u32,
                                         genesis_hash,
                                         debug_jets,
-                                        include_debug_symbols,
+                                        &compile_opts,
                                     ) {
                                         Ok(()) => println!("{}", style("OK").green()),
                                         Err(e) => {
@@ -1761,17 +2182,22 @@ pub fn run(
                                         continue;
                                     }
                                 };
-                                let leaf_payloads = match fin_ut.resolve_extra_leaf_payloads(&ctx) {
-                                    Ok(p) => p,
+                                let fin_site = match resolve_utxo_site(
+                                    fin_ut, Some(&action_inp.utxo_source), &compile_params_map,
+                                    &compile_param_type_hints, action, &ctx,
+                                ) {
+                                    Ok(s) => s,
                                     Err(e) => {
                                         println!(
-                                            "  {} leaf_payloads for '{}': {e}",
+                                            "  {} utxo_type site for '{}': {e}",
                                             style("[error]").red(), action_inp.id
                                         );
                                         all_finalized = false;
                                         continue;
                                     }
                                 };
+                                let (leaf_payloads, fin_params, fin_hints) =
+                                    (fin_site.leaf_payloads, fin_site.compile_params, fin_site.type_hints);
                                 let fin_simf_path = fin_ut.script.as_ref()
                                     .and_then(|s| s.source.as_deref())
                                     .map(|src| {
@@ -1780,13 +2206,6 @@ pub fn run(
                                             .join(src)
                                     })
                                     .unwrap_or_else(|| simf_path.clone());
-                                let (fin_params, fin_hints) = apply_utxo_compile_params(
-                                    &compile_params_map, &compile_param_type_hints, fin_ut,
-                                );
-                                let (fin_params, fin_hints) = apply_site_compile_param_overrides(
-                                    fin_params, fin_hints, action_inp.utxo_source.get("compile_params"),
-                                    action, &compile_param_type_hints, &ctx,
-                                );
 
                                 print!(
                                     "  {} Input '{}' ({}) — finalizing… ",
@@ -1831,7 +2250,7 @@ pub fn run(
                                     pset_idx as u32,
                                     genesis_hash,
                                     &mut pset.inputs_mut()[pset_idx],
-                                    include_debug_symbols,
+                                    &compile_opts,
                                 ) {
                                     Ok(()) => println!("{}", style("OK").green()),
                                     Err(e) => {
@@ -1887,7 +2306,7 @@ pub fn run(
         println!();
         println!("{}", step_header("Step 9b: Creating Instance"));
         let fields = eval_create_instance_fields(
-            ci, &ctx, manifest_file, &create_instance_hints, net_for_hash, true, include_debug_symbols,
+            ci, &ctx, manifest_file, &create_instance_hints, net_for_hash, true, &compile_opts,
         );
         let inst = crate::instance::InstanceFile {
             instance: Some(crate::instance::InstanceData {
@@ -2588,6 +3007,59 @@ fn issuance_kind(input: &crate::manifest::Input) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+/// Resolve the issuance entropy for a reissuance input.
+///
+/// Two sources, in order:
+/// 1. `issuance.entropy` — a reference into the run context, normally an instance field a
+///    constructor captured with `$inputs.<id>.issuance_entropy`. This is the good path: the
+///    value travels with the contract and nothing has to pin an outpoint to carry it.
+/// 2. `provided_inputs.<id>.issuance_entropy` in the instance file — the older path, kept
+///    working. It rides along with an outpoint override, which pins that input for *every*
+///    action sharing the input id, long after the pin stops being correct.
+///
+/// Returns `Ok(None)` when neither is present, so the caller can name the offending input.
+fn resolve_issuance_entropy(
+    inp: &crate::manifest::Input,
+    ctx: &ExecutionContext,
+) -> anyhow::Result<Option<[u8; 32]>> {
+    let spec = inp.issuance.as_ref();
+    let entropy_ref = spec.and_then(|v| v.get("entropy")).and_then(|v| v.as_str());
+
+    let hex = match entropy_ref {
+        Some(r) => Some(eval::resolve_value_ref(r, ctx).ok_or_else(|| {
+            anyhow::anyhow!(
+                "issuance.entropy '{r}' does not resolve — a constructor should capture it \
+                 with \"$inputs.<id>.issuance_entropy\""
+            )
+        })?),
+        None => ctx.get_input(&inp.id).and_then(|r| r.issuance_entropy.clone()),
+    };
+
+    let Some(hex) = hex else { return Ok(None) };
+    let entropy = pset_builder::decode_entropy_hex(&hex)
+        .with_context(|| format!("issuance entropy '{hex}' is not 32 bytes of hex"))?;
+
+    // Optional cross-check. An entropy is opaque — a byte-reversed one (the order every
+    // block explorer prints) is still well-formed, and the transaction it builds still
+    // broadcasts; it just reissues a different asset. Re-deriving the asset id turns that
+    // into an error here rather than a wrong market later.
+    if let Some(expected_ref) = spec
+        .and_then(|v| v.get("issued_asset"))
+        .and_then(|v| v.as_str())
+    {
+        if let Some(expected) = eval::resolve_value_ref(expected_ref, ctx) {
+            let derived = pset_builder::compute_asset_from_entropy(&entropy)?.to_string();
+            anyhow::ensure!(
+                derived == expected,
+                "issuance entropy does not produce the declared asset:\n      \
+                 entropy  {hex}\n      derives  {derived}\n      declared {expected} ({expected_ref})\n      \
+                 note: an entropy copied from a block explorer is byte-reversed relative to this one"
+            );
+        }
+    }
+    Ok(Some(entropy))
+}
+
 fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -2668,6 +3140,114 @@ fn resolve_witness_signing_key<'a>(
 /// top-level compile param. The SimplicityHL type hint is carried from the
 /// referenced declaration — covenant compilation needs it to type the argument
 /// (many simf param names, e.g. `PUB_KEY`, are not inferable by convention).
+/// Everything one mention of a `utxo_type` needs in order to derive its address.
+#[derive(Debug)]
+struct ResolvedUtxoSite {
+    compile_params: std::collections::HashMap<String, String>,
+    type_hints: std::collections::HashMap<String, String>,
+    leaf_payloads: Vec<Vec<u8>>,
+}
+
+/// Resolve a `utxo_type` at one site — an output `destination` or an input `utxo_source`.
+///
+/// This is the single place an address's inputs are assembled, because the alternative is
+/// what this replaced: three mechanisms (ambient compile params, a remap table, per-site
+/// overrides) applied in the same order at four call sites, any one of which could drift
+/// and produce a valid address for the wrong covenant.
+///
+/// A type that declares `params` is resolved in **closed scope**: its compile params are
+/// exactly its bound params (plus `script.compile_params`, itself resolved against them),
+/// and its leaves see those params and nothing else. A type that does not keeps the legacy
+/// ambient behaviour, so this change is additive — see [`crate::manifest::UtxoType::params`].
+fn resolve_utxo_site(
+    ut: &crate::manifest::UtxoType,
+    site: Option<&serde_json::Value>,
+    base_params: &std::collections::HashMap<String, String>,
+    base_hints: &std::collections::HashMap<String, String>,
+    action: &crate::manifest::Action,
+    ctx: &ExecutionContext,
+) -> Result<ResolvedUtxoSite> {
+    if !ut.is_closed() {
+        let (params, hints) = apply_utxo_compile_params(base_params, base_hints, ut);
+        let (compile_params, type_hints) = apply_site_compile_param_overrides(
+            params,
+            hints,
+            site.and_then(|s| s.get("compile_params")),
+            action,
+            base_hints,
+            ctx,
+        );
+        return Ok(ResolvedUtxoSite {
+            compile_params,
+            type_hints,
+            leaf_payloads: ut.resolve_extra_leaf_payloads(ctx)?,
+        });
+    }
+
+    // Args are expressions in the ACTION's scope — the site is the one place that knows
+    // what varies per run.
+    let eval_arg = |expr: &str| -> Result<String> { eval::resolve_site_arg(expr, ctx) };
+    // Defaults are declared on the type, so they may only read instance scope: values
+    // fixed when the contract was instantiated, identical at every site.
+    let eval_default = |expr: &str| -> Result<String> {
+        let expr = expr.trim();
+        if let Some(key) = expr
+            .strip_prefix("instance.")
+            .or_else(|| expr.strip_prefix("compile_params."))
+        {
+            return base_params.get(key).cloned().ok_or_else(|| {
+                anyhow::anyhow!("no instance field '{key}' — defaults may only read instance scope")
+            });
+        }
+        if expr.starts_with("params.") {
+            anyhow::bail!(
+                "a default may not read action scope ('{expr}'): it is declared once on the \
+                 utxo_type, so a value that varies per action has to be bound at the site \
+                 instead (\"args\")"
+            );
+        }
+        Ok(expr.trim_matches(['"', '\'']).to_string())
+    };
+
+    let (values, mut type_hints) = ut.bind_site_params(site, &eval_arg, &eval_default)?;
+
+    // `script.compile_params` still maps simf param name → value, but in closed scope its
+    // right-hand side names one of THIS type's params (or is a literal).
+    let mut compile_params = values.clone();
+    if let Some(map) = ut.script.as_ref().map(|s| &s.compile_params) {
+        for (simf_key, reference) in map {
+            let key = reference.trim();
+            let key = key.strip_prefix("params.").unwrap_or(key);
+            match values.get(key) {
+                Some(v) => {
+                    compile_params.insert(simf_key.clone(), v.clone());
+                    if let Some(h) = type_hints.get(key).cloned() {
+                        type_hints.insert(simf_key.clone(), h);
+                    }
+                }
+                // Literal, as in the legacy form (`"ASSET_AMOUNT": "1"`).
+                None => {
+                    compile_params.insert(simf_key.clone(), key.to_string());
+                }
+            }
+        }
+    }
+
+    // Leaves see the type's params only. A stray `instance.X` in a leaf of a closed type
+    // now fails loudly rather than quietly picking up an ambient value.
+    let mut leaf_ctx = ExecutionContext::new();
+    for (name, value) in &values {
+        leaf_ctx.set_param(name, value);
+    }
+    let leaf_payloads = ut.resolve_extra_leaf_payloads(&leaf_ctx)?;
+
+    Ok(ResolvedUtxoSite {
+        compile_params,
+        type_hints,
+        leaf_payloads,
+    })
+}
+
 fn apply_site_compile_param_overrides(
     mut params: std::collections::HashMap<String, String>,
     mut hints: std::collections::HashMap<String, String>,
@@ -2874,7 +3454,7 @@ fn resolve_create_instance_leaves(
     let mut leaves = Vec::with_capacity(specs.len());
     for leaf in specs {
         let mut bytes: Vec<u8> = Vec::new();
-        for item in &leaf.payload {
+        for crate::manifest::TaprootLeafPayloadItem(item) in &leaf.payload {
             match item {
                 serde_json::Value::String(s) => {
                     match eval::encode_leaf_bytes(&serde_json::json!({ "type": "bytes", "value": s }), s) {
@@ -2923,9 +3503,11 @@ fn eval_create_instance_fields(
     type_hints: &std::collections::HashMap<String, String>,
     network: lwk_wollet::ElementsNetwork,
     verbose: bool,
-    include_debug_symbols: bool,
+    opts: impl Into<crate::covenant::CompileOpts>,
 ) -> std::collections::HashMap<String, String> {
     use crate::manifest::ComputeSpec;
+
+    let opts = opts.into();
 
     let mut fields: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     // Track which field names still need evaluation; start with all of them.
@@ -2947,15 +3529,24 @@ fn eval_create_instance_fields(
 
             let value: Option<String> = match field_value {
                 ComputeSpec::Expr(expr) => {
-                    // $params.X / $instance.X → direct lookup; other → eval_expr_str
+                    // `$`-prefixed forms are direct STRING lookups; everything else falls
+                    // through to eval_expr_str, which is arithmetic and returns a u64. That
+                    // is why a 32-byte id has to arrive by a `$` form: an asset id is not a
+                    // number, and the numeric path rejects it.
+                    //   $params.X / $instance.X          — a named value in the run context
+                    //   $inputs.<input_id>.<field>       — straight off a resolved input
                     expr
-                        .strip_prefix("$params.")
-                        .or_else(|| expr.strip_prefix("$instance."))
-                        .or_else(|| expr.strip_prefix("$compile_params."))
-                        .and_then(|name| {
-                            ctx.get_param(name)
-                                .or_else(|| ctx.get_compile_param(name))
-                                .map(str::to_string)
+                        .strip_prefix("$inputs.")
+                        .and_then(|rest| eval::resolve_input_ref(rest, ctx))
+                        .or_else(|| {
+                            expr.strip_prefix("$params.")
+                                .or_else(|| expr.strip_prefix("$instance."))
+                                .or_else(|| expr.strip_prefix("$compile_params."))
+                                .and_then(|name| {
+                                    ctx.get_param(name)
+                                        .or_else(|| ctx.get_compile_param(name))
+                                        .map(str::to_string)
+                                })
                         })
                         .or_else(|| eval::eval_expr_str(expr, ctx).ok())
                 }
@@ -3047,7 +3638,7 @@ fn eval_create_instance_fields(
                                     match leaves_result {
                                         None => None, // a leaf ref not yet computed — retry in a later pass
                                         Some(leaves) => {
-                                            match covenant::compute_covenant_script_hash_with_leaves(&simf_path, &p, &hints, &leaves, network, include_debug_symbols) {
+                                            match covenant::compute_covenant_script_hash_with_leaves(&simf_path, &p, &hints, &leaves, network, &opts) {
                                                 Ok(hash_bytes) => {
                                                     Some(hash_bytes.iter().map(|b| format!("{b:02x}")).collect())
                                                 }
@@ -3067,8 +3658,33 @@ fn eval_create_instance_fields(
                         crate::manifest::ParamCompute::Expr { expr } => {
                             eval::eval_expr_str(expr, ctx).ok()
                         }
+                        // Reproducible from the manifest and cheap, so it belongs on an
+                        // instance field as much as on an action param: an instance that
+                        // commits to a payout target commits to its hash.
+                        crate::manifest::ParamCompute::ScriptHash { address } => {
+                            let key = address
+                                .strip_prefix("params.")
+                                .or_else(|| address.strip_prefix("instance."))
+                                .unwrap_or(address);
+                            let resolved = fields
+                                .get(key)
+                                .cloned()
+                                .or_else(|| eval::eval_destination_str(address, ctx))
+                                .unwrap_or_else(|| address.trim().to_string());
+                            // `None` defers to a later pass, same as an unresolved leaf ref.
+                            crate::wallet::script_hash_of_address(&resolved).ok()
+                        }
                         crate::manifest::ParamCompute::SimfFn { .. } => {
                             // SimfFn is only valid on action params, not create_instance fields.
+                            None
+                        }
+                        crate::manifest::ParamCompute::Hook {} => {
+                            // A hook fills a PARAM, not an instance field. If a hook produced
+                            // this value, name the param it wrote: "$params.NAME".
+                            println!(
+                                "  {} create_instance field '{}' cannot be computed by a hook — reference the param the hook set (e.g. \"$params.NAME\"), or read the input directly (\"$inputs.<id>.issued_asset\").",
+                                style("[error]").red(), field_name
+                            );
                             None
                         }
                         crate::manifest::ParamCompute::Wallet { .. } => {
@@ -3254,6 +3870,258 @@ mod tests {
     use std::collections::BTreeMap;
     use crate::manifest::{ComputeSpec, InstanceCreate};
 
+    /// `confidential: false` must beat a confidential address's own blinding key.
+    ///
+    /// The covenant case that forces it: a payout check does `unwrap_right` on
+    /// `jet::output_amount(0)`, which only exists when the output is explicit. Paying a
+    /// blinded output to a `tlq1…` address makes the program hit the pruned confidential
+    /// branch — "Execution reached a pruned branch" — with nothing pointing at blinding as
+    /// the cause. The flag was honoured for `wallet` destinations and ignored for address
+    /// ones, so the manifest could ask for this and be quietly overruled.
+    #[test]
+    fn confidential_false_strips_an_addresss_blinding_key() {
+        // Parsed from JSON rather than hand-built, so the test exercises the same
+        // `confidential` field an author actually writes.
+        let manifests: Vec<Manifest> = [None, Some(true), Some(false)]
+            .iter()
+            .map(|confidential| {
+                let extra = match confidential {
+                    Some(v) => format!(r#", "confidential": {v}"#),
+                    None => String::new(),
+                };
+                Manifest::from_json_str(&format!(
+                    r#"{{ "manifest_version": "1", "protocol": "t", "actions": {{ "A": {{ "outputs": [
+                         {{ "id": "o0", "amount_sat": "1", "destination": "params.a"{extra} }} ] }} }} }}"#
+                ))
+                .expect("manifest should parse")
+            })
+            .collect();
+        let output = |i: usize| &manifests[i].actions["A"].outputs.as_ref().unwrap()[0];
+        let (default, yes, no) = (output(0), output(1), output(2));
+
+        let confidential: lwk_wollet::elements::Address =
+            "tlq1qq2tmze58e74rl0tw9cx23j47zxk0ddas95gdy0j2wzkcuejxwj8yypv93ju8yay2s3r4y6fwpuw0l322965qvse6u6zdd5mf5"
+                .parse()
+                .expect("valid address");
+        assert!(confidential.blinding_pubkey.is_some());
+        let explicit = confidential.to_unconfidential();
+
+        // The default and an explicit `true` both blind, as before.
+        assert!(address_blinding_key(default, &confidential).is_some());
+        assert!(address_blinding_key(yes, &confidential).is_some());
+        // `false` wins over the address's own key.
+        assert!(address_blinding_key(no, &confidential).is_none());
+        // An unconfidential address has nothing to strip, whatever the flag says.
+        assert!(address_blinding_key(default, &explicit).is_none());
+        assert!(address_blinding_key(yes, &explicit).is_none());
+
+        // Stripping must not move the scriptPubKey, or the covenant's committed
+        // sha256(spk) would stop matching the output that pays it.
+        assert_eq!(confidential.script_pubkey(), explicit.script_pubkey());
+    }
+
+    /// The end this boundary exists for: one closed `utxo_type`, two sites, two states —
+    /// and the state each site commits to comes from the site, not from whatever the
+    /// running action happens to have in scope.
+    ///
+    /// Also pins the closure itself. A leaf in a closed type reading `instance.X` must
+    /// fail rather than quietly pick up an ambient value, because "quietly picked up the
+    /// wrong value" is indistinguishable from success when the output is an address.
+    #[test]
+    fn closed_utxo_type_resolves_each_site_independently() {
+        let manifest = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t",
+                 "actions": { "A": { "params": { "claim": { "type": "bytes32" } } } },
+                 "utxo_types": { "prize": {
+                   "description": "d",
+                   "params": { "STATE": { "type": "bytes32",
+                                          "default": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" } },
+                   "script": { "type": "simplicity", "source": "./x.simf",
+                     "extra_leaves": [ { "type": "tapdata",
+                       "payload": [ { "value": "params.STATE", "type": "bytes32" } ] } ] } } } }"#,
+        )
+        .expect("manifest should parse");
+        let ut = manifest.utxo_type("prize").unwrap();
+        let action = &manifest.actions["A"];
+        let base = std::collections::HashMap::new();
+
+        let mut ctx = ExecutionContext::new();
+        ctx.set_param("claim", format!("0x{}", "11".repeat(32)));
+
+        // Site 1 says nothing → the declared default (the "no claim pending" state).
+        let creating = serde_json::json!({ "utxo_type": "prize" });
+        let a = resolve_utxo_site(ut, Some(&creating), &base, &base, action, &ctx).unwrap();
+        assert_eq!(a.leaf_payloads, vec![vec![0xffu8; 32]]);
+
+        // Site 2 binds the action's param → a different leaf, hence a different address.
+        let claiming =
+            serde_json::json!({ "utxo_type": "prize", "args": { "STATE": "params.claim" } });
+        let b = resolve_utxo_site(ut, Some(&claiming), &base, &base, action, &ctx).unwrap();
+        assert_eq!(b.leaf_payloads, vec![vec![0x11u8; 32]]);
+        assert_ne!(a.leaf_payloads, b.leaf_payloads);
+
+        // The closed type's compile params are exactly its own params — the ambient map
+        // is no longer poured in wholesale.
+        let mut ambient = std::collections::HashMap::new();
+        ambient.insert("SOMETHING_ELSE".to_string(), "0xdead".to_string());
+        let c = resolve_utxo_site(ut, Some(&creating), &ambient, &base, action, &ctx).unwrap();
+        assert_eq!(c.compile_params.keys().collect::<Vec<_>>(), vec!["STATE"]);
+
+        // An unbound arg naming an action param that does not exist fails here, rather
+        // than being encoded as the string "params.nope".
+        let bad = serde_json::json!({ "utxo_type": "prize", "args": { "STATE": "params.nope" } });
+        let err = resolve_utxo_site(ut, Some(&bad), &base, &base, action, &ctx).unwrap_err();
+        assert!(err.to_string().contains("params.nope"), "{err}");
+    }
+
+    /// A closed type's leaves may not reach action scope, and its defaults may not either.
+    #[test]
+    fn closed_utxo_type_cannot_read_action_scope() {
+        let manifest = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t",
+                 "actions": { "A": { "params": { "claim": { "type": "bytes32" } } } },
+                 "utxo_types": {
+                   "leaky_leaf": {
+                     "description": "d",
+                     "params": {},
+                     "script": { "type": "simplicity", "source": "./x.simf",
+                       "extra_leaves": [ { "type": "tapdata",
+                         "payload": [ { "value": "params.claim", "type": "bytes32" } ] } ] } },
+                   "leaky_default": {
+                     "description": "d",
+                     "params": { "S": { "type": "bytes32", "default": "params.claim" } },
+                     "script": { "type": "simplicity", "source": "./x.simf" } } } }"#,
+        )
+        .unwrap();
+        let action = &manifest.actions["A"];
+        let base = std::collections::HashMap::new();
+        let mut ctx = ExecutionContext::new();
+        ctx.set_param("claim", format!("0x{}", "11".repeat(32)));
+        let site = serde_json::json!({ "utxo_type": "x" });
+
+        // The action HAS `claim` — the point is that a closed type cannot see it.
+        let err = resolve_utxo_site(
+            manifest.utxo_type("leaky_leaf").unwrap(), Some(&site), &base, &base, action, &ctx,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("params.claim"), "{err}");
+
+        let err = resolve_utxo_site(
+            manifest.utxo_type("leaky_default").unwrap(), Some(&site), &base, &base, action, &ctx,
+        )
+        .unwrap_err();
+        // `{:#}` renders the whole chain: the outer context names the param, the cause
+        // says why a default may not read action scope.
+        let chain = format!("{err:#}");
+        assert!(chain.contains("action scope"), "{chain}");
+        assert!(chain.contains('S'), "should name the param: {chain}");
+    }
+
+    /// Inputs and outputs must agree on what an asset may be spelled as.
+    ///
+    /// A resolved input carries a *label* (`"lbtc"`), not necessarily a hex id — that is
+    /// what the manifest writes and what resolution defaults to. The covenant-input branch
+    /// used to parse it as raw hex while the output branch resolved it, so a covenant
+    /// input on L-BTC failed with "failed to parse hex" for the obvious spelling.
+    #[test]
+    fn asset_labels_and_hex_ids_resolve_the_same_everywhere() {
+        let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
+        assert_eq!(resolve_asset_id("lbtc", net).unwrap(), net.policy_asset());
+        assert_eq!(resolve_asset_id("bitcoin", net).unwrap(), net.policy_asset());
+        // The hex form of the very same asset must still resolve to it.
+        assert_eq!(
+            resolve_asset_id(&net.policy_asset().to_string(), net).unwrap(),
+            net.policy_asset()
+        );
+        // And a non-asset string is still an error, not a silent policy-asset fallback.
+        assert!(resolve_asset_id("not-an-asset", net).is_err());
+    }
+
+    /// Every declared input must reach the built transaction, or the run must fail.
+    ///
+    /// The live failure this pins: `"utxo_source": "prize_covenant"` (a bare string
+    /// rather than `{"utxo_type": "prize_covenant"}`) matched neither collection branch
+    /// and fell through a chain with no `else`, so the covenant input vanished from the
+    /// PSET. Step 2 still resolved it, the preview still showed it, and the run signed
+    /// and broadcast a transaction that never spent the covenant UTXO at all.
+    #[test]
+    fn declared_inputs_that_never_reach_the_pset_are_detected() {
+        let manifest = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t", "actions": { "A": { "inputs": [
+                 { "id": "contest_in", "utxo_source": "prize_covenant" },
+                 { "id": "fees_in",    "utxo_source": "wallet" } ] } } }"#,
+        )
+        .expect("manifest should parse");
+        let declared = manifest.actions["A"].inputs.as_deref().unwrap();
+
+        let collected = |ids: &[&str]| -> Vec<pset_builder::PsetInput> {
+            ids.iter()
+                .map(|id| pset_builder::PsetInput::Covenant {
+                    input_id: (*id).to_string(),
+                    outpoint: lwk_wollet::elements::OutPoint::new(
+                        lwk_wollet::elements::Txid::from_str(&"a".repeat(64)).unwrap(),
+                        0,
+                    ),
+                    script_pubkey: lwk_wollet::elements::Script::new(),
+                    asset: lwk_wollet::elements::AssetId::from_str(&"b".repeat(64)).unwrap(),
+                    amount: 1,
+                    issuance: None,
+                    sequence: None,
+                    blinding: None,
+                })
+                .collect()
+        };
+
+        // The bug: the unrecognized-source input is silently absent.
+        assert_eq!(
+            inputs_missing_from_pset(declared, &collected(&["fees_in"])),
+            vec!["contest_in"],
+        );
+        // Both gone — reported in declaration order, not just the first.
+        assert_eq!(
+            inputs_missing_from_pset(declared, &collected(&[])),
+            vec!["contest_in", "fees_in"],
+        );
+        // The healthy case must stay silent, whatever the ordering.
+        assert!(inputs_missing_from_pset(declared, &collected(&["contest_in", "fees_in"])).is_empty());
+        assert!(inputs_missing_from_pset(declared, &collected(&["fees_in", "contest_in"])).is_empty());
+        // Extra inputs the engine adds (not declared) are not this check's business.
+        assert!(inputs_missing_from_pset(declared, &collected(&["contest_in", "fees_in", "x"])).is_empty());
+    }
+
+    /// A declared change output must survive having no `amount_sat`.
+    ///
+    /// It reads like an incomplete output — no amount, nothing pushed to the PSET — and
+    /// was skipped for exactly that reason, which dropped its asset from the
+    /// change-permitted set and made a manifest that *declared* change fail with "this
+    /// action does not permit L-BTC change". The validator has always exempted change
+    /// from needing an amount, so the engine must agree.
+    #[test]
+    fn change_outputs_are_never_skipped_for_a_missing_amount() {
+        let manifest = Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t", "actions": { "A": { "outputs": [
+                 { "id": "change_out",   "asset": "lbtc", "destination": "change" },
+                 { "id": "opt_change",   "asset": "lbtc", "destination": "change", "optional": true },
+                 { "id": "opt_wallet",   "asset": "lbtc", "destination": "wallet", "optional": true },
+                 { "id": "plain_wallet", "asset": "lbtc", "destination": "wallet" } ] } } }"#,
+        )
+        .expect("manifest should parse");
+        let outputs = manifest.actions["A"].outputs.as_deref().unwrap();
+        let by_id = |id: &str| outputs.iter().find(|o| o.id == id).expect(id);
+
+        // Change: skipped for neither spelling, `optional` included — the asset has to be
+        // registered either way.
+        assert!(!skips_when_amount_absent(by_id("change_out")));
+        assert!(!skips_when_amount_absent(by_id("opt_change")));
+        assert!(is_change_output(by_id("change_out")));
+
+        // Everything else keeps the old behaviour: optional is skipped, required is not
+        // (and goes on to fail loudly for the missing amount).
+        assert!(skips_when_amount_absent(by_id("opt_wallet")));
+        assert!(!skips_when_amount_absent(by_id("plain_wallet")));
+        assert!(!is_change_output(by_id("plain_wallet")));
+    }
+
     #[test]
     fn outpoint_override_parses_txid_vout() {
         let ov = OutpointOverride::parse_outpoint(
@@ -3339,7 +4207,7 @@ mod tests {
             }),
             asset: None,
             state_vars: None,
-            confidential: false,
+            params: None,
         };
 
         let (params, _hints) = apply_utxo_compile_params(&base, &base_hints, &ut);
@@ -3424,6 +4292,182 @@ mod tests {
 
         assert_eq!(params.get("COUNT").map(String::as_str), Some("7"),
             "an unreferencing literal must pass through verbatim");
+    }
+
+    /// `$inputs.<id>.<field>` reads an instance field straight off a resolved input, with
+    /// no hook in between (examples/deadcat's constructor).
+    ///
+    /// The assertion that matters is `issued_asset` != `asset`. On an input carrying a new
+    /// issuance those are different things — the spent UTXO is L-BTC, the created asset is
+    /// not — and confusing them writes L-BTC's id into a field meant to hold the asset the
+    /// transaction just created. Nothing downstream would notice: it is a well-formed
+    /// 32-byte id, so the covenant addresses simply come out wrong.
+    #[test]
+    fn create_instance_reads_input_refs_and_distinguishes_issued_asset() {
+        const LBTC: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+        const ISSUED: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+        const TOKEN: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+
+        let mut ctx = ExecutionContext::new();
+        ctx.set_input(ResolvedInput {
+            id: "yes_defining_in".to_string(),
+            txid: "aa".repeat(32),
+            vout: 0,
+            amount_sat: 5_000,
+            asset: LBTC.to_string(),
+            issuance_entropy: None,
+        });
+        ctx.set_input_attr("yes_defining_in", "issued_asset", ISSUED);
+        ctx.set_input_attr("yes_defining_in", "reissuance_token", TOKEN);
+
+        let mut fields = BTreeMap::new();
+        for (name, expr) in [
+            ("YES_TOKEN_ASSET", "$inputs.yes_defining_in.issued_asset"),
+            ("YES_REISSUANCE_TOKEN", "$inputs.yes_defining_in.reissuance_token"),
+            ("SPENT_ASSET", "$inputs.yes_defining_in.asset"),
+        ] {
+            fields.insert(name.to_string(), ComputeSpec::Expr(expr.to_string()));
+        }
+        let ci = InstanceCreate { fields };
+
+        let result = eval_create_instance_fields(
+            &ci,
+            &ctx,
+            std::path::Path::new("/nonexistent"),
+            &std::collections::HashMap::new(),
+            lwk_wollet::ElementsNetwork::LiquidTestnet,
+            false,
+            false,
+        );
+
+        assert_eq!(result.get("YES_TOKEN_ASSET").map(String::as_str), Some(ISSUED));
+        assert_eq!(result.get("YES_REISSUANCE_TOKEN").map(String::as_str), Some(TOKEN));
+        assert_eq!(
+            result.get("SPENT_ASSET").map(String::as_str),
+            Some(LBTC),
+            "`asset` must stay the SPENT utxo's asset — if this ever aliases to the issued \
+             asset, every manifest using `.asset` on a funding input changes meaning",
+        );
+    }
+
+    /// Build a reissuance input whose `issuance` block carries the given extra keys.
+    #[cfg(test)]
+    fn reissue_input(extra: serde_json::Value) -> crate::manifest::Input {
+        let mut iss = serde_json::json!({ "kind": "reissue", "asset_amount_sat": 10 });
+        for (k, v) in extra.as_object().unwrap() {
+            iss[k] = v.clone();
+        }
+        serde_json::from_value(serde_json::json!({
+            "id": "yes_reissuance_in",
+            "utxo_source": "wallet",
+            "issuance": iss
+        }))
+        .expect("test input should deserialize")
+    }
+
+    /// The entropy that mints the real testnet market's YES asset, and the asset id it
+    /// must produce. Taken from the live chain (mint tx 14369d64…), so this also pins the
+    /// byte order: a block explorer prints this entropy reversed.
+    #[cfg(test)]
+    const YES_ENTROPY: &str = "f8326827828ee2aab3c4d273fb573a8cf89a401bbc6643637d439ff36c60b6b9";
+    #[cfg(test)]
+    const YES_ASSET: &str = "3a8b6b466346d9dbfcecd8c8d7b0c1873aee4e00fd5df0d95086a3f7eecd5a39";
+
+    #[test]
+    fn issuance_entropy_comes_from_the_reference() {
+        let mut ctx = ExecutionContext::new();
+        ctx.set_compile_param("YES_ISSUANCE_ENTROPY", YES_ENTROPY);
+
+        let inp = reissue_input(serde_json::json!({ "entropy": "instance.YES_ISSUANCE_ENTROPY" }));
+        let entropy = resolve_issuance_entropy(&inp, &ctx)
+            .expect("should resolve")
+            .expect("should be present");
+        assert_eq!(hex_bytes(&entropy), YES_ENTROPY);
+    }
+
+    #[test]
+    fn issuance_entropy_cross_check_rejects_a_reversed_value() {
+        // The failure this check exists for. A byte-reversed entropy — the order every
+        // block explorer prints — is still 32 well-formed bytes, still builds, still
+        // broadcasts, and reissues a completely different asset.
+        let mut reversed = pset_builder::decode_entropy_hex(YES_ENTROPY).unwrap();
+        reversed.reverse();
+
+        let mut ctx = ExecutionContext::new();
+        ctx.set_compile_param("YES_ISSUANCE_ENTROPY", hex_bytes(&reversed));
+        ctx.set_compile_param("YES_TOKEN_ASSET", YES_ASSET);
+
+        let inp = reissue_input(serde_json::json!({
+            "entropy": "instance.YES_ISSUANCE_ENTROPY",
+            "issued_asset": "instance.YES_TOKEN_ASSET"
+        }));
+        let err = resolve_issuance_entropy(&inp, &ctx).expect_err("reversed entropy must fail");
+        assert!(
+            err.to_string().contains("does not produce the declared asset"),
+            "unexpected error: {err}"
+        );
+
+        // …and the correct order passes the same check.
+        ctx.set_compile_param("YES_ISSUANCE_ENTROPY", YES_ENTROPY);
+        assert!(resolve_issuance_entropy(&inp, &ctx).unwrap().is_some());
+    }
+
+    #[test]
+    fn issuance_entropy_falls_back_to_provided_inputs() {
+        // The old path stays working: no `entropy` reference, value from the instance
+        // file's provided_inputs.
+        let mut ctx = ExecutionContext::new();
+        ctx.set_input(ResolvedInput {
+            id: "yes_reissuance_in".to_string(),
+            txid: "aa".repeat(32),
+            vout: 0,
+            amount_sat: 1,
+            asset: "bb".repeat(32),
+            issuance_entropy: Some(YES_ENTROPY.to_string()),
+        });
+        let entropy = resolve_issuance_entropy(&reissue_input(serde_json::json!({})), &ctx)
+            .expect("should resolve")
+            .expect("should be present");
+        assert_eq!(hex_bytes(&entropy), YES_ENTROPY);
+    }
+
+    #[test]
+    fn issuance_entropy_absent_is_reported_not_guessed() {
+        let ctx = ExecutionContext::new();
+        assert!(
+            resolve_issuance_entropy(&reissue_input(serde_json::json!({})), &ctx)
+                .expect("missing entropy is not an error, it is a None")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_entropy_reference_is_an_error() {
+        // Distinct from "absent": the manifest named a value and it was not there, which
+        // is a broken manifest rather than a missing instance field.
+        let ctx = ExecutionContext::new();
+        let inp = reissue_input(serde_json::json!({ "entropy": "instance.NOT_SET" }));
+        let err = resolve_issuance_entropy(&inp, &ctx).expect_err("should error");
+        assert!(err.to_string().contains("does not resolve"), "unexpected: {err}");
+    }
+
+    /// A 32-byte id can only travel by a `$` form. The bare-expression path is arithmetic
+    /// (`eval_expr` returns u64), which is exactly why `$inputs.` had to be added rather
+    /// than relying on the existing evaluator.
+    #[test]
+    fn a_bare_input_expression_cannot_carry_an_asset_id() {
+        let mut ctx = ExecutionContext::new();
+        ctx.set_input_attr("in0", "issued_asset", &"22".repeat(32));
+
+        assert!(
+            eval::eval_expr_str("inputs.in0.issued_asset", &ctx).is_err(),
+            "the numeric evaluator must reject a 32-byte id rather than mangle it",
+        );
+        assert_eq!(
+            eval::resolve_input_ref("in0.issued_asset", &ctx).as_deref(),
+            Some("22".repeat(32).as_str()),
+            "the string path must return it intact",
+        );
     }
 
     /// `eval_create_instance_fields` with a `"$params.KEY"` expression must prefer
@@ -3842,9 +4886,9 @@ mod tests {
             .expect("MakeOffer method exists");
         let ci = action.create_instance.as_ref().expect("MakeOffer has create_instance");
 
-        // Track the manifest's own setting — debug symbols change the CMR, so a hardcoded
+        // Track the manifest's own settings — debug symbols change the CMR, so a hardcoded
         // value here would verify a compilation mode the CLI never actually runs.
-        let debug = manifest.include_debug_symbols();
+        let compile_opts = manifest.compile_opts();
         let maker_pub_key = "e1512ae2f5b4ee8c12e9c57ccd0943273c6256f496516d3aefeaa16c32d3c05b";
         let lbtc_testnet = "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49";
         let usdt_ish = "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5";
@@ -3870,7 +4914,7 @@ mod tests {
             }
         }
 
-        let fields = eval_create_instance_fields(ci, &ctx, &manifest_path, &hints, net, false, debug);
+        let fields = eval_create_instance_fields(ci, &ctx, &manifest_path, &hints, net, false, &compile_opts);
 
         // MAKER_SPK is sha256 of the maker_payout covenant's scriptPubKey — verify against the
         // program itself rather than a copied constant.
@@ -3880,7 +4924,7 @@ mod tests {
         let payout_hints: std::collections::HashMap<String, String> =
             [("PUB_KEY".to_string(), "pubkey".to_string())].into_iter().collect();
         let payout_addr = crate::covenant::compute_covenant_address(
-            &payout_simf, &payout_params, &payout_hints, &[], net, debug,
+            &payout_simf, &payout_params, &payout_hints, &[], net, &compile_opts,
         )
         .expect("maker_payout covenant address compiles");
         let expect_spk_hash: String =
@@ -3918,7 +4962,7 @@ mod tests {
         );
         let offer_simf = manifest_path.parent().unwrap().join("tessera.simf");
         let offer_addr = crate::covenant::compute_covenant_address(
-            &offer_simf, &offer_params, &offer_hints, &[], net, debug,
+            &offer_simf, &offer_params, &offer_hints, &[], net, &compile_opts,
         )
         .expect("tessera_offer covenant address compiles from create_instance output");
 
@@ -3926,7 +4970,7 @@ mod tests {
         let mut bumped = offer_params.clone();
         bumped.insert("AMOUNT_B".to_string(), "50001".to_string());
         let bumped_addr = crate::covenant::compute_covenant_address(
-            &offer_simf, &bumped, &offer_hints, &[], net, debug,
+            &offer_simf, &bumped, &offer_hints, &[], net, &compile_opts,
         )
         .expect("bumped offer address compiles");
         assert_ne!(
@@ -3941,7 +4985,7 @@ mod tests {
         other_side.insert("OFFER_ASSET_ID".to_string(), lbtc_testnet.to_string());
         other_side.insert("OFFER_AMOUNT".to_string(), "999".to_string());
         let other_side_addr = crate::covenant::compute_covenant_address(
-            &offer_simf, &other_side, &offer_hints, &[], net, debug,
+            &offer_simf, &other_side, &offer_hints, &[], net, &compile_opts,
         )
         .expect("offer address compiles with a different asset A");
         assert_eq!(

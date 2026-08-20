@@ -8,7 +8,8 @@
 
 use anyhow::{anyhow, Result};
 use lwk_wollet::blocking::BlockchainBackend;
-use lwk_wollet::elements::{Transaction, Txid};
+use lwk_wollet::elements::confidential::{Asset, Value};
+use lwk_wollet::elements::{AssetId, Transaction, Txid};
 use lwk_wollet::{blocking, ElectrumClient, ElectrumUrl, ElementsNetwork, Update, Wollet};
 
 /// Which chain backend to connect to.
@@ -73,6 +74,38 @@ impl Backend {
             Backend::Electrum(c) => c.full_scan(wollet),
         }
         .map_err(|e| anyhow!("Sync failed: {e}"))
+    }
+
+    /// Read one on-chain output's explicit amount and asset.
+    ///
+    /// Returns `None` when the output is **confidential**: its value and asset are
+    /// commitments, and unblinding them needs a key this engine does not hold for a
+    /// covenant UTXO. Covenant outputs are explicit by construction (that is what lets a
+    /// Simplicity program introspect them), so in practice this resolves.
+    ///
+    /// The alternative — trusting the manifest or a `--input` flag for the amount — means
+    /// the value the sighash commits to is whatever an operator typed, and a mistyped one
+    /// produces a signature that is simply invalid against the real UTXO.
+    pub fn fetch_explicit_txout(&self, txid: Txid, vout: u32) -> Result<Option<(u64, AssetId)>> {
+        let txs = match self {
+            Backend::Esplora(c) => c.get_transactions(&[txid]),
+            Backend::Electrum(c) => c.get_transactions(&[txid]),
+        }
+        .map_err(|e| anyhow!("Cannot fetch transaction {txid}: {e}"))?;
+
+        let tx = txs
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("Transaction {txid} not found on chain"))?;
+        let out = tx
+            .output
+            .get(vout as usize)
+            .ok_or_else(|| anyhow!("{txid} has no output at index {vout}"))?;
+
+        Ok(match (out.value, out.asset) {
+            (Value::Explicit(value), Asset::Explicit(asset)) => Some((value, asset)),
+            _ => None,
+        })
     }
 
     /// Broadcast a finalized transaction, returning its txid.

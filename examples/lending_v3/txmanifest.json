@@ -16,8 +16,7 @@
           "REISSUANCE_FLAGS": "REISSUANCE_FLAGS"
         }
       },
-      "asset": "FACTORY_ASSET_ID",
-      "confidential": false
+      "asset": "FACTORY_ASSET_ID"
     },
     "lending_collateral": {
       "description": "The lending (collateral) covenant — out[5] of an offer-creation tx. Holds COLLATERAL_AMOUNT of the collateral asset with 2 taproot storage slots (slot0 = is_active, slot1 = current_debt). Its address is the CMR of lending.simf compiled with the full offer params + the 5 nested AssetAuth/AssetAuthVault cov-hashes (task 07), folded with the 2 storage leaves (task 01/02). Reproduced byte-exactly for live offer 43ab4efe (examples/lending_recon.rs). NOTE: slot1 (current_debt) is dynamic; expressing it as a computed 32-byte storage leaf needs the engine extension tracked in upnext/10.",
@@ -60,8 +59,7 @@
           }
         ]
       },
-      "asset": "COLLATERAL_ASSET_ID",
-      "confidential": false
+      "asset": "COLLATERAL_ASSET_ID"
     },
     "lending_collateral_active": {
       "description": "The lending (collateral) covenant in the ACTIVE state (after AcceptOffer). Identical to lending_collateral except storage slot0 = is_active = 1 (value 1, byte[31]=0x01), which changes the covenant address. slot1 = CURRENT_DEBT (unchanged on a fresh accept). De-risked by examples/lending_active_recon.rs (address flips vs pending).",
@@ -104,8 +102,7 @@
           }
         ]
       },
-      "asset": "COLLATERAL_ASSET_ID",
-      "confidential": false
+      "asset": "COLLATERAL_ASSET_ID"
     },
     "principal_asset_auth": {
       "description": "AssetAuth covenant holding the loan principal after activation — out[1] of AcceptOffer. Keyed by the borrower NFT (AssetAuth(borrower_nft, amount 1, with_asset_burn=false)); the borrower later claims the principal by presenting the borrower NFT. sha256(its spk) == PRINCIPAL_OUTPUT_SCRIPT_HASH.",
@@ -118,8 +115,7 @@
           "WITH_ASSET_BURN": "false"
         }
       },
-      "asset": "PRINCIPAL_ASSET_ID",
-      "confidential": false
+      "asset": "PRINCIPAL_ASSET_ID"
     },
     "lender_vault_finalized": {
       "description": "The lender's settlement vault in its FINALIZED state — RepayLoan out[1]. A FinalizedAssetAuthVault(vault=principal, keeper=lender_nft, supplier=borrower_nft, keeper_burn=true, supplier_burn=true, is_active=false, finalized=ZERO_HASH) holding the whole repayment less the protocol fee. 'Finalized' = the debt is fully cleared, so the vault no longer accepts supply; the lender withdraws from it by presenting (and burning) the lender NFT. The lending covenant hard-codes sha256(this spk) as FINALIZED_LENDER_VAULT_COV_HASH and enforces it on the repayment output, so this utxo_type MUST compile to that exact hash — asserted by lending_v3_repay_loan_vault_outputs_match_covenant_hashes.",
@@ -137,8 +133,7 @@
           "WITH_SUPPLIER_ASSET_BURN": "true"
         }
       },
-      "asset": "PRINCIPAL_ASSET_ID",
-      "confidential": false
+      "asset": "PRINCIPAL_ASSET_ID"
     },
     "protocol_fee_vault_finalized": {
       "description": "The protocol-fee settlement vault in its FINALIZED state — RepayLoan out[2]. Same shape as lender_vault_finalized but keyed to the protocol-fee keeper asset and with keeper_burn=FALSE (the keeper asset is a shared, reusable fee-collection NFT, so it is preserved rather than burned on withdrawal). Holds the 10% protocol cut of the loan interest. The lending covenant hard-codes sha256(this spk) as FINALIZED_PROTOCOL_FEE_VAULT_COV_HASH and enforces it on the repayment output.",
@@ -156,8 +151,7 @@
           "WITH_SUPPLIER_ASSET_BURN": "true"
         }
       },
-      "asset": "PRINCIPAL_ASSET_ID",
-      "confidential": false
+      "asset": "PRINCIPAL_ASSET_ID"
     },
     "lender_nft_script_auth": {
       "description": "ScriptAuth covenant holding the lender NFT during a pending offer — out[3]. Keyed by SCRIPT_HASH = sha256(lending covenant scriptPubKey, INCLUDING its 2 storage slots) i.e. the pending offer's own script hash (ScriptAuth::from_simplex_program). NOTE: the manifest's tapleaf/script-hash compute currently hashes the storage-less covenant; hashing a covenant-with-storage needs the engine extension tracked in upnext/11.",
@@ -168,8 +162,7 @@
           "SCRIPT_HASH": "LENDING_COV_SCRIPT_HASH"
         }
       },
-      "asset": "LENDER_NFT_ASSET_ID",
-      "confidential": false
+      "asset": "LENDER_NFT_ASSET_ID"
     }
   },
   "actions": {},

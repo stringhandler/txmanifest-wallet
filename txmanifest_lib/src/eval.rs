@@ -151,10 +151,122 @@ pub fn encode_leaf_value(
 ) -> Result<Vec<u8>> {
     let value_ref = item.get("value").and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("taproot leaf value item needs 'value': {item}"))?;
-    let resolved = resolve_ref(value_ref, ctx)
-        .unwrap_or_else(|| value_ref.trim_matches(['"', '\'']).to_string());
+    let resolved = match resolve_ref(value_ref, ctx) {
+        Some(resolved) => resolved,
+        // An explicitly namespaced reference that does not resolve is a *missing value*,
+        // never a literal. Falling through to the literal made the encoder report
+        // `invalid hex 'params.x'`, which sends the reader to inspect their hex when the
+        // real problem is that the action being run never sets `x`.
+        None if NAMESPACED_REF_PREFIXES.iter().any(|p| value_ref.starts_with(p)) => {
+            bail!(
+                "taproot leaf value '{value_ref}' does not resolve in this action. Every \
+                 action that builds this utxo_type's address has to supply it — declare it \
+                 as a param (or an instance field) there, or give this leaf a constant."
+            )
+        }
+        None => value_ref.trim_matches(['"', '\'']).to_string(),
+    };
     encode_leaf_bytes(item, &resolved)
 }
+
+/// Value prefixes that mark a string as a reference rather than a literal. A bare word is
+/// deliberately absent: `resolve_ref` accepts one as a param name, so it stays ambiguous
+/// with a literal and keeps the old fall-through.
+const NAMESPACED_REF_PREFIXES: [&str; 4] =
+    ["params.", "instance.", "compile_params.", "inputs."];
+
+/// Evaluate a site `args` expression in the action's scope.
+///
+/// Like [`resolve_compile_param_value`], except an explicitly namespaced reference that
+/// does not resolve is an error rather than its own name taken as a literal. A binding is
+/// the one place a site states what it means; silently passing `"params.foo"` through as
+/// the string `params.foo` would derive a real address for a value nobody supplied.
+pub fn resolve_site_arg(expr: &str, ctx: &ExecutionContext) -> Result<String> {
+    let expr = expr.trim();
+    if let Some(resolved) = resolve_ref(expr, ctx) {
+        return Ok(resolved);
+    }
+    if !expr.contains('.') {
+        if let Some(cp) = ctx.get_compile_param(expr) {
+            return Ok(cp.to_string());
+        }
+    }
+    if NAMESPACED_REF_PREFIXES.iter().any(|p| expr.starts_with(p)) {
+        bail!("'{expr}' does not resolve in this action");
+    }
+    Ok(expr.trim_matches(['"', '\'']).to_string())
+}
+
+/// Evaluate a blinding-factor field → a 32-byte scalar in big-endian order.
+///
+/// Accepts a JSON number, a decimal string, a `0x`-prefixed hex string of up to 32 bytes,
+/// or a reference (`params.X`, `instance.X`, …) resolving to either spelling. Both ends
+/// matter: a covenant's bootstrap constant is written `"1"`, while a factor recovered
+/// from a previous spend's witness arrives as a full 64-char scalar.
+///
+/// Arithmetic is accepted too — `params.RT_FACTOR + 1` is how a scheme that advances its
+/// factors expresses the output's from the input's, without the operator having to supply
+/// both. That path evaluates through the ordinary `u64` expression evaluator, so it holds
+/// only while the factors stay small; a hashed factor has to be written out in full.
+///
+/// Short values are right-aligned — `"1"` is the scalar one, not one followed by 31 zero
+/// bytes — which is the same convention `witness` `u256` values and the covenant's own
+/// arithmetic use.
+pub fn eval_scalar32(value: &serde_json::Value, ctx: &ExecutionContext) -> Result<[u8; 32]> {
+    let text = match value {
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => {
+            let s = s.trim();
+            resolve_ref(s, ctx).unwrap_or_else(|| s.to_string())
+        }
+        other => bail!("Unsupported blinding factor value: {other}"),
+    };
+    let text = text.trim();
+
+    let bytes = if text.starts_with("0x") || text.starts_with("0X") {
+        hex_to_bytes(text)?
+    } else if text.chars().all(|c| c.is_ascii_digit()) && !text.is_empty() {
+        let n: u128 = text.parse().map_err(|_| {
+            anyhow::anyhow!(
+                "Blinding factor '{text}' is too large to write in decimal — use a \
+                 0x-prefixed 64-char hex scalar"
+            )
+        })?;
+        n.to_be_bytes().to_vec()
+    } else {
+        // Not a literal and not a bare reference: try it as an expression, so
+        // `params.RT_FACTOR + 1` resolves. `eval_expr` is u64, which is the documented
+        // ceiling on this form.
+        let n = eval_expr(text, ctx).map_err(|e| {
+            anyhow::anyhow!(
+                "Blinding factor '{text}' is not a decimal integer, 0x-prefixed hex, or an \
+                 expression this action can evaluate: {e}"
+            )
+        })?;
+        (n as u128).to_be_bytes().to_vec()
+    };
+
+    if bytes.len() > 32 {
+        bail!("Blinding factor '{text}' is {} bytes, must be at most 32", bytes.len());
+    }
+    let mut out = [0u8; 32];
+    out[32 - bytes.len()..].copy_from_slice(&bytes);
+    if out == [0u8; 32] {
+        bail!(
+            "Blinding factor is zero. Zero is not a valid scalar, and a zero asset \
+             blinding factor makes the output explicit — which is the one thing a \
+             reissuance token may not be."
+        );
+    }
+    Ok(out)
+}
+
+/// The `type` values a computed taproot leaf payload item may declare.
+///
+/// Lives next to the encoder that implements them, and is what the published schema
+/// enumerates, so the two cannot drift; `leaf_value_types_are_all_encodable` pins that.
+pub const LEAF_VALUE_TYPES: [&str; 7] =
+    ["u8", "u16", "u32", "u64", "bytes32", "bytes", "pubkey"];
 
 /// Encode a taproot leaf payload item given its already-resolved `value` string.
 /// Split from [`encode_leaf_value`] so callers that resolve `value` themselves (e.g.
@@ -411,6 +523,16 @@ fn resolve_ref(name: &str, ctx: &ExecutionContext) -> Option<String> {
             return Some(v.to_string());
         }
     }
+    // `inputs.<id>.<field>` — the explicit, unambiguous spelling. The bare
+    // `<id>.<field>` form below still works, but it collides with every other
+    // namespace: an input called `params` or `instance` would shadow one, and an
+    // input's own field name can never be told apart from a namespace by shape
+    // alone. Prefer this form in new manifests.
+    if let Some(rest) = name.strip_prefix("inputs.") {
+        let (input_id, field) = rest.split_once('.')?;
+        return resolve_input_field(input_id, field, ctx);
+    }
+
     // input_id.field  (e.g. "collateral.amount_sat", "yes_rt.reissuance_token")
     if let Some(dot) = name.rfind('.') {
         let input_id = &name[..dot];
@@ -431,6 +553,55 @@ fn resolve_ref(name: &str, ctx: &ExecutionContext) -> Option<String> {
         }
     }
     None
+}
+
+/// Resolve any dotted reference (`instance.X`, `params.X`, `inputs.<id>.<field>`) to its
+/// STRING value, or `None` if it does not resolve.
+///
+/// The public door onto the same resolver `eval_asset_label` uses. Callers that need a
+/// 32-byte value — an asset id, an issuance entropy — must come through here rather than
+/// [`eval_expr_str`], which is arithmetic and returns a `u64`.
+pub fn resolve_value_ref(name: &str, ctx: &ExecutionContext) -> Option<String> {
+    resolve_ref(name.trim(), ctx)
+}
+
+/// Resolve a `<input_id>.<field>` reference — the tail of an `inputs.` / `$inputs.` path.
+///
+/// Public so `create_instance` field expressions can take the same route: they need a
+/// STRING, and the ordinary expression evaluator returns a u64.
+pub fn resolve_input_ref(rest: &str, ctx: &ExecutionContext) -> Option<String> {
+    let (input_id, field) = rest.split_once('.')?;
+    resolve_input_field(input_id, field, ctx)
+}
+
+/// Resolve one field of a resolved input.
+///
+/// ⚠️ `asset` is the asset of the UTXO being **spent**. On an input that carries a new
+/// issuance those are two different things — a wallet L-BTC UTXO minting a new asset has
+/// `asset` = L-BTC — so the newly created ids are exposed under distinct names,
+/// `issued_asset` and `reissuance_token`, rather than shadowing `asset`. Getting this
+/// wrong is silent and expensive: it writes L-BTC's id into a field meant to hold the
+/// asset the transaction just created.
+///
+/// Available fields:
+///
+/// - `asset`            — asset id of the spent UTXO
+/// - `amount_sat`       — its value
+/// - `issued_asset`     — asset id created by this input's issuance, if any
+/// - `reissuance_token` — reissuance token id created by this input's issuance, if any
+/// - `issuance_entropy` — the issuance entropy, hex. Set once the PSET is built, so a
+///   constructor can persist it; a later reissuance of the same asset needs it and cannot
+///   derive it from anything on chain.
+fn resolve_input_field(input_id: &str, field: &str, ctx: &ExecutionContext) -> Option<String> {
+    if let Some(inp) = ctx.get_input(input_id) {
+        match field {
+            "amount_sat" => return Some(inp.amount_sat.to_string()),
+            "asset" => return Some(inp.asset.clone()),
+            "issuance_entropy" => return inp.issuance_entropy.clone(),
+            _ => {}
+        }
+    }
+    ctx.get_input_attr(input_id, field).map(str::to_string)
 }
 
 // ---------------------------------------------------------------------------
@@ -687,6 +858,115 @@ fn substitute_vars(expr: &str, ctx: &ExecutionContext) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod leaf_value_type_tests {
+    use super::*;
+
+    /// The published schema enumerates [`LEAF_VALUE_TYPES`], so a name listed there but
+    /// not handled by the encoder would be a schema that green-lights a manifest the
+    /// engine then rejects mid-run.
+    #[test]
+    fn leaf_value_types_are_all_encodable() {
+        for ty in LEAF_VALUE_TYPES {
+            // One value that is legal for every listed type: hex types want hex, integer
+            // types want digits, and "1" reads as both.
+            let value = if ty.starts_with('u') { "1" } else { "0x01" };
+            let item = serde_json::json!({ "value": value, "type": ty });
+            assert!(
+                encode_leaf_bytes(&item, value).is_ok(),
+                "schema advertises leaf value type '{ty}' but the encoder rejects it"
+            );
+        }
+        // And the converse: a type the schema does not list is not quietly encodable.
+        let bogus = serde_json::json!({ "value": "1", "type": "u512" });
+        assert!(encode_leaf_bytes(&bogus, "1").is_err());
+    }
+
+    /// An unresolved `params.X` in a leaf must say so, not be encoded as its own name.
+    ///
+    /// The literal fall-through is for genuine literals; for a namespaced reference it
+    /// produced `invalid hex 'params.dest_addr_script_hash'` — an error about hex, for a
+    /// problem that is entirely about a param the running action does not declare.
+    #[test]
+    fn unresolved_namespaced_leaf_reference_names_the_reference() {
+        let ctx = crate::context::ExecutionContext::new();
+        let item = serde_json::json!({ "value": "params.dest_addr_script_hash", "type": "bytes32" });
+        let err = encode_leaf_value(&item, &ctx).expect_err("unresolved ref must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("params.dest_addr_script_hash"), "{msg}");
+        assert!(msg.contains("does not resolve"), "should not blame the hex: {msg}");
+
+        // A resolved one still encodes...
+        let mut ctx = crate::context::ExecutionContext::new();
+        ctx.set_param("dest_addr_script_hash", format!("0x{}", "11".repeat(32)));
+        assert_eq!(encode_leaf_value(&item, &ctx).unwrap().len(), 32);
+
+        // ...and a real literal still falls through untouched.
+        let literal = serde_json::json!({ "value": "0x01", "type": "bytes" });
+        assert_eq!(
+            encode_leaf_value(&literal, &ExecutionContext::new()).unwrap(),
+            vec![0x01]
+        );
+    }
+}
+
+#[cfg(test)]
+mod scalar32_tests {
+    use super::*;
+    use crate::context::ExecutionContext;
+
+    /// The bootstrap constant. `"1"` has to mean the scalar one — right-aligned — because
+    /// that is what the covenant adds to and what Elements compares the reissuance nonce
+    /// against; left-aligning it would silently produce a different, unreproducible factor.
+    #[test]
+    fn decimal_one_is_right_aligned() {
+        let ctx = ExecutionContext::new();
+        let mut expected = [0u8; 32];
+        expected[31] = 1;
+        assert_eq!(eval_scalar32(&serde_json::json!("1"), &ctx).unwrap(), expected);
+        assert_eq!(eval_scalar32(&serde_json::json!(1), &ctx).unwrap(), expected);
+    }
+
+    #[test]
+    fn hex_and_refs_resolve() {
+        let mut ctx = ExecutionContext::new();
+        ctx.set_compile_param("YES_ABF", "0x02");
+        let mut expected = [0u8; 32];
+        expected[31] = 2;
+        assert_eq!(eval_scalar32(&serde_json::json!("0x02"), &ctx).unwrap(), expected);
+        assert_eq!(eval_scalar32(&serde_json::json!("instance.YES_ABF"), &ctx).unwrap(), expected);
+
+        // A factor recovered from a previous spend's witness arrives full-width.
+        let full = format!("0x{}", "ab".repeat(32));
+        assert_eq!(eval_scalar32(&serde_json::json!(full), &ctx).unwrap(), [0xabu8; 32]);
+    }
+
+    /// The `+1` chain: the operator supplies the factor the UTXO holds, and the output's
+    /// follows from it. Supplying both would be two chances to get one number right.
+    #[test]
+    fn arithmetic_over_a_param_resolves() {
+        let mut ctx = ExecutionContext::new();
+        ctx.set_param("RT_FACTOR", "4");
+        let mut expected = [0u8; 32];
+        expected[31] = 5;
+        assert_eq!(
+            eval_scalar32(&serde_json::json!("params.RT_FACTOR + 1"), &ctx).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn rejects_zero_and_oversized() {
+        let ctx = ExecutionContext::new();
+        // Zero is not a scalar, and a zero abf is what makes an output explicit — the one
+        // thing a reissuance token may not be.
+        assert!(eval_scalar32(&serde_json::json!("0"), &ctx).is_err());
+        assert!(eval_scalar32(&serde_json::json!(format!("0x{}", "00".repeat(32))), &ctx).is_err());
+        assert!(eval_scalar32(&serde_json::json!(format!("0x{}", "11".repeat(33))), &ctx).is_err());
+        assert!(eval_scalar32(&serde_json::json!("not-a-scalar"), &ctx).is_err());
+    }
 }
 
 #[cfg(test)]

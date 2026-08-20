@@ -13,7 +13,9 @@ use simplicityhl::ast::ElementsJetHinter;
 use simplicityhl::simplicity::bit_machine::{ExecTracker, FrameIter, NodeOutput};
 use simplicityhl::simplicity::jet::elements::{ElementsEnv, ElementsUtxo};
 use simplicityhl::simplicity::BitMachine;
-use simplicityhl::{simplicity, Arguments, CompiledProgram, WitnessTypes, WitnessValues};
+use simplicityhl::{
+    simplicity, Arguments, CompiledProgram, UnstableFeatures, WitnessTypes, WitnessValues,
+};
 
 /// Signs `(key_label, kind, sighash)` and returns a 64-byte Schnorr signature.
 type SigSigner = dyn Fn(&str, &str, &[u8; 32]) -> Result<[u8; 64]>;
@@ -30,6 +32,67 @@ const NUMS_KEY_BYTES: [u8; 32] = [
     0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
 ];
 
+/// How a `.simf` program is compiled — the manifest's `simplicity_hl` block reduced to
+/// what the compiler actually takes. Build it with
+/// [`Manifest::compile_opts`](crate::manifest::Manifest::compile_opts).
+///
+/// Every helper in this module takes `impl Into<CompileOpts>`, so callers that predate
+/// unstable features (recon examples, tests) can keep passing a bare `bool` for debug
+/// symbols and get "no unstable features" — the same thing the compiler defaults to.
+#[derive(Debug, Clone)]
+pub struct CompileOpts {
+    /// Include SimplicityHL debug symbols. Changes the CMR, and therefore every covenant
+    /// address; see [`SimplicityHl::debug_symbols`](crate::manifest::SimplicityHl::debug_symbols).
+    pub debug_symbols: bool,
+    /// Unstable compiler features the program may use (`simc -Z <name>`). Purely a gate:
+    /// enabling a feature never changes generated code, so it never moves an address.
+    pub unstable_features: UnstableFeatures,
+}
+
+impl Default for CompileOpts {
+    fn default() -> Self {
+        Self {
+            debug_symbols: false,
+            unstable_features: UnstableFeatures::none(),
+        }
+    }
+}
+
+impl From<bool> for CompileOpts {
+    fn from(debug_symbols: bool) -> Self {
+        Self {
+            debug_symbols,
+            ..Self::default()
+        }
+    }
+}
+
+impl From<&CompileOpts> for CompileOpts {
+    fn from(opts: &CompileOpts) -> Self {
+        opts.clone()
+    }
+}
+
+/// The single place this crate hands a program to the SimplicityHL compiler.
+///
+/// Every covenant address, CMR and dry-run in this crate goes through here, so the
+/// toolchain settings cannot be applied on some paths and forgotten on others — which
+/// for `debug_symbols` would mean deriving two different addresses for one covenant.
+fn compile_program(
+    source: String,
+    arguments: Arguments,
+    opts: &CompileOpts,
+) -> Result<CompiledProgram> {
+    CompiledProgram::new_with_unstable(
+        source,
+        &opts.unstable_features,
+        arguments,
+        opts.debug_symbols,
+        Box::new(ElementsJetHinter::new()),
+    )
+    .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))
+}
+
 /// Compile a `.simf` file and return the Simplicity tapleaf hash (32 bytes, natural byte order).
 ///
 /// This is an intermediate taproot value (TapLeafHash). To get the value that the Simplicity
@@ -39,16 +102,15 @@ pub fn compute_tapleaf_hash(
     simf_path: &Path,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
-    include_debug_symbols: bool,
+    opts: impl Into<CompileOpts>,
 ) -> Result<[u8; 32]> {
+    let opts = opts.into();
     let source = std::fs::read_to_string(simf_path)
         .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    let compiled =
-        CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
-            .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
+    let compiled = compile_program(source, arguments, &opts)?;
     let commit = compiled.commit();
     let cmr = commit.cmr();
     let leaf_ver = simplicity_leaf_version();
@@ -67,9 +129,9 @@ pub fn compute_covenant_script_hash(
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     network: lwk_wollet::ElementsNetwork,
-    include_debug_symbols: bool,
+    opts: impl Into<CompileOpts>,
 ) -> Result<[u8; 32]> {
-    compute_covenant_script_hash_with_leaves(simf_path, compile_params, type_hints, &[], network, include_debug_symbols)
+    compute_covenant_script_hash_with_leaves(simf_path, compile_params, type_hints, &[], network, opts)
 }
 
 /// Like [`compute_covenant_script_hash`] but folds `extra_leaf_payloads` (taproot storage
@@ -82,9 +144,9 @@ pub fn compute_covenant_script_hash_with_leaves(
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
     network: lwk_wollet::ElementsNetwork,
-    include_debug_symbols: bool,
+    opts: impl Into<CompileOpts>,
 ) -> Result<[u8; 32]> {
-    let addr = compute_covenant_address(simf_path, compile_params, type_hints, extra_leaf_payloads, network, include_debug_symbols)?;
+    let addr = compute_covenant_address(simf_path, compile_params, type_hints, extra_leaf_payloads, network, opts)?;
     let spk = addr.script_pubkey();
     Ok(sha256::Hash::hash(spk.as_bytes()).to_byte_array())
 }
@@ -96,16 +158,42 @@ pub fn check_compile(
     simf_path: &Path,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
-    include_debug_symbols: bool,
+    opts: impl Into<CompileOpts>,
 ) -> Result<()> {
+    let opts = opts.into();
     let source = std::fs::read_to_string(simf_path)
         .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
-        .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
+    compile_program(source, arguments, &opts)?;
     Ok(())
+}
+
+/// The witnesses a `.simf` program declares, as `name -> rendered type`.
+///
+/// Deliberately stops at the front end: `TemplateProgram` parses and type-checks the source
+/// on its own, and a witness's type never depends on a `param::` value, so this needs no
+/// compile params. That is what lets `validate` check witness declarations against the
+/// program at a point where instance fields and action params are still unknown.
+pub fn program_witness_types(
+    simf_path: &Path,
+    opts: impl Into<CompileOpts>,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let opts = opts.into();
+    let source = std::fs::read_to_string(simf_path)
+        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let template = simplicityhl::TemplateProgram::new_with_unstable(
+        source,
+        &opts.unstable_features,
+        Box::new(ElementsJetHinter::new()),
+    )
+    .map_err(|e| anyhow::anyhow!("SimplicityHL parse/analyse failed: {e}"))?;
+    Ok(template
+        .witness_types()
+        .iter()
+        .map(|(name, ty)| (name.to_string(), ty.to_string()))
+        .collect())
 }
 
 /// Compile a named function from a `.simf` file and return the [`CompiledFunction`].
@@ -120,14 +208,20 @@ pub fn compile_simf_function(
     fn_name: Option<&str>,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
+    opts: impl Into<CompileOpts>,
 ) -> Result<simplicityhl::CompiledFunction> {
+    let opts = opts.into();
     let source = std::fs::read_to_string(simf_path)
         .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    let template = simplicityhl::TemplateProgram::new(source, Box::new(ElementsJetHinter::new()))
-        .map_err(|e| anyhow::anyhow!("SimplicityHL parse/analyse failed: {e}"))?;
+    let template = simplicityhl::TemplateProgram::new_with_unstable(
+        source,
+        &opts.unstable_features,
+        Box::new(ElementsJetHinter::new()),
+    )
+    .map_err(|e| anyhow::anyhow!("SimplicityHL parse/analyse failed: {e}"))?;
     template
         .compile_function(fn_name, arguments)
         .map_err(|e| anyhow::anyhow!("SimplicityHL function compile failed: {e}"))
@@ -149,14 +243,20 @@ pub fn execute_simf_function(
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     input_hex: &str,
+    opts: impl Into<CompileOpts>,
 ) -> Result<String> {
+    let opts = opts.into();
     let source = std::fs::read_to_string(simf_path)
         .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    let template = simplicityhl::TemplateProgram::new(source, Box::new(ElementsJetHinter::new()))
-        .map_err(|e| anyhow::anyhow!("SimplicityHL parse/analyse failed: {e}"))?;
+    let template = simplicityhl::TemplateProgram::new_with_unstable(
+        source,
+        &opts.unstable_features,
+        Box::new(ElementsJetHinter::new()),
+    )
+    .map_err(|e| anyhow::anyhow!("SimplicityHL parse/analyse failed: {e}"))?;
 
     // Compile first to get the source type for input parsing.
     let compiled = template
@@ -186,6 +286,7 @@ pub fn execute_simf_function(
     _compile_params: &HashMap<String, String>,
     _type_hints: &HashMap<String, String>,
     _input_hex: &str,
+    _opts: impl Into<CompileOpts>,
 ) -> Result<String> {
     anyhow::bail!(
         "The `simf_fn` compute hook requires the `simplicity_eval` feature \
@@ -274,8 +375,9 @@ pub fn dry_run_covenant(
     input_index: u32,
     genesis_hash: BlockHash,
     debug_jets: bool,
-    include_debug_symbols: bool,
+    opts: impl Into<CompileOpts>,
 ) -> Result<()> {
+    let opts = opts.into();
     // Debug: all prints go to stdout so they interleave correctly with lifecycle output.
     use std::io::Write as _;
     let stdout = std::io::stdout();
@@ -344,9 +446,7 @@ pub fn dry_run_covenant(
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    let compiled =
-        CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
-            .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
+    let compiled = compile_program(source, arguments, &opts)?;
     let abi_meta = compiled
         .generate_abi_meta()
         .map_err(|e| anyhow::anyhow!("Cannot get ABI metadata: {e}"))?;
@@ -580,17 +680,16 @@ pub fn finalize_covenant_input(
     input_index: u32,
     genesis_hash: BlockHash,
     pset_input: &mut lwk_wollet::elements::pset::Input,
-    include_debug_symbols: bool,
+    opts: impl Into<CompileOpts>,
 ) -> Result<()> {
+    let opts = opts.into();
     // Compile
     let source = std::fs::read_to_string(simf_path)
         .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    let compiled =
-        CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
-            .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
+    let compiled = compile_program(source, arguments, &opts)?;
     let abi_meta = compiled
         .generate_abi_meta()
         .map_err(|e| anyhow::anyhow!("Cannot get ABI metadata: {e}"))?;
@@ -688,8 +787,9 @@ pub fn compute_covenant_address(
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
     network: lwk_wollet::ElementsNetwork,
-    include_debug_symbols: bool,
+    opts: impl Into<CompileOpts>,
 ) -> Result<Address> {
+    let opts = opts.into();
     eprintln!(
         "[covenant] compute_covenant_address: {} extra leaf(s), simf={}",
         extra_leaf_payloads.len(),
@@ -721,9 +821,7 @@ pub fn compute_covenant_address(
         .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
     eprintln!("[covenant] simf source loaded ({} bytes)", source.len());
 
-    let compiled =
-        CompiledProgram::new(source, arguments, include_debug_symbols, Box::new(ElementsJetHinter::new()))
-            .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
+    let compiled = compile_program(source, arguments, &opts)?;
     eprintln!("[covenant] SimplicityHL compilation OK");
 
     // Get CMR; tapscript leaf = CMR (32 bytes) as required by Elements Simplicity validator
@@ -768,62 +866,175 @@ pub fn compute_covenant_address(
     Ok(address)
 }
 
+/// A witness the program declares but this spending path never reads, written in the
+/// manifest as the bare string `"unused"`.
+///
+/// Every witness needs a concrete bit-vector before `populate_witnesses` can run, including
+/// the ones on branches the transaction environment is about to prune — a redemption path's
+/// `ORACLE_SIGNATURE`, an issuance path's `TOKENS_BURNED`. `"unused"` supplies the zero those
+/// slots want while still making the manifest name them, which is what keeps a witness the
+/// program declares and the manifest forgets an error instead of a silent zero.
+pub const UNUSED_WITNESS: &str = "unused";
+
 /// Build `WitnessValues` from a manifest-file witness map using the compiled program's own
 /// `WitnessTypes` so the caller never needs to specify SimplicityHL type syntax.
 ///
-/// Only entries with `"type": "simplicityhl"` are processed.  Any witness declared in the
-/// program but not supplied in `witnesses` is filled with a zero value — these are typically
-/// signing witnesses (e.g. SIGNATURE) that live on branches pruned by the tx environment and
-/// are never checked by the BitMachine; we need _some_ concrete value so `populate_witnesses`
-/// can run before pruning.
+/// The manifest's witness map and the program's witness list must agree exactly: every
+/// witness the program declares has to appear here — as a `"type": "simplicityhl"` value, a
+/// `"type": "Signature"` entry already resolved by [`inject_computed_signatures`], or the
+/// bare string [`UNUSED_WITNESS`] — and every entry here has to name a witness the program
+/// declares. `"type": "taproot_leaf"` is the one exception: it selects which tap leaf to
+/// spend and is never read by the program, so it is not matched against the witness list.
+///
+/// Nothing is inferred. An earlier version zero-filled anything the manifest left out, which
+/// made a mistyped witness name and a deliberate omission produce identical transactions —
+/// the program read a zero either way, and the failure surfaced much later as a covenant
+/// that simply did not satisfy.
 fn build_witness_values_from_types(
     witnesses: Option<&serde_json::Value>,
     witness_types: &WitnessTypes,
 ) -> Result<WitnessValues> {
     use simplicityhl::parse::ParseFromStr as _;
     use simplicityhl::str::WitnessName;
-    use simplicityhl::value::Value;
 
     let obj = witnesses.and_then(|v| v.as_object());
 
     let mut map = std::collections::HashMap::new();
+    // Names that matched a program witness, whether or not a value came out of them —
+    // so a witness that failed for its own reason is not also reported as missing.
+    let mut declared = std::collections::HashSet::new();
+    let mut problems: Vec<String> = Vec::new();
 
-    // Parse user-provided simplicityhl witnesses.
-    if let Some(obj) = obj {
-        for (name, def) in obj {
-            if def.get("type").and_then(|v| v.as_str()) != Some("simplicityhl") {
-                continue;
-            }
-            let value_str = match def.get("value").and_then(|v| v.as_str()) {
-                Some(s) => s,
-                None => continue,
-            };
-            let witness_name = WitnessName::parse_from_str(name)
-                .map_err(|e| anyhow::anyhow!("Invalid witness name '{name}': {e}"))?;
-            let Some(ty) = witness_types.get(&witness_name) else {
-                continue;
-            };
-            let value = Value::parse_from_str(value_str, ty).map_err(|e| {
-                anyhow::anyhow!("Cannot parse witness '{name}' = '{value_str}': {e}")
-            })?;
-            map.insert(witness_name, value);
+    for (name, def) in obj.into_iter().flatten() {
+        // A leaf selector, not a value the program reads.
+        if def.get("type").and_then(|v| v.as_str()) == Some("taproot_leaf") {
+            continue;
+        }
+
+        let witness_name = WitnessName::parse_from_str(name)
+            .map_err(|e| anyhow::anyhow!("Invalid witness name '{name}': {e}"))?;
+        let Some(ty) = witness_types.get(&witness_name) else {
+            problems.push(format!(
+                "'{name}' is declared here but the program has no such witness"
+            ));
+            continue;
+        };
+        declared.insert(witness_name.shallow_clone());
+
+        if def.as_str() == Some(UNUSED_WITNESS) {
+            map.insert(witness_name, zero_value_for_type(ty));
+            continue;
+        }
+
+        match def.get("type").and_then(|v| v.as_str()) {
+            Some("simplicityhl") => match def.get("value").and_then(|v| v.as_str()) {
+                Some(value_str) => match parse_witness_value(name, value_str, ty) {
+                    Ok(value) => {
+                        map.insert(witness_name, value);
+                    }
+                    Err(e) => problems.push(e.to_string()),
+                },
+                None => problems.push(format!("'{name}' has no string \"value\"")),
+            },
+            // Still `Signature` means `inject_computed_signatures` did not replace it, i.e.
+            // no signer was available. Zeroing it would fail deep inside `bip_0340_verify`
+            // with nothing pointing back at the missing key.
+            Some("Signature") => problems.push(format!(
+                "'{name}' is a Signature witness that was never signed — no signer was \
+                 available for this input"
+            )),
+            Some(other) => problems.push(format!(
+                "'{name}' has unrecognized type '{other}' (expected \"simplicityhl\", \
+                 \"Signature\", \"taproot_leaf\", or the bare string \"{UNUSED_WITNESS}\")"
+            )),
+            None => problems.push(format!(
+                "'{name}' must be an object carrying a \"type\", or the bare string \
+                 \"{UNUSED_WITNESS}\""
+            )),
         }
     }
 
-    // Fill zero values for any witness not supplied — these live on pruned branches
-    // (e.g. SIGNATURE on the cancel path when PATH = Left) and are never executed,
-    // but populate_witnesses needs a concrete bit-vector for every node before pruning.
-    for (name, ty) in witness_types.iter() {
-        if !map.contains_key(name) {
-            map.insert(name.shallow_clone(), zero_value_for_type(ty));
-        }
+    let missing: Vec<String> = witness_types
+        .iter()
+        .filter(|(name, _)| !declared.contains(*name))
+        .map(|(name, ty)| format!("{name}: {ty}"))
+        .collect();
+    if !missing.is_empty() {
+        problems.push(format!(
+            "{} witness(es) the program declares are missing from the manifest:\n    {}\n  \
+             Give each one a value, or `\"unused\"` if this path never reads it.",
+            missing.len(),
+            missing.join("\n    ")
+        ));
+    }
+
+    if !problems.is_empty() {
+        anyhow::bail!("Witnesses do not match the program:\n  {}", problems.join("\n  "));
     }
 
     Ok(WitnessValues::from(map))
 }
 
+/// Parse one witness value against the type the compiled program declares for it,
+/// accepting an unprefixed hex literal for the integer types.
+///
+/// SimplicityHL literals need `0x`; without it a hash reads as an *identifier* and fails
+/// with `Variable \`ea0b…\` is not defined`, which says nothing about the real problem.
+/// Meanwhile every hash this crate produces — `script_hash_of_address`, `committed_output`,
+/// a tapleaf compute — is bare hex, and `build_args_json` already normalizes exactly this
+/// for compile params. Witnesses were the one path left where the same value had to be
+/// spelled differently.
+///
+/// The prefix is only tried **after** a plain parse fails, and only when the string is
+/// hex of exactly the type's width. That ordering is what keeps it safe: `"100"` for a
+/// u64 parses as decimal 100 and is never reinterpreted as 0x100.
+fn parse_witness_value(
+    name: &str,
+    value_str: &str,
+    ty: &simplicityhl::ResolvedType,
+) -> Result<simplicityhl::Value> {
+    use simplicityhl::value::Value;
+
+    let first_error = match Value::parse_from_str(value_str, ty) {
+        Ok(value) => return Ok(value),
+        Err(e) => e,
+    };
+
+    if let Some(hex_digits) = uint_hex_width(ty) {
+        let bare = value_str.trim();
+        if bare.len() == hex_digits && bare.chars().all(|c| c.is_ascii_hexdigit()) {
+            if let Ok(value) = Value::parse_from_str(&format!("0x{bare}"), ty) {
+                return Ok(value);
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "Cannot parse witness '{name}' = '{value_str}': {first_error}"
+    ))
+}
+
+/// Hex digits in a full-width literal of an unsigned integer type, or `None` for any
+/// other type (a tuple, an enum, `Either` — where a bare hex string is meaningless).
+fn uint_hex_width(ty: &simplicityhl::ResolvedType) -> Option<usize> {
+    use simplicityhl::types::{TypeInner, UIntType};
+
+    match ty.as_inner() {
+        TypeInner::UInt(uint_ty) => Some(match uint_ty {
+            UIntType::U1 | UIntType::U2 | UIntType::U4 | UIntType::U8 => 2,
+            UIntType::U16 => 4,
+            UIntType::U32 => 8,
+            UIntType::U64 => 16,
+            UIntType::U128 => 32,
+            UIntType::U256 => 64,
+        }),
+        _ => None,
+    }
+}
+
 /// Produce a structurally-valid zero/default value for a SimplicityHL `ResolvedType`.
-/// Used to satisfy `populate_witnesses` for witnesses on pruned branches.
+/// This is what a witness declared [`UNUSED_WITNESS`] resolves to: `populate_witnesses`
+/// needs a concrete bit-vector for every node before the environment prunes the branch.
 fn zero_value_for_type(ty: &simplicityhl::ResolvedType) -> simplicityhl::Value {
     use simplicityhl::num::U256;
     use simplicityhl::types::{TypeInner, UIntType};
@@ -1016,6 +1227,158 @@ fn network_to_params(network: lwk_wollet::ElementsNetwork) -> &'static AddressPa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a `WitnessTypes` the way a compiled program hands one over.
+    fn witness_types(entries: &[(&str, simplicityhl::ResolvedType)]) -> WitnessTypes {
+        use simplicityhl::parse::ParseFromStr as _;
+        use simplicityhl::str::WitnessName;
+        WitnessTypes::from(
+            entries
+                .iter()
+                .map(|(n, ty)| (WitnessName::parse_from_str(n).unwrap(), ty.clone()))
+                .collect::<std::collections::HashMap<_, _>>(),
+        )
+    }
+
+    /// Nothing is inferred: the manifest's witness map and the program's witness list
+    /// must name exactly the same set, in both directions.
+    #[test]
+    fn every_program_witness_must_be_declared() {
+        use simplicityhl::parse::ParseFromStr as _;
+        use simplicityhl::types::{ResolvedType, UIntType};
+
+        let types = witness_types(&[
+            ("STATE", ResolvedType::from(UIntType::U64)),
+            ("TOKENS_BURNED", ResolvedType::from(UIntType::U64)),
+        ]);
+        let declared = serde_json::json!({
+            "STATE": { "type": "simplicityhl", "value": "1" }
+        });
+
+        // Missing: the old code zero-filled TOKENS_BURNED here and built a transaction
+        // that spent against a value nobody chose.
+        let err = build_witness_values_from_types(Some(&declared), &types).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("TOKENS_BURNED"), "{msg}");
+        assert!(msg.contains("unused"), "the error should name the way out: {msg}");
+
+        // `"unused"` is that way out, and resolves to the zero the pruned branch wants.
+        let declared = serde_json::json!({
+            "STATE": { "type": "simplicityhl", "value": "1" },
+            "TOKENS_BURNED": "unused"
+        });
+        let values = build_witness_values_from_types(Some(&declared), &types)
+            .expect("\"unused\" should satisfy the requirement");
+        assert_eq!(values.iter().count(), 2);
+        let burned = simplicityhl::str::WitnessName::parse_from_str("TOKENS_BURNED").unwrap();
+        assert_eq!(
+            values.get(&burned).map(ToString::to_string),
+            Some(zero_value_for_type(&ResolvedType::from(UIntType::U64)).to_string()),
+        );
+
+        // And the other direction: a name the program does not have is no longer dropped.
+        let declared = serde_json::json!({
+            "STATE": { "type": "simplicityhl", "value": "1" },
+            "TOKENS_BURNED": "unused",
+            "TOEKNS_BURNED": { "type": "simplicityhl", "value": "5" }
+        });
+        let err = build_witness_values_from_types(Some(&declared), &types).unwrap_err();
+        assert!(format!("{err:#}").contains("TOEKNS_BURNED"), "{err:#}");
+
+        // A leaf selector shares the map but is not a program witness either way.
+        let declared = serde_json::json!({
+            "STATE": { "type": "simplicityhl", "value": "1" },
+            "TOKENS_BURNED": "unused",
+            "SPEND_PATH": { "type": "taproot_leaf", "source": { "type": "formula", "expr": "leaf" } }
+        });
+        build_witness_values_from_types(Some(&declared), &types)
+            .expect("taproot_leaf should be exempt");
+    }
+
+    /// A witness may be written as bare hex — but a decimal must never become hex.
+    ///
+    /// Every hash this crate hands to a manifest is unprefixed (`script_hash_of_address`,
+    /// `committed_output`), and compile params already accept that spelling, so a witness
+    /// carrying one used to die with `Variable \`ea0b…\` is not defined` — an error about
+    /// an undefined variable, for a value that was never meant to be a name.
+    ///
+    /// The second half is the one that could do damage: `"100"` is legal hex *and* legal
+    /// decimal, and reading it as `0x100` would silently substitute 256 for 100 in a
+    /// covenant. The prefix is only ever tried after a plain parse fails, which is what
+    /// makes that impossible.
+    #[test]
+    fn witness_values_accept_bare_hex_without_reinterpreting_decimals() {
+        use simplicityhl::types::{ResolvedType, TypeConstructible as _, UIntType};
+        use simplicityhl::value::Value;
+
+        let u256 = ResolvedType::from(UIntType::U256);
+        let hash = "ea0b31e6e0b85a6bcca7130df0ee49958670920378e5e31370ad885a157cfd46";
+        let parsed = parse_witness_value("DEST_ADDR_SCRIPT_HASH", hash, &u256)
+            .expect("bare hex hash should parse");
+        assert_eq!(
+            parsed,
+            Value::parse_from_str(&format!("0x{hash}"), &u256).unwrap(),
+            "bare hex must mean exactly what the 0x form means"
+        );
+        // The explicit spelling keeps working.
+        assert_eq!(
+            parse_witness_value("W", &format!("0x{hash}"), &u256).unwrap(),
+            parsed
+        );
+
+        // The dangerous case: for a u8, "12" is both legal decimal and a legal 2-digit
+        // hex literal. It parses as decimal on the first attempt, so the retry never
+        // runs and the value stays 12 — not 0x12, which is 18.
+        let u8_ty = ResolvedType::from(UIntType::U8);
+        assert_eq!(
+            parse_witness_value("W", "12", &u8_ty).unwrap(),
+            Value::parse_from_str("12", &u8_ty).unwrap()
+        );
+        assert_ne!(
+            parse_witness_value("W", "12", &u8_ty).unwrap(),
+            Value::parse_from_str("0x12", &u8_ty).unwrap()
+        );
+
+        // Hex of the wrong width is not silently padded, and the error still names the
+        // witness and its value rather than the retry.
+        let err = parse_witness_value("W", "ea0b31", &u256).unwrap_err();
+        assert!(err.to_string().contains('W') && err.to_string().contains("ea0b31"), "{err}");
+
+        // Non-integer types never get the retry: a name is a name there.
+        let err = parse_witness_value("ACTION", "deadbeef", &ResolvedType::unit()).unwrap_err();
+        assert!(err.to_string().contains("ACTION"), "{err}");
+    }
+
+    /// End-to-end proof that `simplicity_hl.unstable_features` reaches the compiler.
+    ///
+    /// Both directions matter. Compiling *with* the feature shows the manifest can enable
+    /// it at all; compiling *without* must still fail, or the manifest key would be
+    /// decorative — the gate silently open for every program in the repo.
+    ///
+    /// Manifest and program are both fixtures of this crate rather than an example under
+    /// `examples/`: a test about feature plumbing should not fail because an example was
+    /// edited, and should not stop working if one is ever moved or dropped.
+    #[test]
+    fn unstable_features_gate_a_program_that_uses_enums() {
+        let manifest = crate::manifest::Manifest::from_json_str(
+            r#"{ "manifest_version": "1", "protocol": "t",
+                 "simplicity_hl": { "unstable_features": ["enums"] } }"#,
+        )
+        .expect("manifest should parse");
+        let simf_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/unstable_enums.simf");
+        let (params, hints) = (HashMap::new(), HashMap::new());
+
+        check_compile(&simf_path, &params, &hints, manifest.compile_opts())
+            .expect("the fixture should compile with the manifest's unstable features");
+
+        let err = check_compile(&simf_path, &params, &hints, CompileOpts::default())
+            .expect_err("gated syntax must not compile with no unstable features enabled");
+        assert!(
+            err.to_string().contains("enums"),
+            "error should name the missing feature: {err}"
+        );
+    }
 
     /// The adapted last-will book example must compile with the three pubkey params
     /// wired in. Guards the tutorial's `.simf` against compiler/syntax drift.
@@ -1576,3 +1939,4 @@ mod tests {
         );
     }
 }
+
