@@ -1,6 +1,6 @@
 {
   "$schema": "../../schema/txmanifest.schema.json",
-  "$comment": "Ported from Deadcat.Live (github.com/Resolvr-io/deadcat, src-tauri/crates/deadcat-sdk). prediction_market.simf is a verbatim copy of that crate's contract/prediction_market.simf — do not edit it, every byte feeds the CMR and therefore all four covenant addresses. The upstream SDK builds these transactions in Rust (src/pset/*.rs); this manifest is the same seven spending paths expressed declaratively. Deadcat's OTHER covenant, maker_order.simf, is deliberately NOT modelled: it tweaks the MAKER's key as the taproot internal key, while this engine hardcodes the NUMS internal key (covenant.rs::NUMS_KEY_BYTES), so no address it computed would be correct. See README.md for the full list of what is and is not executable today.",
+  "$comment": "Ported from Deadcat.Live (github.com/Resolvr-io/deadcat, src-tauri/crates/deadcat-sdk). prediction_market.simf is a verbatim copy of that crate's contract/prediction_market.simf — do not edit it, every byte feeds the CMR and therefore all four covenant addresses. The upstream SDK builds these transactions in Rust (src/pset/*.rs); this manifest is the same seven spending paths expressed declaratively. Deadcat's OTHER covenant, maker_order.simf, is deliberately NOT modelled: it tweaks the MAKER's key as the taproot internal key, while this engine hardcodes the NUMS internal key (covenant.rs::NUMS_KEY_BYTES), so no address it computed would be correct.",
   "manifest_version": "0.1.0",
   "protocol": "deadcat-prediction-market",
   "description": "Deadcat — a binary (YES/NO) prediction market on Liquid. Collateral is locked in a covenant that mints matched YES/NO token pairs at 2 x COLLATERAL_PER_TOKEN per pair; an off-chain oracle commits the outcome ON-CHAIN as a state transition, and winners then burn tokens to draw the whole pair's collateral. The market's state (0 dormant, 1 unresolved, 2 resolved-YES, 3 resolved-NO) is not stored in a variable — it is a tapdata leaf in the covenant's tap tree, so each state is a DIFFERENT address and the covenant proves its own state by comparing the address it is being spent from. Modelled as one template: one instance per market.",
@@ -1504,7 +1504,7 @@
             },
             {
               "id": "yes_tokens_burn",
-              "description": "The YES tokens destroyed (output 1). The covenant requires a ZERO-LENGTH scriptPubKey here — sha256 of the empty script — not the 1-byte OP_RETURN this engine emits. See README.md.",
+              "description": "The YES tokens destroyed (output 1). The covenant requires a ZERO-LENGTH scriptPubKey here — sha256 of the empty script — not the 1-byte OP_RETURN this engine emits.",
               "destination": {
                 "type": "burn"
               },
