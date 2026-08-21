@@ -108,7 +108,7 @@ mod tests {
     use super::*;
 
     const BASE: &str = r#"{
-        "manifest_version": "0.1.0",
+        "manifest_version": "0.2.0",
         "protocol": "test",
         "description": "the original prose",
         "actions": { "A": {
@@ -157,9 +157,9 @@ mod tests {
     #[test]
     fn array_order_is_significant() {
         // Input/output ordering is consensus-relevant — covenants introspect by index.
-        let two = r#"{"manifest_version":"1","protocol":"t","actions":{"A":{"outputs":[
+        let two = r#"{"manifest_version":"0.2.0","protocol":"t","actions":{"A":{"outputs":[
             {"id":"a","destination":"change"},{"id":"b","destination":"change"}]}}}"#;
-        let swapped = r#"{"manifest_version":"1","protocol":"t","actions":{"A":{"outputs":[
+        let swapped = r#"{"manifest_version":"0.2.0","protocol":"t","actions":{"A":{"outputs":[
             {"id":"b","destination":"change"},{"id":"a","destination":"change"}]}}}"#;
         assert_ne!(manifest_id(two).unwrap(), manifest_id(swapped).unwrap());
     }

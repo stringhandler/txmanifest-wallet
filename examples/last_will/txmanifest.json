@@ -1,6 +1,6 @@
 {
     "$schema": "../../schema/txmanifest.schema.json",
-    "manifest_version": "0.1.0",
+    "manifest_version": "0.2.0",
     "protocol": "last-will",
     "description": "Last Will — a recursive covenant with three spending paths: inherit (after a 180-day timelock), cold-key break-out, and hot-key refresh. Modelled as a class: one instance per will.",
     "chain": "liquid",
@@ -122,7 +122,7 @@
                                     "sig_type": "sig_hash_all",
                                     "source": {
                                         "type": "wallet",
-                                        "key": "compile_params.COLD_PUB_KEY"
+                                        "key": "instance.COLD_PUB_KEY"
                                     },
                                     "description": "BIP340 signature from the cold key."
                                 },
@@ -162,7 +162,7 @@
                                     "sig_type": "sig_hash_all",
                                     "source": {
                                         "type": "wallet",
-                                        "key": "compile_params.HOT_PUB_KEY"
+                                        "key": "instance.HOT_PUB_KEY"
                                     },
                                     "description": "BIP340 signature from the hot key."
                                 },
@@ -194,7 +194,7 @@
                                 "utxo_type": "last_will"
                             },
                             "sequence": {
-                                "relative_blocks": "compile_params.INHERIT_BLOCKS"
+                                "relative_blocks": "instance.INHERIT_BLOCKS"
                             },
                             "witnesses": {
                                 "SPEND_PATH": {
@@ -208,7 +208,7 @@
                                     "sig_type": "sig_hash_all",
                                     "source": {
                                         "type": "wallet",
-                                        "key": "compile_params.INHERITOR_PUB_KEY"
+                                        "key": "instance.INHERITOR_PUB_KEY"
                                     },
                                     "description": "BIP340 signature from the heir's key."
                                 },

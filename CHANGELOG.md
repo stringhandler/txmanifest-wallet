@@ -13,7 +13,26 @@ No changelog was kept before 0.2.0; for 0.1.x see the git history.
 **Breaking:** a manifest that sets `utxo_type.confidential` no longer parses.
 Confidentiality is now declared per output.
 
+**Breaking:** `manifest_version` must now read `"0.2.0"`. The field carries the
+version of the *format*, which moves separately from these crates, and the
+change above is a breaking format change — so it moves too. Every example was
+updated.
+
 ### Added
+
+- **`manifest_version` is enforced.** It was parsed, printed by `describe`, and
+  otherwise ignored, so a `0.1.0` file went on being read under `0.2.0` rules.
+  It is now checked in `Manifest::from_json_str` — the one door every caller
+  goes through, rather than in `validate`, which is a command a user may never
+  run. The rule is semver with the qualification semver places on initial
+  development: a differing major is incompatible, and while the major is `0` a
+  differing minor is too, because `0.y` is where the breaking changes live. The
+  patch is ignored.
+
+  It has to be a hard error and not a warning. A stale manifest does not
+  announce itself: `0.1.0` declared confidentiality per `utxo_type` and `0.2.0`
+  declares it per output, so a `0.1.0` file that happens to use no removed field
+  parses clean and then builds a transaction with the wrong outputs blinded.
 
 - **Blinding factors can be declared.** An output or an input may carry a
   `blinding` block of `asset_bf` / `value_bf`. Each is a 32-byte scalar written

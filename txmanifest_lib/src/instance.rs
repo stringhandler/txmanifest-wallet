@@ -17,11 +17,6 @@ pub struct InstanceFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance: Option<InstanceData>,
 
-    /// Legacy flat param map. Read-only for backward compatibility;
-    /// new constructors write `instance` instead.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub instance_params: HashMap<String, String>,
-
     /// Pre-resolved covenant input outpoints, keyed by action input id.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub provided_inputs: HashMap<String, ResolvedInput>,
@@ -54,17 +49,6 @@ impl InstanceFile {
             .get("instance")
             .and_then(|i| serde_json::from_value(i.clone()).ok());
 
-        // Legacy: instance_params flat map
-        let instance_params: HashMap<String, String> = v
-            .get("instance_params")
-            .and_then(|m| m.as_object())
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
-
         let provided_inputs: HashMap<String, ResolvedInput> = v
             .get("provided_inputs")
             .and_then(|m| m.as_object())
@@ -88,7 +72,7 @@ impl InstanceFile {
             })
             .unwrap_or_default();
 
-        Ok(Self { instance, instance_params, provided_inputs })
+        Ok(Self { instance, provided_inputs })
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
@@ -98,15 +82,9 @@ impl InstanceFile {
             .with_context(|| format!("Cannot write instance file: {}", path.display()))
     }
 
-    /// Return a field value — checks `instance.fields` first, falls back to
-    /// legacy `instance_params`.
+    /// Return a field value from `instance.fields`.
     pub fn get_field(&self, name: &str) -> Option<&str> {
-        if let Some(inst) = &self.instance {
-            if let Some(v) = inst.fields.get(name) {
-                return Some(v.as_str());
-            }
-        }
-        self.instance_params.get(name).map(String::as_str)
+        self.instance.as_ref()?.fields.get(name).map(String::as_str)
     }
 
     /// Template name if an instance is present.

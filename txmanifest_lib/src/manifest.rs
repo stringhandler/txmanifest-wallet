@@ -12,10 +12,66 @@ use simplicityhl::{UnstableFeature, UnstableFeatures};
 // Top-level file
 // ---------------------------------------------------------------------------
 
+/// The manifest format version this build implements, as specified by ELIP-205.
+///
+/// This is the version of the *file format*, not of this crate. The two move
+/// independently: a release that changes no format field leaves this alone, and a
+/// format change lands here whether or not the crate version moved with it.
+pub const FORMAT_VERSION: &str = "0.2.0";
+
+/// Split a version string into `(major, minor)`, ignoring the patch and any
+/// pre-release or build metadata.
+fn parse_major_minor(version: &str) -> Option<(u64, u64)> {
+    let core = version.trim().split(['-', '+']).next()?;
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor))
+}
+
+/// Reject a manifest whose declared format version this build cannot read.
+///
+/// Semver, with the qualification semver itself places on initial development: a
+/// differing major is incompatible, and **while the major is `0` a differing minor
+/// is incompatible too**, because `0.y` puts the breaking changes in `y`. The patch
+/// is ignored either way — that is what makes it a patch.
+///
+/// This has to be a hard error rather than a warning, because reading a file under
+/// the wrong version's rules does not fail on its own. `0.1.0` declared
+/// confidentiality per `utxo_type` and `0.2.0` declares it per output; a `0.1.0`
+/// manifest that happens to use no removed field still parses clean here and then
+/// builds a transaction with the wrong outputs blinded.
+pub fn check_format_version(declared: &str) -> Result<(), String> {
+    let (want_major, want_minor) =
+        parse_major_minor(FORMAT_VERSION).expect("FORMAT_VERSION is a semver version");
+
+    let Some((major, minor)) = parse_major_minor(declared) else {
+        return Err(format!(
+            "manifest_version \"{declared}\" is not a semver version; \
+             this build implements {FORMAT_VERSION}"
+        ));
+    };
+
+    // Above 0.x the minor is additive, so an older minor still reads. At 0.x it is not.
+    let readable = major == want_major && (major != 0 || minor == want_minor);
+    if readable {
+        return Ok(());
+    }
+
+    Err(format!(
+        "manifest_version \"{declared}\" is a different format from the {FORMAT_VERSION} this \
+         build implements. While the major version is 0 the minor version carries the breaking \
+         changes, so 0.1 and 0.2 are different formats rather than two revisions of one."
+    ))
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
-    /// Manifest schema version.
+    /// Version of the manifest **format** this file is written against, as
+    /// specified by ELIP-205 — not the version of any tool that reads it.
+    /// Checked against [`FORMAT_VERSION`] at parse time; see
+    /// [`check_format_version`] for the compatibility rule.
     pub manifest_version: String,
     pub protocol: String,
     pub description: Option<String>,
@@ -184,9 +240,16 @@ impl Manifest {
     ///    misspelled `create_instance` used to parse fine and then simply never
     ///    fire; now it fails loudly at load time.
     pub fn from_json_str(raw: &str) -> Result<Self, serde_json::Error> {
+        use serde::de::Error as _;
+
         let mut value: serde_json::Value = serde_json::from_str(raw)?;
         strip_authoring_keys(&mut value);
-        serde_json::from_value(value)
+        let manifest: Self = serde_json::from_value(value)?;
+        // Checked here rather than in `validate` so that no caller can reach a parsed
+        // Manifest without it having happened — `validate` is a command a user may never
+        // run, and every other entry point funnels through this one.
+        check_format_version(&manifest.manifest_version).map_err(serde_json::Error::custom)?;
+        Ok(manifest)
     }
 
     /// Find an action by name across all contract templates.
@@ -1049,8 +1112,7 @@ pub struct FieldDef {
 /// differed in when they run, never in shape.
 ///
 /// Targets use dot-path notation:
-///   `"instance.FOO"` — sets a contract-template field (`compile_params.` is a
-///                      deprecated alias)
+///   `"instance.FOO"` — sets a contract-template field
 ///   `"params.FOO"`   — sets an action param
 ///
 /// Values are [`ComputeSpec`], the same type `create_instance.fields` uses, so all
@@ -1498,6 +1560,47 @@ impl Manifest {
 mod tests {
     use super::*;
 
+    /// The version this build implements must read, and every other 0.x line must not.
+    ///
+    /// The patch is deliberately ignored and the minor deliberately is not: at 0.x the
+    /// minor is where a breaking change lands, so 0.1 and 0.2 are separate formats.
+    #[test]
+    fn format_version_gate_is_minor_exact_at_zero_x() {
+        assert!(check_format_version("0.2.0").is_ok());
+        assert!(check_format_version("0.2.7").is_ok(), "patch must not gate");
+        assert!(check_format_version("0.2.0-rc1").is_ok(), "pre-release must not gate");
+
+        for rejected in ["0.1.0", "0.3.0", "1.0.0", "1.2.0"] {
+            assert!(
+                check_format_version(rejected).is_err(),
+                "{rejected} is a different format from {FORMAT_VERSION} and must be refused"
+            );
+        }
+    }
+
+    /// A version that is not a version is refused rather than treated as 0.0.
+    #[test]
+    fn format_version_rejects_non_semver() {
+        for junk in ["", "latest", "v0.2.0", "0.x"] {
+            assert!(check_format_version(junk).is_err(), "{junk:?} must not be read as a version");
+        }
+    }
+
+    /// The gate has to be unreachable-around: every caller goes through `from_json_str`,
+    /// so a stale manifest must fail there and not merely warn somewhere later.
+    #[test]
+    fn parsing_refuses_a_manifest_from_an_older_format() {
+        let err = Manifest::from_json_str(r#"{ "manifest_version": "0.1.0", "protocol": "t" }"#)
+            .expect_err("a 0.1.0 manifest must not parse under 0.2.0");
+        assert!(
+            err.to_string().contains("0.1.0"),
+            "the error should name the version that was refused, got: {err}"
+        );
+
+        Manifest::from_json_str(r#"{ "manifest_version": "0.2.0", "protocol": "t" }"#)
+            .expect("the current format version must parse");
+    }
+
     fn parse_field_value(json: &str) -> ComputeSpec {
         serde_json::from_str(json).expect("ComputeSpec should deserialize")
     }
@@ -1506,7 +1609,7 @@ mod tests {
     fn manifest_json(extra: &str) -> String {
         format!(
             r#"{{
-                "manifest_version": "1",
+                "manifest_version": "0.2.0",
                 "protocol": "test",
                 "actions": {{ "A": {{ "inputs": [
                     {{ "id": "in0", "utxo_source": "wallet"{extra} }}
@@ -1539,46 +1642,46 @@ mod tests {
     fn removed_legacy_fields_are_rejected() {
         // `deploy` — superseded by `create_instance`.
         let deploy = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "actions": { "A": { "deploy": true } }
         }"#;
         // Top-level `compile_params` — superseded by the flat `params` map.
         let compile_params = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "compile_params": { "user_provided": {}, "derived": {} }
         }"#;
         // `attestation_version` — never read by anything.
         let attestation = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "attestation_version": "1"
         }"#;
         // `confidential_outputs` — a file-level default no manifest ever set, so it
         // only ever passed through to the chain default. Set it per output instead.
         let confidential = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "confidential_outputs": true
         }"#;
 
         // `lifecycle` — a free-form state/transition block nothing enforced; removed
         // for now, so it must not silently reappear as an ignored key.
         let lifecycle = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "lifecycle": { "states": ["a"], "transitions": {} }
         }"#;
 
         // Both folded into the `simplicity_hl` object.
         let hl_version = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "simplicity_hl_version": "0.6.0"
         }"#;
         let debug_symbols = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "compile_debug_symbols": true
         }"#;
 
         // `errors` — a code→description lookup table nothing ever read.
         let errors = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "errors": { "1": "something went wrong" }
         }"#;
         // `validations` — deferred to a future addition. Of the 11 entries the
@@ -1595,7 +1698,7 @@ mod tests {
         // starting point for that work, and the thing to delete if the decision is
         // that covenant-level enforcement is sufficient.
         let validations = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "actions": { "A": { "validations": [
                 { "id": "v", "rule": { "type": "arithmetic", "expr": "1 != 2" } }
             ] } }
@@ -1604,20 +1707,20 @@ mod tests {
         // Top-level `params` — no example ever used it; template `fields` is the live
         // path. Action-level `params` is a different field and still exists.
         let params = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "params": { "P": { "type": "u64" } }
         }"#;
         // Top-level `source` — never set by any manifest; the engine now always
         // falls back to "covenant.simf". Per-utxo_type `script.source` is unaffected.
         let source = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "source": "./covenant.simf"
         }"#;
 
         // `classes` — renamed to `contract_templates` to match tx_manifest_spec
         // (2026-07-06). `create_instance.class` became `template` in the same pass.
         let classes = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "classes": { "C": { "fields": {}, "methods": {} } }
         }"#;
 
@@ -1626,7 +1729,7 @@ mod tests {
         // executed hooks in alphabetical rather than declaration order), and
         // `on_validate` was never executed at all.
         let hooks = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "actions": { "A": { "hooks": { "on_validate": "assert!(true)" } } }
         }"#;
 
@@ -1637,14 +1740,14 @@ mod tests {
         // NOTE: this puts the repo *ahead* of tx_manifest_spec, whose Hooks extension
         // still lists `args.NAME` as an assignment target.
         let args = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "actions": { "A": { "args": { "SIG": { "type": "bytes32" } } } }
         }"#;
 
         // Action-level `ui` — flattened to a bare `intent` string (the wrapper held
         // exactly one field). Per-leg `ui` is a different field and still exists.
         let action_ui = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "actions": { "A": { "ui": { "action": "do the thing" } } }
         }"#;
 
@@ -1652,21 +1755,21 @@ mod tests {
         // the same type (`MethodDef` was a type alias for `Action`), and "methods" is
         // the OOP jargon `contract_templates` was chosen to avoid.
         let methods = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "contract_templates": { "T": { "fields": {}, "methods": {} } }
         }"#;
 
         // `is_constructor` — an action carrying `create_instance` *is* a constructor;
         // the flag was a second way of saying the same thing, and could disagree.
         let is_constructor = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "contract_templates": { "T": { "fields": {},
                 "actions": { "A": { "is_constructor": true } } } }
         }"#;
         // `create_instance.template` — the instance is always of the enclosing
         // template, so naming it invited creating an instance of a different one.
         let ci_template = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "contract_templates": { "T": { "fields": {},
                 "actions": { "A": { "create_instance": { "template": "T", "fields": {} } } } } }
         }"#;
@@ -1675,19 +1778,19 @@ mod tests {
         // they belong on the input. No manifest ever set the action-level map, and
         // Spec.md §8 places witnesses on an input descriptor only.
         let action_witnesses = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "actions": { "A": { "witnesses": { "SIG": { "type": "Signature" } } } }
         }"#;
 
         // `derived` — a boolean saying "this is computed", alongside `compute`, which
         // says the same thing and also says how. Only the second is load-bearing.
         let derived = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "actions": { "A": { "params": { "P": { "type": "u64", "derived": true } } } }
         }"#;
         // `formula` — merged into `compute`, whose bare-string form it now is.
         let formula = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "actions": { "A": { "params": { "P": { "type": "u64", "formula": "1 + 1" } } } }
         }"#;
 
@@ -1697,7 +1800,7 @@ mod tests {
         // tokens beside an explicit collateral UTXO. Every example set it `false`, and
         // the builder only ever consulted it to warn. `output.confidential` says it now.
         let utxo_type_confidential = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "utxo_types": { "t": { "description": "d", "confidential": true } }
         }"#;
 
@@ -1705,7 +1808,7 @@ mod tests {
         // same question ("where does this value come from, if not the user?") and its
         // name collided with `script.source`, which is a file path.
         let source = r#"{
-            "manifest_version": "1", "protocol": "test",
+            "manifest_version": "0.2.0", "protocol": "test",
             "actions": { "A": { "params": { "P": {
                 "type": "pubkey", "source": { "type": "wallet_key" } } } } }
         }"#;
@@ -1749,7 +1852,7 @@ mod tests {
         // `debug_symbols` changes every covenant address, so pin both the plumbing
         // and the default rather than trusting the field is wired up.
         let with_debug = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t",
+            r#"{ "manifest_version": "0.2.0", "protocol": "t",
                  "simplicity_hl": { "debug_symbols": true } }"#,
         )
         .expect("simplicity_hl should parse");
@@ -1757,7 +1860,7 @@ mod tests {
 
         // An empty block defaults to false...
         let empty = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t", "simplicity_hl": {} }"#,
+            r#"{ "manifest_version": "0.2.0", "protocol": "t", "simplicity_hl": {} }"#,
         )
         .expect("empty simplicity_hl should parse");
         assert!(!empty.include_debug_symbols());
@@ -1766,7 +1869,7 @@ mod tests {
         // `simc "<range>";` directive's job, so the key must be rejected.
         for key in ["version", "min_version", "simc"] {
             let json = format!(
-                r#"{{ "manifest_version": "1", "protocol": "t",
+                r#"{{ "manifest_version": "0.2.0", "protocol": "t",
                       "simplicity_hl": {{ "{key}": "0.6.0" }} }}"#
             );
             assert!(
@@ -1777,7 +1880,7 @@ mod tests {
 
         // ...as does an absent block entirely.
         let absent =
-            Manifest::from_json_str(r#"{ "manifest_version": "1", "protocol": "t" }"#).unwrap();
+            Manifest::from_json_str(r#"{ "manifest_version": "0.2.0", "protocol": "t" }"#).unwrap();
         assert!(!absent.include_debug_symbols());
     }
 
@@ -1789,7 +1892,7 @@ mod tests {
     fn destination_accepts_exactly_the_documented_forms() {
         let parse = |dest: &str| {
             Manifest::from_json_str(&format!(
-                r#"{{ "manifest_version": "1", "protocol": "t", "actions": {{ "A": {{ "outputs": [
+                r#"{{ "manifest_version": "0.2.0", "protocol": "t", "actions": {{ "A": {{ "outputs": [
                      {{ "id": "o0", "amount_sat": "1", "destination": {dest} }} ] }} }} }}"#
             ))
         };
@@ -1832,7 +1935,7 @@ mod tests {
     #[test]
     fn closed_utxo_type_binds_params_from_the_site_not_the_action() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t", "utxo_types": { "vault": {
+            r#"{ "manifest_version": "0.2.0", "protocol": "t", "utxo_types": { "vault": {
                  "description": "d",
                  "params": {
                    "STATE": { "type": "bytes32", "default": "0xff" },
@@ -1870,7 +1973,7 @@ mod tests {
     #[test]
     fn unbound_param_without_a_default_is_an_error_naming_it() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t", "utxo_types": { "vault": {
+            r#"{ "manifest_version": "0.2.0", "protocol": "t", "utxo_types": { "vault": {
                  "description": "d",
                  "params": { "DEBT": { "type": "u64" } },
                  "script": { "type": "simplicity", "source": "./x.simf" } } } }"#,
@@ -1893,7 +1996,7 @@ mod tests {
     fn leaf_payload_items_accept_exactly_the_documented_forms() {
         let parse = |item: &str| {
             Manifest::from_json_str(&format!(
-                r#"{{ "manifest_version": "1", "protocol": "t", "utxo_types": {{ "u": {{
+                r#"{{ "manifest_version": "0.2.0", "protocol": "t", "utxo_types": {{ "u": {{
                      "description": "d",
                      "script": {{ "type": "simplicity", "source": "./x.simf",
                                   "extra_leaves": [ {{ "type": "tapdata", "payload": [{item}] }} ] }} }} }} }}"#
@@ -1915,7 +2018,7 @@ mod tests {
         // `tapdata` is the only hashing scheme implemented; anything else was silently
         // hashed as tapdata anyway.
         let err = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t", "utxo_types": { "u": {
+            r#"{ "manifest_version": "0.2.0", "protocol": "t", "utxo_types": { "u": {
                  "description": "d",
                  "script": { "type": "simplicity", "source": "./x.simf",
                              "extra_leaves": [ { "type": "tapscript", "payload": ["0x01"] } ] } } } }"#,
@@ -1930,7 +2033,7 @@ mod tests {
         // the manifest listed — an entry that silently doesn't arrive shows up much later
         // as an "unstable feature not enabled" compile error.
         let enabled = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t",
+            r#"{ "manifest_version": "0.2.0", "protocol": "t",
                  "simplicity_hl": { "unstable_features": ["enums"] } }"#,
         )
         .expect("unstable_features should parse");
@@ -1943,9 +2046,9 @@ mod tests {
 
         // Absent block, empty block and empty list all mean "nothing unstable".
         for json in [
-            r#"{ "manifest_version": "1", "protocol": "t" }"#,
-            r#"{ "manifest_version": "1", "protocol": "t", "simplicity_hl": {} }"#,
-            r#"{ "manifest_version": "1", "protocol": "t",
+            r#"{ "manifest_version": "0.2.0", "protocol": "t" }"#,
+            r#"{ "manifest_version": "0.2.0", "protocol": "t", "simplicity_hl": {} }"#,
+            r#"{ "manifest_version": "0.2.0", "protocol": "t",
                  "simplicity_hl": { "unstable_features": [] } }"#,
         ] {
             let m = Manifest::from_json_str(json).expect("should parse");
@@ -1955,7 +2058,7 @@ mod tests {
         // A name the compiler doesn't know is a load-time error, not a mystery compile
         // failure later — and the message says which names exist.
         let err = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t",
+            r#"{ "manifest_version": "0.2.0", "protocol": "t",
                  "simplicity_hl": { "unstable_features": ["enum"] } }"#,
         )
         .expect_err("a misspelled feature must not parse");
@@ -1965,7 +2068,7 @@ mod tests {
 
         // Both settings travel together to the compile sites.
         let both = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t",
+            r#"{ "manifest_version": "0.2.0", "protocol": "t",
                  "simplicity_hl": { "debug_symbols": true, "unstable_features": ["enums", "enums"] } }"#,
         )
         .expect("both settings should parse");
@@ -1981,7 +2084,7 @@ mod tests {
     #[test]
     fn wallet_computes_are_recognised_and_are_not_expressions() {
         let m = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t", "actions": { "A": { "params": {
+            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": { "params": {
                  "K": { "type": "pubkey",  "compute": { "type": "wallet", "wallet": "key" } },
                  "H": { "type": "bytes32", "compute": { "type": "wallet", "wallet": "script_hash" } },
                  "A": { "type": "string",  "compute": { "type": "wallet", "wallet": "address" } },
@@ -2009,12 +2112,12 @@ mod tests {
         // `"compute": "a + b"` is shorthand for `{"type":"expr","expr":"a + b"}`.
         // Callers read through `as_expr()`, so neither spelling is privileged.
         let bare = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t", "actions": { "A": {
+            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": {
                  "params": { "P": { "type": "u64", "compute": "1 + 1" } } } } }"#,
         )
         .expect("bare expression should parse");
         let spelled = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t", "actions": { "A": {
+            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": {
                  "params": { "P": { "type": "u64",
                    "compute": { "type": "expr", "expr": "1 + 1" } } } } } }"#,
         )
@@ -2033,7 +2136,7 @@ mod tests {
 
         // A tapleaf spec is not an expression, and must not masquerade as one.
         let tapleaf = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t", "actions": { "A": {
+            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": {
                  "params": { "P": { "type": "u64",
                    "compute": { "type": "tapleaf", "simf": "./a.simf" } } } } } }"#,
         )
@@ -2046,7 +2149,7 @@ mod tests {
         // Two *other* fields share the name and must be unaffected by the removal of
         // the top-level one: the per-utxo-type simf wiring, and the simf_fn list.
         let json = r#"{
-            "manifest_version": "1",
+            "manifest_version": "0.2.0",
             "protocol": "test",
             "actions": {
                 "A": {
@@ -2091,7 +2194,7 @@ mod tests {
     fn comment_key_is_allowed_at_top_level() {
         let json = r#"{
             "$comment": "file-level note",
-            "manifest_version": "1",
+            "manifest_version": "0.2.0",
             "protocol": "test"
         }"#;
         Manifest::from_json_str(json).expect("top-level $comment should be stripped");
@@ -2106,7 +2209,7 @@ mod tests {
     fn a_bad_compute_spec_names_the_problem() {
         let manifest_with = |compute: &str| {
             format!(
-                r#"{{ "manifest_version": "1", "protocol": "t", "actions": {{ "A": {{
+                r#"{{ "manifest_version": "0.2.0", "protocol": "t", "actions": {{ "A": {{
                      "params": {{ "P": {{ "type": "u64", "compute": {compute} }} }} }} }} }}"#
             )
         };
@@ -2139,7 +2242,7 @@ mod tests {
     fn a_bad_ui_spec_names_the_problem() {
         let manifest_with = |ui: &str| {
             format!(
-                r#"{{ "manifest_version": "1", "protocol": "t", "actions": {{ "A": {{
+                r#"{{ "manifest_version": "0.2.0", "protocol": "t", "actions": {{ "A": {{
                      "outputs": [ {{ "id": "o0", "destination": "change", "ui": {ui} }} ] }} }} }}"#
             )
         };
@@ -2163,7 +2266,7 @@ mod tests {
     #[test]
     fn both_ui_spellings_still_parse() {
         // The manual impl must not have narrowed what is accepted.
-        let json = r#"{ "manifest_version": "1", "protocol": "t", "actions": { "A": {
+        let json = r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": {
              "outputs": [
                { "id": "o0", "destination": "change", "ui": "bare label" },
                { "id": "o1", "destination": "change",

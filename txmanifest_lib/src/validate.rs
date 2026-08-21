@@ -903,7 +903,7 @@ mod tests {
     fn sites_must_bind_a_closed_utxo_types_required_params() {
         let validate_site = |dest: &str| {
             let manifest = Manifest::from_json_str(&format!(
-                r#"{{ "manifest_version": "1", "protocol": "t",
+                r#"{{ "manifest_version": "0.2.0", "protocol": "t",
                       "actions": {{ "A": {{
                         "params": {{ "claim": {{ "type": "bytes32" }} }},
                         "outputs": [ {{ "id": "o0", "amount_sat": "1", "destination": {dest} }} ] }} }},
@@ -936,7 +936,7 @@ mod tests {
 
         // `args` against a type with no interface binds nothing — say so.
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t",
+            r#"{ "manifest_version": "0.2.0", "protocol": "t",
                  "actions": { "A": { "outputs": [ { "id": "o0", "amount_sat": "1",
                    "destination": { "utxo_type": "plain", "args": { "X": "1" } } } ] } },
                  "utxo_types": { "plain": { "description": "d",
@@ -952,7 +952,7 @@ mod tests {
     /// given `witnesses` JSON, then validate it.
     fn validate_with_input_witnesses(witnesses: Value) -> Report {
         let manifest: Manifest = serde_json::from_value(serde_json::json!({
-            "manifest_version": "1",
+            "manifest_version": "0.2.0",
             "protocol": "test",
             "actions": {
                 "A": {
@@ -1134,7 +1134,7 @@ mod tests {
     /// with `PRINCIPAL_ASSET_ID` (an asset) and `AMOUNT` (a u64) declared as fields.
     fn validate_with_ui(intent: Option<&str>, legs: Value) -> Report {
         let manifest: Manifest = Manifest::from_json_str(&serde_json::json!({
-            "manifest_version": "1",
+            "manifest_version": "0.2.0",
             "protocol": "test",
             "contract_templates": { "T": {
                 "fields": {
@@ -1233,7 +1233,7 @@ mod tests {
         // A standalone action has no enclosing template, so there is nothing for it
         // to construct — and the old `create_instance.template` let it name any.
         let manifest: Manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t",
+            r#"{ "manifest_version": "0.2.0", "protocol": "t",
                  "actions": { "A": { "create_instance": { "fields": {} } } } }"#,
         )
         .expect("test manifest should parse");
@@ -1250,7 +1250,7 @@ mod tests {
     #[test]
     fn create_instance_inside_a_template_is_accepted() {
         let manifest: Manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t",
+            r#"{ "manifest_version": "0.2.0", "protocol": "t",
                  "contract_templates": { "T": { "fields": {},
                    "actions": { "A": { "create_instance": { "fields": {} } } } } } }"#,
         )
@@ -1274,7 +1274,7 @@ mod tests {
     fn validate_with_hook_and_params(set: Value, params: Value) -> Report {
         let manifest: Manifest = Manifest::from_json_str(
             &serde_json::json!({
-                "manifest_version": "1",
+                "manifest_version": "0.2.0",
                 "protocol": "test",
                 "actions": { "A": { "params": params, "on_pre_broadcast": { "set": set } } }
             })
@@ -1389,7 +1389,7 @@ mod tests {
     fn on_resolved_hooks_are_checked_too() {
         // The input hook and the action hook are one type now, so one rule covers both.
         let manifest: Manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t", "actions": { "A": { "inputs": [
+            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": { "inputs": [
                  { "id": "in0", "utxo_source": "wallet", "on_resolved": { "set": {
                    "instance.K": { "type": "wallet", "wallet": "key" } } } } ] } } }"#,
         )

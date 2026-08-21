@@ -747,7 +747,6 @@ pub fn run(
                     let asset_filter = input.asset.as_ref().and_then(|v| v.as_str()).map(|a| {
                         if let Some(k) = a
                             .strip_prefix("instance.")
-                            .or_else(|| a.strip_prefix("compile_params."))
                         {
                             ctx.get_compile_param(k).unwrap_or(a).to_string()
                         } else {
@@ -2315,7 +2314,6 @@ pub fn run(
                     .to_string(),
                 fields: fields.into_iter().collect(),
             }),
-            instance_params: std::collections::HashMap::new(),
             provided_inputs: std::collections::HashMap::new(),
         };
         match inst.write(&effective_instance_out) {
@@ -2815,7 +2813,6 @@ fn select_input(
         .map(|s| {
             if let Some(k) = s
                 .strip_prefix("instance.")
-                .or_else(|| s.strip_prefix("compile_params."))
             {
                 ctx.get_compile_param(k).unwrap_or(s)
             } else if let Some(k) = s.strip_prefix("params.") {
@@ -2836,7 +2833,6 @@ fn select_input(
     let resolve_amount_str = |s: &str| -> Option<u64> {
         let resolved = if let Some(k) = s
             .strip_prefix("instance.")
-            .or_else(|| s.strip_prefix("compile_params."))
         {
             ctx.get_compile_param(k).unwrap_or(s)
         } else if let Some(k) = s.strip_prefix("params.") {
@@ -2938,7 +2934,6 @@ fn select_input(
     let raw_label = input.asset.as_ref().and_then(|v| v.as_str()).unwrap_or("unknown");
     let asset_label = if let Some(k) = raw_label
         .strip_prefix("instance.")
-        .or_else(|| raw_label.strip_prefix("compile_params."))
     {
         ctx.get_compile_param(k).unwrap_or(raw_label)
     } else if let Some(k) = raw_label.strip_prefix("params.") {
@@ -3105,10 +3100,9 @@ fn amount_uses_fee_keyword(v: &serde_json::Value) -> bool {
 /// Resolve a witness `source.key` reference to a concrete pubkey hex for signing.
 ///
 /// Supports `params.NAME` (an action param — used when a covenant is keyed by a
-/// runtime value), plus the `$params.NAME` / `instance.NAME` forms (and the
-/// deprecated `compile_params.NAME` alias) that resolve against compile params /
-/// template fields. Anything else is returned verbatim and treated as a literal
-/// pubkey hex.
+/// runtime value), plus the `$params.NAME` / `instance.NAME` forms that resolve
+/// against compile params / template fields. Anything else is returned verbatim
+/// and treated as a literal pubkey hex.
 fn resolve_witness_signing_key<'a>(
     key_ref: &'a str,
     action_params: &'a std::collections::HashMap<String, String>,
@@ -3122,7 +3116,6 @@ fn resolve_witness_signing_key<'a>(
     if let Some(name) = key_ref
         .strip_prefix("$params.")
         .or_else(|| key_ref.strip_prefix("instance."))
-        .or_else(|| key_ref.strip_prefix("compile_params."))
     {
         if let Some(v) = compile_params.get(name) {
             return v.as_str();
@@ -3193,7 +3186,6 @@ fn resolve_utxo_site(
         let expr = expr.trim();
         if let Some(key) = expr
             .strip_prefix("instance.")
-            .or_else(|| expr.strip_prefix("compile_params."))
         {
             return base_params.get(key).cloned().ok_or_else(|| {
                 anyhow::anyhow!("no instance field '{key}' — defaults may only read instance scope")
@@ -3274,7 +3266,6 @@ fn apply_site_compile_param_overrides(
             param_type(&action.params, k)
         } else if let Some(k) = raw
             .strip_prefix("instance.")
-            .or_else(|| raw.strip_prefix("compile_params."))
         {
             base_hints.get(k).cloned()
         } else if !raw.contains('.') {
@@ -3402,7 +3393,6 @@ fn run_hook_block(
 
         if let Some(name) = target
             .strip_prefix("instance.")
-            .or_else(|| target.strip_prefix("compile_params."))
         {
             ctx.set_compile_param(name, &v);
         } else if let Some(name) = target.strip_prefix("params.") {
@@ -3466,7 +3456,6 @@ fn resolve_create_instance_leaves(
                     let vref = m.get("value").and_then(|v| v.as_str()).unwrap_or("");
                     let key = vref
                         .strip_prefix("instance.")
-                        .or_else(|| vref.strip_prefix("compile_params."))
                         .or_else(|| vref.strip_prefix("params."))
                         .unwrap_or(vref);
                     // A sibling computed field: only use the in-progress map (never a stale ctx value);
@@ -3541,7 +3530,6 @@ fn eval_create_instance_fields(
                         .or_else(|| {
                             expr.strip_prefix("$params.")
                                 .or_else(|| expr.strip_prefix("$instance."))
-                                .or_else(|| expr.strip_prefix("$compile_params."))
                                 .and_then(|name| {
                                     ctx.get_param(name)
                                         .or_else(|| ctx.get_compile_param(name))
@@ -3890,7 +3878,7 @@ mod tests {
                     None => String::new(),
                 };
                 Manifest::from_json_str(&format!(
-                    r#"{{ "manifest_version": "1", "protocol": "t", "actions": {{ "A": {{ "outputs": [
+                    r#"{{ "manifest_version": "0.2.0", "protocol": "t", "actions": {{ "A": {{ "outputs": [
                          {{ "id": "o0", "amount_sat": "1", "destination": "params.a"{extra} }} ] }} }} }}"#
                 ))
                 .expect("manifest should parse")
@@ -3930,7 +3918,7 @@ mod tests {
     #[test]
     fn closed_utxo_type_resolves_each_site_independently() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t",
+            r#"{ "manifest_version": "0.2.0", "protocol": "t",
                  "actions": { "A": { "params": { "claim": { "type": "bytes32" } } } },
                  "utxo_types": { "prize": {
                    "description": "d",
@@ -3978,7 +3966,7 @@ mod tests {
     #[test]
     fn closed_utxo_type_cannot_read_action_scope() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t",
+            r#"{ "manifest_version": "0.2.0", "protocol": "t",
                  "actions": { "A": { "params": { "claim": { "type": "bytes32" } } } },
                  "utxo_types": {
                    "leaky_leaf": {
@@ -4047,7 +4035,7 @@ mod tests {
     #[test]
     fn declared_inputs_that_never_reach_the_pset_are_detected() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t", "actions": { "A": { "inputs": [
+            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": { "inputs": [
                  { "id": "contest_in", "utxo_source": "prize_covenant" },
                  { "id": "fees_in",    "utxo_source": "wallet" } ] } } }"#,
         )
@@ -4099,7 +4087,7 @@ mod tests {
     #[test]
     fn change_outputs_are_never_skipped_for_a_missing_amount() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t", "actions": { "A": { "outputs": [
+            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": { "outputs": [
                  { "id": "change_out",   "asset": "lbtc", "destination": "change" },
                  { "id": "opt_change",   "asset": "lbtc", "destination": "change", "optional": true },
                  { "id": "opt_wallet",   "asset": "lbtc", "destination": "wallet", "optional": true },
@@ -4254,8 +4242,7 @@ mod tests {
     }
 
     /// A witness `source.key` may reference an action `param` (covenant keyed by a runtime
-    /// value), the `instance.` form, the legacy `$params.`/`compile_params.` compile-param
-    /// forms, or a literal hex.
+    /// value), the `$params.` / `instance.` compile-param forms, or a literal hex.
     #[test]
     fn witness_signing_key_resolves_action_param_and_compile_param() {
         use std::collections::HashMap;
@@ -4267,11 +4254,15 @@ mod tests {
 
         // action param (the p2pk runtime-key case)
         assert_eq!(resolve_witness_signing_key("params.pubkey", &action_params, &compile_params), "aa11");
-        // legacy compile-param forms (as used by the lending example)
+        // compile-param forms (as used by the lending example)
         assert_eq!(resolve_witness_signing_key("$params.BORROWER_PUB_KEY", &action_params, &compile_params), "bb22");
         assert_eq!(resolve_witness_signing_key("instance.BORROWER_PUB_KEY", &action_params, &compile_params), "bb22");
-        // Deprecated alias still accepted during the transition.
-        assert_eq!(resolve_witness_signing_key("compile_params.BORROWER_PUB_KEY", &action_params, &compile_params), "bb22");
+        // The removed `compile_params.` alias is no longer a namespace, so it is not
+        // resolved — it falls through as a literal like any other unrecognised string.
+        assert_eq!(
+            resolve_witness_signing_key("compile_params.BORROWER_PUB_KEY", &action_params, &compile_params),
+            "compile_params.BORROWER_PUB_KEY"
+        );
         // unknown / literal passes through verbatim
         assert_eq!(resolve_witness_signing_key("cc33ddee", &action_params, &compile_params), "cc33ddee");
     }

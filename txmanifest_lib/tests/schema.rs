@@ -66,7 +66,7 @@ fn schema_rejects_an_unknown_field() {
     // If this ever passes, the schema has stopped catching typos in downstream repos
     // and is worse than useless — it would be actively reassuring about broken files.
     let bad = serde_json::json!({
-        "manifest_version": "0.1.0",
+        "manifest_version": "0.2.0",
         "protocol": "test",
         "actions": { "A": { "inputs": [
             { "id": "in0", "utxo_source": "wallet", "from_addres": "typo" }
@@ -85,7 +85,7 @@ fn schema_accepts_the_authoring_keys() {
     let ok = serde_json::json!({
         "$schema": tx_manifest_lib::schema::SCHEMA_ID,
         "$comment": "file-level note",
-        "manifest_version": "0.1.0",
+        "manifest_version": "0.2.0",
         "protocol": "test",
         "actions": { "A": { "inputs": [
             { "id": "in0", "utxo_source": "wallet", "$comment": "why this input exists" }
@@ -163,7 +163,7 @@ fn both_spellings_of_ui_carry_the_label_cap() {
         serde_json::json!({ "label": long }),
     ] {
         let bad = serde_json::json!({
-            "manifest_version": "0.1.0",
+            "manifest_version": "0.2.0",
             "protocol": "test",
             "actions": { "A": { "outputs": [
                 { "id": "o0", "destination": "change", "ui": ui }

@@ -52,9 +52,7 @@ impl ParamOverrides {
         }
 
         // Instance fields are authoritative (locked at deploy time from chain data).
-        // Legacy flat instance_params loaded first; new instance.fields takes precedence.
         if let Some(inst) = instance {
-            values.extend(inst.instance_params.iter().map(|(k, v)| (k.clone(), v.clone())));
             if let Some(idata) = &inst.instance {
                 values.extend(idata.fields.iter().map(|(k, v)| (k.clone(), v.clone())));
             }

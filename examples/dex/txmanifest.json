@@ -1,7 +1,7 @@
 {
   "$schema": "../../schema/txmanifest.schema.json",
   "$comment": "Ported from Mosaik's tessera.simf (github.com/kaleidoswap/mosaik, crates/tessera/contracts/tessera.simf). Upstream substitutes the four offer terms as inline TESSERA_PARAM literals; here they are ordinary compile params. Change tessera.simf and every offer address changes — the terms live in the tapleaf. NOTE: the Refund method is not executable until upnext/12 (absolute nLockTime) lands; see its description.",
-  "manifest_version": "0.1.0",
+  "manifest_version": "0.2.0",
   "protocol": "tessera-dex",
   "description": "Tessera — a keyless atomic swap offer on Liquid, the primitive a Mosaik DEX is built from. One UTXO is one all-or-nothing offer: it holds asset A and is spendable by ANYONE who pays AMOUNT_B of ASSET_B to the maker (Settle), or, after TIMEOUT, by anyone who returns asset A to the maker (Refund). No signature on either path — the covenant is pure transaction introspection, and the maker is identified only by a scriptPubKey hash. Modelled as a class: one instance per offer.",
   "chain": "liquid",

@@ -172,8 +172,7 @@ pub fn encode_leaf_value(
 /// Value prefixes that mark a string as a reference rather than a literal. A bare word is
 /// deliberately absent: `resolve_ref` accepts one as a param name, so it stays ambiguous
 /// with a literal and keeps the old fall-through.
-const NAMESPACED_REF_PREFIXES: [&str; 4] =
-    ["params.", "instance.", "compile_params.", "inputs."];
+const NAMESPACED_REF_PREFIXES: [&str; 3] = ["params.", "instance.", "inputs."];
 
 /// Evaluate a site `args` expression in the action's scope.
 ///
@@ -506,11 +505,7 @@ fn resolve_ref(name: &str, ctx: &ExecutionContext) -> Option<String> {
     if name == "fee" {
         return Some(ctx.fee().to_string());
     }
-    if let Some(k) = name
-        .strip_prefix("instance.")
-        // Deprecated alias for `instance.` — remove after the transition release.
-        .or_else(|| name.strip_prefix("compile_params."))
-    {
+    if let Some(k) = name.strip_prefix("instance.") {
         return ctx.get_compile_param(k).map(str::to_string);
     }
     if let Some(k) = name.strip_prefix("params.") {
@@ -691,7 +686,7 @@ pub fn eval_simplicityhl_hook(
 /// Evaluate a `compute.expr` for a derived compile param.
 ///
 /// Variable references: bare identifiers matching a compile param name are substituted,
-/// as are `instance.KEY` prefixed forms (and the deprecated `compile_params.KEY` alias).
+/// as are `instance.KEY` prefixed forms.
 /// `pow(base, exp)` computes integer power
 /// (e.g. `pow(10, COLLATERAL_DECIMALS_MANTISSA)`).  Result is a u64 string.
 pub fn eval_param_compute_expr(expr: &str, ctx: &ExecutionContext) -> Result<u64> {
@@ -709,7 +704,7 @@ pub fn eval_param_compute_expr(expr: &str, ctx: &ExecutionContext) -> Result<u64
     Ok(val as u64)
 }
 
-/// Substitute bare compile param names (and `instance.KEY` / legacy `compile_params.KEY`) with their values.
+/// Substitute bare compile param names and `instance.KEY` forms with their values.
 fn substitute_compile_param_vars(expr: &str, ctx: &ExecutionContext) -> String {
     let bytes = expr.as_bytes();
     let mut result = String::with_capacity(expr.len() + 16);

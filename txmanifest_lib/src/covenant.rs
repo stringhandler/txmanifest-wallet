@@ -1361,7 +1361,7 @@ mod tests {
     #[test]
     fn unstable_features_gate_a_program_that_uses_enums() {
         let manifest = crate::manifest::Manifest::from_json_str(
-            r#"{ "manifest_version": "1", "protocol": "t",
+            r#"{ "manifest_version": "0.2.0", "protocol": "t",
                  "simplicity_hl": { "unstable_features": ["enums"] } }"#,
         )
         .expect("manifest should parse");

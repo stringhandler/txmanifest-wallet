@@ -145,9 +145,9 @@ cargo run -- config default_network mainnet
 ## Notes
 
 - This project was renamed from `compose` to `tx-manifest`. Manifest files are
-  conventionally named `txmanifest.json`. The manifest version field is
-  `manifest_version`, though the legacy `compose_version` key is still accepted as
-  an alias so older files keep parsing.
+  conventionally named `txmanifest.json` and carry a `manifest_version` naming the
+  format version they are written against; the current format is `0.2.0`, and a
+  file declaring anything else is refused at parse time.
 - Targets Liquid/Elements. Covenant enforcement is fully on-chain via Simplicity —
   no trusted backend.
 

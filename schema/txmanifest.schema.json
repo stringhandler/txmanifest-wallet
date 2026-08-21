@@ -217,7 +217,7 @@
     },
     "HookBlock": {
       "additionalProperties": false,
-      "description": "A hook: a flat map of setter targets to the values they take.\n\nOne type serves every hook position — an action's `on_pre_broadcast` / `on_post_broadcast` and an input's `on_resolved` — because they only ever differed in when they run, never in shape.\n\nTargets use dot-path notation: `\"instance.FOO\"` — sets a contract-template field (`compile_params.` is a deprecated alias) `\"params.FOO\"`   — sets an action param\n\nValues are [`ComputeSpec`], the same type `create_instance.fields` uses, so all three \"name → how to produce a value\" maps in the format read alike. In hook position only the expression forms are meaningful; `validate` rejects the rest (see `validate::check_hook`).\n\nWithin an input's own `on_resolved`, two bare keywords are self-referential: `\"asset\"` resolves to that input's computed issuance asset ID (or its UTXO asset for non-issuance inputs), and `\"reissuance_token\"` to the computed reissuance token asset ID.",
+      "description": "A hook: a flat map of setter targets to the values they take.\n\nOne type serves every hook position — an action's `on_pre_broadcast` / `on_post_broadcast` and an input's `on_resolved` — because they only ever differed in when they run, never in shape.\n\nTargets use dot-path notation: `\"instance.FOO\"` — sets a contract-template field `\"params.FOO\"`   — sets an action param\n\nValues are [`ComputeSpec`], the same type `create_instance.fields` uses, so all three \"name → how to produce a value\" maps in the format read alike. In hook position only the expression forms are meaningful; `validate` rejects the rest (see `validate::check_hook`).\n\nWithin an input's own `on_resolved`, two bare keywords are self-referential: `\"asset\"` resolves to that input's computed issuance asset ID (or its UTXO asset for non-issuance inputs), and `\"reissuance_token\"` to the computed reissuance token asset ID.",
       "properties": {
         "$comment": {
           "description": "Documentation only; ignored by the engine.",
@@ -1135,7 +1135,7 @@
       ]
     },
     "manifest_version": {
-      "description": "Manifest schema version.",
+      "description": "Version of the manifest **format** this file is written against, as specified by ELIP-205 — not the version of any tool that reads it. Checked against [`FORMAT_VERSION`] at parse time; see [`check_format_version`] for the compatibility rule.",
       "type": "string"
     },
     "protocol": {
