@@ -194,6 +194,30 @@ enum Commands {
         data_dir: Option<PathBuf>,
     },
 
+    /// Read messages embedded in the rangeproofs of the wallet's confidential outputs
+    /// (no network call; run sync first).
+    ///
+    /// With no arguments it scans every wallet output; `--txid`/`--vout` narrow it to one.
+    /// Only wallet-owned outputs are readable — a rangeproof message is gated on the
+    /// output's blinding key, which is what keeps it private.
+    ReadMessages {
+        /// Only look at this transaction
+        #[arg(long)]
+        txid: Option<String>,
+        /// Only look at this output index (requires --txid)
+        #[arg(long, requires = "txid")]
+        vout: Option<u32>,
+        /// Also list outputs that carry no message
+        #[arg(long)]
+        all: bool,
+        /// Wallet file to load (default: wallet.json)
+        #[arg(long, default_value = "wallet.json")]
+        wallet: PathBuf,
+        /// Directory where wallet state is persisted
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
     /// Split a wallet asset into N equal-sized UTXOs and broadcast the transaction.
     /// Useful for pre-funding multiple action inputs.
     Split {
@@ -414,6 +438,86 @@ fn cmd_get_balance(wallet_path: &Path, data_dir: Option<&std::path::Path>) -> Re
     } else {
         print_balance(&utxos, &explicit);
     }
+    Ok(())
+}
+
+fn cmd_read_messages(
+    txid: Option<&str>,
+    vout: Option<u32>,
+    show_all: bool,
+    wallet_path: &Path,
+    data_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    use console::style;
+    use std::str::FromStr as _;
+    use tx_manifest_lib::rangeproof;
+
+    let w = wallet::load_wallet(wallet_path)?;
+    let data_dir = data_dir.map(|p| p.to_path_buf()).unwrap_or_else(wallet::default_data_dir);
+
+    // `--vout` without `--txid` is refused by clap; `--txid` alone means the whole tx.
+    let only = match txid {
+        None => None,
+        Some(t) => {
+            let txid = lwk_wollet::elements::Txid::from_str(t.trim())
+                .map_err(|e| anyhow::anyhow!("Invalid txid '{t}': {e}"))?;
+            Some((txid, vout.unwrap_or(u32::MAX)))
+        }
+    };
+
+    println!();
+    println!("{}", style("Rangeproof messages (last synced state)").bold().cyan());
+    println!("  Network  : {}", style(&w.network).cyan());
+    println!("  Capacity : {} bytes per confidential output", style(rangeproof::MAX_PAYLOAD).cyan());
+    println!();
+
+    // A whole-transaction scan passes a sentinel vout, so filter here rather than there.
+    let outputs: Vec<_> = wallet::scan_rangeproof_messages(
+        &w, &data_dir,
+        only.filter(|(_, v)| *v != u32::MAX),
+    )?
+    .into_iter()
+    .filter(|o| only.is_none_or(|(t, _)| t == o.txid))
+    .collect();
+
+    if outputs.is_empty() {
+        println!("  No confidential wallet outputs found. Run `sync` first.");
+        return Ok(());
+    }
+
+    let mut carrying = 0usize;
+    for out in &outputs {
+        let label = format!("{}:{}", out.txid, out.vout);
+        match &out.message {
+            Ok(Some(payload)) => {
+                carrying += 1;
+                println!(
+                    "  {} {} — {} sat",
+                    style("●").green(), style(&label).bold(), style(out.value).yellow(),
+                );
+                for line in rangeproof::describe_payload(payload).lines() {
+                    println!("      {line}");
+                }
+                println!();
+            }
+            Ok(None) if show_all => {
+                println!("  {} {} — {} sat — no message", style("·").dim(), label, out.value);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                carrying += 1;
+                println!(
+                    "  {} {} — {} sat — malformed message: {e:#}",
+                    style("✗").red(), style(&label).bold(), out.value,
+                );
+            }
+        }
+    }
+
+    println!(
+        "  {} of {} confidential output(s) carry a message",
+        style(carrying).bold(), outputs.len(),
+    );
     Ok(())
 }
 
@@ -728,6 +832,8 @@ fn main() -> Result<()> {
         Commands::Info { wallet } => cmd_info(&wallet),
         Commands::Sync { wallet, esplora, data_dir } => cmd_sync(&wallet, esplora.as_deref(), data_dir.as_deref()),
         Commands::GetBalance { wallet, data_dir } => cmd_get_balance(&wallet, data_dir.as_deref()),
+        Commands::ReadMessages { txid, vout, all, wallet, data_dir } =>
+            cmd_read_messages(txid.as_deref(), vout, all, &wallet, data_dir.as_deref()),
         Commands::Split { count, asset, amount_each, wallet, esplora, data_dir } =>
             cmd_split(count, &asset, amount_each, &wallet, esplora.as_deref(), data_dir.as_deref()),
     }

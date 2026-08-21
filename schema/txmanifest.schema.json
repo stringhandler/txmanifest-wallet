@@ -348,6 +348,56 @@
       ],
       "type": "object"
     },
+    "NostrEmbed": {
+      "additionalProperties": false,
+      "description": "The unsigned fields of a nostr event to embed, plus which wallet key signs it.\n\nThe engine fills in `pubkey`, `id` and `sig`, so what reaches the chain is a complete NIP-01 event that a relay will accept: authorship survives the trip, and a bridge that republishes it is only a transport — it cannot forge events on this author's behalf.\n\nThe signature is made by a key this wallet derives, so the manifest never carries a secret. `sign_with` names it: `\"wallet\"` (the general signing key, the default), `\"oracle\"`, or a literal BIP32 path. The resulting nostr identity is that key's x-only pubkey — the same one `tx-manifest-wallet info` prints.",
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "content": {
+          "description": "Event content. `params.X` / `instance.X` references are resolved first.",
+          "type": "string"
+        },
+        "created_at": {
+          "description": "Unix seconds. Defaults to the moment the transaction is built. Pin it only when a reproducible event id matters, since it is part of what the id commits to."
+        },
+        "kind": {
+          "description": "Event kind. Defaults to 1 (a text note).",
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sign_with": {
+          "description": "Which wallet key signs: `\"wallet\"` (default), `\"oracle\"`, or a BIP32 path such as `\"m/86h/1h/7h/0/0\"`. May be a reference resolving to one of those.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "description": "Event tags, each an array of strings whose first element is the tag name — `[[\"t\", \"liquid\"], [\"e\", \"<event id>\"]]`. Every element is reference-resolved.",
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "type": "object"
+    },
     "Output": {
       "additionalProperties": false,
       "properties": {
@@ -406,6 +456,17 @@
             "boolean",
             "null"
           ]
+        },
+        "rangeproof_embed": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RangeproofEmbed"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A message to carry inside this output's value rangeproof, readable only by the holder of the output's blinding key. See [`RangeproofEmbed`]."
         },
         "required_index": {
           "description": "Required transaction output index; same semantics and same caveat as [`Input::required_index`] (Spec §7) — parsed, never enforced.",
@@ -743,6 +804,60 @@
         "type"
       ],
       "type": "object"
+    },
+    "RangeproofEmbed": {
+      "description": "A message to carry inside this confidential output's value rangeproof (about 3125 bytes, at no cost in transaction size or fee, readable only by the holder of the output's blinding key). A string is UTF-8 text with references resolved; an object carries exactly one of `message`, `data` (OP_RETURN-style raw bytes) or `nostr` (event fields, signed at build time).",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "$comment": {
+              "description": "Documentation only; ignored by the engine.",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "$comment": {
+              "description": "Documentation only; ignored by the engine.",
+              "type": "string"
+            },
+            "data": {}
+          },
+          "required": [
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "$comment": {
+              "description": "Documentation only; ignored by the engine.",
+              "type": "string"
+            },
+            "nostr": {
+              "$ref": "#/definitions/NostrEmbed"
+            }
+          },
+          "required": [
+            "nostr"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "SimplicityHl": {
       "additionalProperties": false,

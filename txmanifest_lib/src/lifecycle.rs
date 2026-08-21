@@ -222,6 +222,58 @@ fn is_change_output(output: &crate::manifest::Output) -> bool {
 /// asset from the set the action permits change in, and the build then rejects the
 /// leftover with "this action does not permit L-BTC change" for a manifest that declared
 /// exactly that.
+/// Resolve an output's `rangeproof_embed` to the bytes that will ride in its value
+/// rangeproof, plus a one-line note for the build report.
+///
+/// The three forms differ only in how the bytes are produced: text is UTF-8 with
+/// references resolved, `data` reuses the OP_RETURN byte evaluator, and `nostr` builds
+/// and signs a NIP-01 event with a wallet key. Capacity is checked here rather than at
+/// blinding time so an oversized message is reported next to the output that declared
+/// it, not as a proof-signing failure several steps later.
+fn resolve_rangeproof_embed(
+    spec: &crate::manifest::RangeproofEmbed,
+    ctx: &ExecutionContext,
+    type_hints: &std::collections::HashMap<String, String>,
+    wallet: Option<&WalletFile>,
+) -> Result<(Vec<u8>, String)> {
+    use crate::manifest::RangeproofEmbed;
+
+    let (bytes, note) = match spec {
+        RangeproofEmbed::Message(text) => {
+            let resolved = eval::eval_text(text, ctx);
+            let n = resolved.len();
+            (resolved.into_bytes(), format!("{n} byte message"))
+        }
+        RangeproofEmbed::Data(data) => {
+            let bytes = eval::eval_op_return_data(data, ctx, type_hints)
+                .context("rangeproof_embed.data")?;
+            let n = bytes.len();
+            (bytes, format!("{n} bytes"))
+        }
+        RangeproofEmbed::Nostr(nostr) => {
+            let wallet = wallet.context(
+                "rangeproof_embed.nostr needs a wallet to sign with, and none is loaded",
+            )?;
+            let signed = crate::nostr_embed::build(nostr, ctx, wallet)?;
+            let note = format!(
+                "signed nostr event, {} bytes, author {} ({})",
+                signed.json.len(),
+                &signed.pubkey[..16],
+                signed.key_path,
+            );
+            (signed.json, note)
+        }
+    };
+
+    anyhow::ensure!(
+        bytes.len() <= crate::rangeproof::MAX_PAYLOAD,
+        "rangeproof_embed is {} bytes but only {} fit in a rangeproof",
+        bytes.len(),
+        crate::rangeproof::MAX_PAYLOAD,
+    );
+    Ok((bytes, note))
+}
+
 fn skips_when_amount_absent(output: &crate::manifest::Output) -> bool {
     !is_change_output(output) && output.optional.unwrap_or(false)
 }
@@ -1487,6 +1539,50 @@ pub fn run(
                     }
                 };
 
+                // The rangeproof message, if the manifest declared one. Resolved here for
+                // the same reason as the pins above: a message that cannot be built (an
+                // oversized payload, an unknown signing key) is an error in every arm.
+                let (embed_bytes, embed_note) = match &output.rangeproof_embed {
+                    None => (None, None),
+                    Some(spec) => {
+                        let unblindable = if is_change {
+                            Some("change")
+                        } else if is_op_return {
+                            Some("OP_RETURN/burn")
+                        } else if dest_type == Some("fee") {
+                            Some("fee")
+                        } else if matches!(&*output.destination,
+                                           serde_json::Value::Object(m) if m.contains_key("script_hash")) {
+                            Some("script_hash")
+                        } else {
+                            None
+                        };
+                        if let Some(kind) = unblindable {
+                            println!(
+                                "  {} Output '{}' carries a rangeproof message, but a {} output \
+                                 has no rangeproof to put it in. Only a confidential output to a \
+                                 wallet or address destination can carry one.",
+                                style("[error]").red(), output.id, kind,
+                            );
+                            collect_outputs_ok = false;
+                            break;
+                        }
+                        match resolve_rangeproof_embed(
+                            spec, &ctx, &compile_param_type_hints, loaded_wallet.as_ref(),
+                        ) {
+                            Ok((bytes, note)) => (Some(bytes), Some(note)),
+                            Err(e) => {
+                                println!(
+                                    "  {} Output '{}' rangeproof_embed: {e:#}",
+                                    style("[error]").red(), output.id
+                                );
+                                collect_outputs_ok = false;
+                                break;
+                            }
+                        }
+                    }
+                };
+
                 match &*output.destination {
                     serde_json::Value::String(dest) if dest == "change" => {
                         if pinned_blinding.is_some() {
@@ -1537,6 +1633,7 @@ pub fn run(
                         }
                         pset_outputs.push(pset_builder::PsetOutputSpec {
                             script_pubkey, amount, asset: asset_id, blinding_key: None, blinding: None,
+                            rangeproof_embed: None,
                         });
                     }
                     serde_json::Value::Object(m) if m.contains_key("utxo_type") => {
@@ -1638,6 +1735,7 @@ pub fn run(
                         });
                         pset_outputs.push(pset_builder::PsetOutputSpec {
                             script_pubkey, amount, asset: asset_id, blinding_key, blinding: pinned_blinding,
+                            rangeproof_embed: embed_bytes,
                         });
                     }
                     serde_json::Value::String(dest) if dest == "wallet" => {
@@ -1676,7 +1774,7 @@ pub fn run(
                         );
                         pset_outputs.push(pset_builder::PsetOutputSpec {
                             script_pubkey: addr.script_pubkey(), amount, asset: asset_id, blinding_key: bpk,
-                            blinding: pinned_blinding,
+                            blinding: pinned_blinding, rangeproof_embed: embed_bytes,
                         });
                     }
                     serde_json::Value::String(dest) => {
@@ -1711,7 +1809,7 @@ pub fn run(
                         );
                         pset_outputs.push(pset_builder::PsetOutputSpec {
                             script_pubkey: addr.script_pubkey(), amount, asset: asset_id, blinding_key: bpk,
-                            blinding: pinned_blinding,
+                            blinding: pinned_blinding, rangeproof_embed: embed_bytes,
                         });
                     }
                     serde_json::Value::Object(m) if m.contains_key("script_hash") => {
@@ -1757,12 +1855,16 @@ pub fn run(
                         }
                         pset_outputs.push(pset_builder::PsetOutputSpec {
                             script_pubkey, amount, asset: asset_id, blinding_key: None, blinding: None,
+                            rangeproof_embed: None,
                         });
                     }
                     other => {
                         println!("  {} Output '{}' unsupported destination: {}", style("[TODO]").yellow(), output.id, other);
                         continue;
                     }
+                }
+                if let Some(note) = embed_note {
+                    println!("      {} rangeproof message: {note}", style("↳").dim());
                 }
                 // Record this output's amount formula so it can be re-evaluated once
                 // the `fee` keyword is resolved (each iteration pushes at most one output).

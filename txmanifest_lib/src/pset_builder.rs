@@ -7,7 +7,7 @@ use lwk_wollet::{
         confidential::{Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor},
         hashes::{sha256, Hash as _},
         pset::{Input, Output, PartiallySignedTransaction},
-        secp256k1_zkp::{RangeProof, SecretKey, SurjectionProof, Tweak},
+        secp256k1_zkp::{Generator, RangeProof, SecretKey, SurjectionProof, Tweak},
         AssetId, ContractHash, OutPoint, Script, Sequence, Txid, TxOut, TxOutWitness,
         BlindAssetProofs, BlindValueProofs, RangeProofMessage, SurjectionInput, TxOutSecrets,
     },
@@ -79,6 +79,9 @@ pub struct PsetOutputSpec {
     /// Blinding factors the manifest pinned for this output. `None` (the usual case)
     /// leaves both to the blinder. See [`PinnedBlinding`].
     pub blinding: Option<PinnedBlinding>,
+    /// Bytes to carry in this output's value rangeproof, already resolved and framed by
+    /// the caller. Only meaningful on a confidential output. See [`crate::rangeproof`].
+    pub rangeproof_embed: Option<Vec<u8>>,
 }
 
 /// Blinding factors chosen by the manifest rather than by the blinder.
@@ -177,11 +180,19 @@ pub fn build_pset(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRequ
             .enumerate()
             .filter_map(|(i, o)| o.blinding.map(|b| (i, b)))
             .collect();
-        if pins.is_empty() {
+        let embeds: HashMap<usize, Vec<u8>> = req
+            .outputs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| o.rangeproof_embed.clone().map(|e| (i, e)))
+            .collect();
+        // `blind_last` writes the 64-byte Elements message and offers no way to extend
+        // it, so an embed — like a pinned factor — needs the engine's own blinding pass.
+        if pins.is_empty() && embeds.is_empty() {
             pset.blind_last(&mut rng, &secp, &inp_txout_sec)
                 .map_err(|e| anyhow::anyhow!("PSET blinding failed: {e}"))?;
         } else {
-            blind_with_pinned_factors(&mut pset, &secp, &mut rng, &inp_txout_sec, &pins)
+            blind_with_pinned_factors(&mut pset, &secp, &mut rng, &inp_txout_sec, &pins, &embeds)
                 .context("PSET blinding failed")?;
         }
     }
@@ -213,6 +224,7 @@ fn blind_with_pinned_factors(
     rng: &mut (impl rand::RngCore + rand::CryptoRng),
     inp_txout_sec: &HashMap<usize, TxOutSecrets>,
     pins: &HashMap<usize, PinnedBlinding>,
+    embeds: &HashMap<usize, Vec<u8>>,
 ) -> Result<()> {
     for (i, inp) in pset.inputs().iter().enumerate() {
         if inp.has_issuance() && inp.blinded_issuance.unwrap_or(1) == 1 {
@@ -243,6 +255,15 @@ fn blind_with_pinned_factors(
             anyhow::bail!(
                 "Output {i} pins blinding factors but is not being blinded — a pinned factor \
                  only means something on a confidential output"
+            );
+        }
+    }
+    for i in embeds.keys() {
+        if !to_blind.contains(i) {
+            anyhow::bail!(
+                "Output {i} carries a rangeproof message but is not being blinded — there is \
+                 no rangeproof to put it in. Set \"confidential\": true on that output, or \
+                 drop its `rangeproof_embed`."
             );
         }
     }
@@ -302,7 +323,8 @@ fn blind_with_pinned_factors(
         let pin = pins.get(&i).copied().unwrap_or_default();
         let abf = pin.asset_bf.unwrap_or_else(|| AssetBlindingFactor::new(rng));
         let vbf = pin.value_bf.unwrap_or_else(|| ValueBlindingFactor::new(rng));
-        let value = blind_one_output(pset, i, secp, rng, &surject_inputs, abf, vbf)?;
+        let value =
+            blind_one_output(pset, i, secp, rng, &surject_inputs, abf, vbf, embeds.get(&i))?;
         out_secrets.push((value, abf, vbf));
     }
 
@@ -332,7 +354,7 @@ fn blind_with_pinned_factors(
         .ok_or_else(|| anyhow::anyhow!("Output {free} has no explicit amount to blind"))?;
     let free_vbf =
         ValueBlindingFactor::last(secp, free_value, free_abf, &inp_secrets, &out_secrets);
-    blind_one_output(pset, free, secp, rng, &surject_inputs, free_abf, free_vbf)?;
+    blind_one_output(pset, free, secp, rng, &surject_inputs, free_abf, free_vbf, embeds.get(&free))?;
 
     // Nothing was left for another blinder to finish, so no scalar is carried.
     Ok(())
@@ -340,6 +362,13 @@ fn blind_with_pinned_factors(
 
 /// Blind one PSET output with the given factors, writing back the commitments and all
 /// four proofs. Returns the output's explicit amount, which the balance solver needs.
+///
+/// `embed`, when present, is carried in the value rangeproof's message after the 64
+/// bytes Elements reserves. That costs nothing — the proof is the same length either way
+/// (`rangeproof::message_length_does_not_change_proof_size`), so the fee estimated on the
+/// builder's first pass still holds — and it is invisible to anyone without the output's
+/// blinding key.
+#[allow(clippy::too_many_arguments)]
 fn blind_one_output(
     pset: &mut PartiallySignedTransaction,
     idx: usize,
@@ -348,6 +377,7 @@ fn blind_one_output(
     surject_inputs: &[SurjectionInput],
     abf: AssetBlindingFactor,
     vbf: ValueBlindingFactor,
+    embed: Option<&Vec<u8>>,
 ) -> Result<u64> {
     let out = &pset.outputs()[idx];
     let asset_id = out
@@ -365,16 +395,44 @@ fn blind_one_output(
     let (asset_comm, surjection_proof) = Asset::Explicit(asset_id)
         .blind(rng, secp, abf, surject_inputs)
         .map_err(|e| anyhow::anyhow!("Output {idx} asset blinding failed: {e}"))?;
-    let (value_comm, nonce, rangeproof) = Value::Explicit(value)
-        .blind(
-            secp,
-            vbf,
-            blinding_pk,
-            SecretKey::new(rng),
-            &script_pubkey,
-            &RangeProofMessage { asset: asset_id, bf: abf },
-        )
-        .map_err(|e| anyhow::anyhow!("Output {idx} value blinding failed: {e}"))?;
+    let rp_message = RangeProofMessage { asset: asset_id, bf: abf };
+    let (value_comm, nonce, rangeproof) = match embed {
+        // No message to carry: the one-call path, identical to what `blind_last` does.
+        None => Value::Explicit(value)
+            .blind(secp, vbf, blinding_pk, SecretKey::new(rng), &script_pubkey, &rp_message)
+            .map_err(|e| anyhow::anyhow!("Output {idx} value blinding failed: {e}"))?,
+        // Carrying one: the same steps `Value::blind` takes, opened up so the rangeproof
+        // can be signed over a longer message. The engine is the blinder, so it holds the
+        // ephemeral secret and can do this on the first pass — no rewinding a finished
+        // proof, and no need for the *receiver's* blinding key, which is what lets an
+        // embed ride on an output paying someone else's confidential address.
+        Some(payload) => {
+            let asset_gen = Generator::new_blinded(secp, asset_id.into_tag(), abf.into_inner());
+            let value_comm = Value::new_confidential(secp, value, asset_gen, vbf);
+            let commitment = value_comm
+                .commitment()
+                .ok_or_else(|| anyhow::anyhow!("Output {idx} value commitment missing"))?;
+            let (nonce, shared_secret) =
+                Nonce::with_ephemeral_sk(secp, SecretKey::new(rng), &blinding_pk);
+            let message = crate::rangeproof::build_message(rp_message.to_bytes(), Some(payload))
+                .with_context(|| format!("Output {idx} rangeproof message"))?;
+            let rangeproof = RangeProof::new(
+                secp,
+                TxOut::RANGEPROOF_MIN_VALUE,
+                commitment,
+                value,
+                vbf.into_inner(),
+                &message,
+                script_pubkey.as_bytes(),
+                shared_secret,
+                TxOut::RANGEPROOF_EXP_SHIFT,
+                TxOut::RANGEPROOF_MIN_PRIV_BITS,
+                asset_gen,
+            )
+            .map_err(|e| anyhow::anyhow!("Output {idx} value blinding failed: {e}"))?;
+            (value_comm, nonce, rangeproof)
+        }
+    };
 
     let asset_gen = asset_comm
         .commitment()
@@ -1036,7 +1094,7 @@ mod pinned_blinding_tests {
             0usize,
             PinnedBlinding { asset_bf: Some(one_abf), value_bf: Some(one_vbf) },
         )]);
-        blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins)
+        blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins, &HashMap::new())
             .expect("pinned blinding");
 
         let tx = pset.extract_tx().expect("extract_tx");
@@ -1048,6 +1106,148 @@ mod pinned_blinding_tests {
         assert_eq!(opened.value_bf, one_vbf, "pinned vbf must reach the chain verbatim");
         assert_eq!(opened.value, 600);
         assert_eq!(opened.asset, asset);
+    }
+
+    /// The whole rangeproof-embed claim, end to end at the PSET level: the transaction
+    /// still verifies the way a node verifies it, the payload comes back to the holder of
+    /// the output's blinding key, the *other* confidential output is untouched, and the
+    /// transaction is exactly the same size as one without a message — which is what makes
+    /// the fee the builder estimated on its first pass still correct on its second.
+    #[test]
+    fn an_embedded_message_reaches_the_chain_for_free() {
+        fn build(
+            embeds: &HashMap<usize, Vec<u8>>,
+        ) -> (lwk_wollet::elements::Transaction, TxOut, SecretKey, SecretKey) {
+            let secp = EC.clone();
+            // A fixed rng would be better still, but the surjection proof draws from it;
+            // the size assertion below holds regardless because the proof length does not
+            // depend on the message. See `rangeproof::message_length_does_not_change_proof_size`.
+            let mut rng = rand::thread_rng();
+            let asset = test_asset(11);
+
+            let prev = TxOut {
+                asset: Asset::Explicit(asset),
+                value: Value::Explicit(1000),
+                nonce: Nonce::Null,
+                script_pubkey: test_spk(1),
+                witness: TxOutWitness::default(),
+            };
+            let mut pset = PartiallySignedTransaction::new_v2();
+            let mut input = Input::from_prevout(OutPoint::new(Txid::from_byte_array([3u8; 32]), 0));
+            input.witness_utxo = Some(prev.clone());
+            input.asset = Some(asset);
+            input.amount = Some(1000);
+            pset.add_input(input);
+
+            let mut secrets = HashMap::new();
+            secrets.insert(0usize, TxOutSecrets {
+                value: 1000,
+                value_bf: ValueBlindingFactor::zero(),
+                asset,
+                asset_bf: AssetBlindingFactor::zero(),
+            });
+
+            // Deterministic receiver keys so both builds address the same outputs.
+            let carrier_sk = SecretKey::from_slice(&[0x21u8; 32]).unwrap();
+            let plain_sk = SecretKey::from_slice(&[0x22u8; 32]).unwrap();
+            pset.add_output(confidential_output(
+                test_spk(2), 600, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &carrier_sk)), 0,
+            ));
+            pset.add_output(confidential_output(
+                test_spk(3), 300, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &plain_sk)), 0,
+            ));
+            pset.add_output(Output::new_explicit(Script::default(), 100, asset, None));
+
+            blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &HashMap::new(), embeds)
+                .expect("blinding with an embed");
+            let tx = pset.extract_tx().expect("extract_tx");
+            (tx, prev, carrier_sk, plain_sk)
+        }
+
+        let secp = EC.clone();
+        let payload = b"a message nobody but the receiver can read".to_vec();
+        let embeds = HashMap::from([(0usize, payload.clone())]);
+        let (tx, prev, carrier_sk, plain_sk) = build(&embeds);
+
+        // A node accepts it.
+        tx.verify_tx_amt_proofs(&secp, std::slice::from_ref(&prev))
+            .expect("rangeproofs, surjection proofs and the commitment balance must all check");
+
+        // The receiver reads the message…
+        assert_eq!(
+            crate::rangeproof::extract_message(&secp, &tx.output[0], &carrier_sk).unwrap(),
+            Some(payload),
+        );
+        // …and still unblinds the output as any wallet would.
+        let opened = tx.output[0].unblind(&secp, carrier_sk).expect("unblind the carrier");
+        assert_eq!(opened.value, 600);
+        assert_eq!(opened.asset, test_asset(11));
+
+        // The output that was not asked to carry anything carries nothing — an embed must
+        // not leak onto its neighbours, and a scan must not false-positive on them.
+        assert_eq!(
+            crate::rangeproof::extract_message(&secp, &tx.output[1], &plain_sk).unwrap(),
+            None,
+        );
+
+        // Nobody else can read it: without the blinding key the rewind fails outright.
+        assert!(crate::rangeproof::extract_message(&secp, &tx.output[0], &plain_sk).is_err());
+
+        // And it was free.
+        let (bare, _, _, _) = build(&HashMap::new());
+        assert_eq!(
+            tx.weight(), bare.weight(),
+            "an embedded message must not change the transaction's weight, or the fee is wrong",
+        );
+    }
+
+    /// An embed on an output nobody is blinding has nowhere to go. Failing loudly beats
+    /// building a transaction that silently drops the message the manifest declared.
+    #[test]
+    fn an_embed_on_an_explicit_output_is_rejected() {
+        let secp = EC.clone();
+        let mut rng = rand::thread_rng();
+        let asset = test_asset(13);
+
+        let prev = TxOut {
+            asset: Asset::Explicit(asset),
+            value: Value::Explicit(1000),
+            nonce: Nonce::Null,
+            script_pubkey: test_spk(1),
+            witness: TxOutWitness::default(),
+        };
+        let mut pset = PartiallySignedTransaction::new_v2();
+        let mut input = Input::from_prevout(OutPoint::new(Txid::from_byte_array([4u8; 32]), 0));
+        input.witness_utxo = Some(prev);
+        input.asset = Some(asset);
+        input.amount = Some(1000);
+        pset.add_input(input);
+
+        let mut secrets = HashMap::new();
+        secrets.insert(0usize, TxOutSecrets {
+            value: 1000,
+            value_bf: ValueBlindingFactor::zero(),
+            asset,
+            asset_bf: AssetBlindingFactor::zero(),
+        });
+
+        let sk = SecretKey::new(&mut rng);
+        pset.add_output(confidential_output(
+            test_spk(2), 600, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &sk)), 0,
+        ));
+        // Output 1 is explicit, so it has no rangeproof at all.
+        pset.add_output(Output::new_explicit(test_spk(3), 300, asset, None));
+        pset.add_output(Output::new_explicit(Script::default(), 100, asset, None));
+
+        let embeds = HashMap::from([(1usize, b"nowhere to put this".to_vec())]);
+        let err = blind_with_pinned_factors(
+            &mut pset, &secp, &mut rng, &secrets, &HashMap::new(), &embeds,
+        )
+        .expect_err("an explicit output cannot carry a rangeproof message");
+        assert!(
+            err.to_string().contains("not being blinded"),
+            "error must say why, got: {err}"
+        );
     }
 
     /// Pinning every confidential output leaves the balance residue nowhere to go. That is
@@ -1093,7 +1293,7 @@ mod pinned_blinding_tests {
             0usize,
             PinnedBlinding { asset_bf: Some(one_abf), value_bf: Some(one_vbf) },
         )]);
-        let err = blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins)
+        let err = blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins, &HashMap::new())
             .expect_err("no output left free to balance");
         assert!(
             err.to_string().contains("value blinding factor"),
@@ -1175,7 +1375,7 @@ mod covenant_input_tests {
             0usize,
             PinnedBlinding { asset_bf: Some(abf), value_bf: Some(vbf) },
         )]);
-        blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins).unwrap();
+        blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins, &HashMap::new()).unwrap();
         let created = pset.extract_tx().unwrap().output[0].clone();
 
         // --- transaction B: spend it, with only the factors to go on ---
@@ -1338,7 +1538,7 @@ mod abf_reuse_tests {
                 value_bf: Some(ValueBlindingFactor::from_slice(&scalar(1)).unwrap()),
             },
         )]);
-        let err = blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins)
+        let err = blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins, &HashMap::new())
             .expect_err("reusing the input's abf must be refused");
         let msg = err.to_string();
         assert!(msg.contains("surjection"), "must explain the surjection proof: {msg}");
@@ -1390,7 +1590,7 @@ mod abf_reuse_tests {
                 value_bf: Some(ValueBlindingFactor::from_slice(&scalar(2)).unwrap()),
             },
         )]);
-        blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins)
+        blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins, &HashMap::new())
             .expect("advancing the factor must build");
 
         let tx = pset.extract_tx().unwrap();

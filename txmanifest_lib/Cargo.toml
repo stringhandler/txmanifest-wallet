@@ -23,6 +23,10 @@ evalexpr = "11"
 rand = "0.8"
 ureq = "2"
 base64 = "0.22"
+crc32fast = "1"
+# Same major version the liquid-nostr-bridge relay verifies with, so a
+# txmanifest-written event and a bridge-read one cannot disagree about NIP-01.
+nostr = { version = "0.44", default-features = false, features = ["std"] }
 # Covenant dry-runs, address derivation and witness building only use upstream
 # (master) APIs. The `feat/compile-function-only` fork is a superset of master that
 # additionally provides the standalone compile_function / expression-eval APIs used

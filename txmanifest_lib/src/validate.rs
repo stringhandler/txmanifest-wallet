@@ -437,7 +437,10 @@ fn check_action(
             let requires_amount = check_destination(report, utxo_types, referenced, &oloc, &output.destination.0);
             let optional = output.optional.unwrap_or(false);
             if requires_amount && output.amount_sat.is_none() && !optional {
-                report.error(oloc, "missing amount_sat (required for this destination)");
+                report.error(oloc.clone(), "missing amount_sat (required for this destination)");
+            }
+            if let Some(embed) = &output.rangeproof_embed {
+                check_rangeproof_embed(report, &oloc, output, embed);
             }
         }
     }
@@ -849,6 +852,100 @@ fn check_utxo_site(
 /// Validate an output `destination` and return whether it requires an explicit
 /// `amount_sat` (covenant, wallet, address, and script_hash destinations do;
 /// change, op_return/burn, fee, and conditional destinations do not).
+/// Static checks on an output's `rangeproof_embed`.
+///
+/// A rangeproof message only exists on a confidential output, and the destinations the
+/// engine never blinds cannot carry one at all. Catching that here means the author
+/// hears about it from `validate`, not from a build that got as far as blinding.
+fn check_rangeproof_embed(
+    report: &mut Report,
+    loc: &str,
+    output: &crate::manifest::Output,
+    embed: &crate::manifest::RangeproofEmbed,
+) {
+    use crate::manifest::RangeproofEmbed;
+
+    let loc = format!("{loc}.rangeproof_embed");
+
+    // Destinations that are never blinded, so there is no rangeproof to write into.
+    let unblindable = match &*output.destination {
+        serde_json::Value::String(d) if d == "change" => Some("change"),
+        serde_json::Value::Object(m) => match m.get("type").and_then(|v| v.as_str()) {
+            Some("op_return") => Some("an OP_RETURN"),
+            Some("burn") => Some("a burn"),
+            Some("fee") => Some("the fee"),
+            _ if m.contains_key("script_hash") => Some("a script_hash"),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(kind) = unblindable {
+        report.error(
+            loc.clone(),
+            format!("{kind} output is never blinded, so it has no rangeproof to carry a message"),
+        );
+    } else if output.confidential == Some(false) {
+        report.error(
+            loc.clone(),
+            "output sets \"confidential\": false, so it has no rangeproof to carry a message",
+        );
+    }
+
+    match embed {
+        // Only a literal can be measured here; a reference is whatever it resolves to at
+        // build time, and the engine checks the resolved length before blinding.
+        RangeproofEmbed::Message(text) if !is_reference(text) => {
+            if text.len() > crate::rangeproof::MAX_PAYLOAD {
+                report.error(
+                    loc,
+                    format!(
+                        "message is {} bytes; a rangeproof holds {}",
+                        text.len(),
+                        crate::rangeproof::MAX_PAYLOAD
+                    ),
+                );
+            }
+        }
+        RangeproofEmbed::Nostr(nostr) => {
+            if let Some(spec) = &nostr.sign_with {
+                if !matches!(spec.trim(), "wallet" | "oracle")
+                    && !spec.trim().starts_with("m/")
+                    && !is_reference(spec)
+                {
+                    report.error(
+                        format!("{loc}.nostr.sign_with"),
+                        format!(
+                            "unknown signing key '{spec}'; expected \"wallet\", \"oracle\", a \
+                             BIP32 path starting with \"m/\", or a reference resolving to one"
+                        ),
+                    );
+                }
+            }
+            if nostr.content.len() > crate::rangeproof::MAX_PAYLOAD && !is_reference(&nostr.content) {
+                report.error(
+                    format!("{loc}.nostr.content"),
+                    format!(
+                        "content is {} bytes; a rangeproof holds {} including the event's \
+                         JSON framing and signature",
+                        nostr.content.len(),
+                        crate::rangeproof::MAX_PAYLOAD
+                    ),
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// True when a string is a whole-string reference the engine will resolve at build time,
+/// rather than a literal whose length is already known.
+fn is_reference(s: &str) -> bool {
+    let s = s.trim();
+    ["params.", "instance.", "compile_params.", "inputs."]
+        .iter()
+        .any(|p| s.starts_with(p))
+}
+
 fn check_destination(
     report: &mut Report,
     utxo_types: &std::collections::BTreeMap<String, crate::manifest::UtxoType>,
@@ -946,6 +1043,76 @@ mod tests {
         let report = validate(&manifest);
         let msg = report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n");
         assert!(msg.contains("declares no `params`"), "{msg}");
+    }
+
+    /// A rangeproof message only exists on a confidential output. Every destination the
+    /// engine never blinds must be told so here, not several steps into a build.
+    #[test]
+    fn a_rangeproof_embed_needs_something_to_embed_into() {
+        let validate_output = |output: &str| {
+            let manifest = Manifest::from_json_str(&format!(
+                r#"{{ "manifest_version": "1", "protocol": "t",
+                      "actions": {{ "A": {{ "outputs": [ {output} ] }} }} }}"#
+            ))
+            .expect("manifest should parse");
+            let report = validate(&manifest);
+            report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n")
+        };
+
+        for (output, expect) in [
+            (r#"{"id":"o","destination":"change","asset":"lbtc","rangeproof_embed":"x"}"#, "change output is never blinded"),
+            (r#"{"id":"o","destination":{"type":"op_return"},"asset":"lbtc","rangeproof_embed":"x"}"#, "an OP_RETURN output is never blinded"),
+            (r#"{"id":"o","destination":{"type":"burn"},"asset":"lbtc","rangeproof_embed":"x"}"#, "a burn output is never blinded"),
+            (r#"{"id":"o","destination":{"type":"fee"},"asset":"lbtc","rangeproof_embed":"x"}"#, "the fee output is never blinded"),
+            (r#"{"id":"o","destination":{"script_hash":"params.h"},"amount_sat":"1","rangeproof_embed":"x"}"#, "a script_hash output is never blinded"),
+            (r#"{"id":"o","destination":"wallet","amount_sat":"1","confidential":false,"rangeproof_embed":"x"}"#, "\"confidential\": false"),
+        ] {
+            let msg = validate_output(output);
+            assert!(msg.contains(expect), "expected '{expect}' for {output}, got: {msg}");
+        }
+
+        // The one that should be clean: a confidential wallet output.
+        let msg = validate_output(
+            r#"{"id":"o","destination":"wallet","amount_sat":"1","rangeproof_embed":"x"}"#,
+        );
+        assert!(msg.is_empty(), "a confidential wallet output may carry a message: {msg}");
+    }
+
+    /// Capacity and key names are checkable without a wallet when they are literals —
+    /// and must not be second-guessed when they are references, whose value is only
+    /// known at build time.
+    #[test]
+    fn a_rangeproof_embed_is_measured_only_when_it_is_a_literal() {
+        let validate_embed = |embed: &str| {
+            let manifest = Manifest::from_json_str(&format!(
+                r#"{{ "manifest_version": "1", "protocol": "t",
+                      "actions": {{ "A": {{ "outputs": [ {{ "id": "o",
+                        "destination": "wallet", "amount_sat": "1",
+                        "rangeproof_embed": {embed} }} ] }} }} }}"#
+            ))
+            .expect("manifest should parse");
+            let report = validate(&manifest);
+            report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n")
+        };
+
+        let too_long = "x".repeat(crate::rangeproof::MAX_PAYLOAD + 1);
+        assert!(validate_embed(&format!("\"{too_long}\"")).contains("a rangeproof holds 3125"));
+        assert!(validate_embed(&format!("\"{}\"", "x".repeat(crate::rangeproof::MAX_PAYLOAD))).is_empty());
+
+        // A reference could resolve to anything; the engine checks the resolved length.
+        assert!(validate_embed(r#""params.body""#).is_empty());
+        assert!(validate_embed(r#"{"nostr":{"content":"hi","sign_with":"params.author"}}"#).is_empty());
+
+        for key in ["wallet", "oracle", "m/86h/1h/7h/0/0"] {
+            assert!(
+                validate_embed(&format!(r#"{{"nostr":{{"content":"hi","sign_with":"{key}"}}}}"#)).is_empty(),
+                "'{key}' is a valid signing key"
+            );
+        }
+        assert!(
+            validate_embed(r#"{"nostr":{"content":"hi","sign_with":"treasurer"}}"#)
+                .contains("unknown signing key 'treasurer'")
+        );
     }
 
     /// Build a manifest with a single action whose one wallet input carries the
