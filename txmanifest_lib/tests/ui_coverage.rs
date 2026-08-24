@@ -1,9 +1,9 @@
 //! Every action and every transaction leg must declare its clear-signing UI text.
 //!
-//! `ui.label` is the only source of signer-facing text for a leg — `preview.rs`
-//! deliberately does not fall back to `description`, because `description` is
-//! developer prose that sits outside the manifest's registry hash and so must never
-//! reach a screen the user reads before authorising a transaction. A leg with no
+//! `ui.label` is the only source of signer-facing text for a leg. There is no prose
+//! fallback: `$comment` is developer prose that sits outside the manifest's registry
+//! hash and so must never reach a screen the user reads before authorising a
+//! transaction — the parser strips it before a leg is built. A leg with no
 //! `ui.label` renders as its bare manifest id (`active_offer_in`), which tells a
 //! signer nothing.
 //!
@@ -117,7 +117,7 @@ fn every_leg_declares_ui_label_and_role() {
     assert!(
         failures.is_empty(),
         "{} leg(s) missing clear-signing UI text:\n{}\n\n\
-         `ui.label` is what a signer reads; there is no `description` fallback.",
+         `ui.label` is what a signer reads; there is no prose fallback.",
         failures.len(),
         failures.join("\n")
     );

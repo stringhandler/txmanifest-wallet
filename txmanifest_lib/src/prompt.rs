@@ -22,7 +22,7 @@ use crate::context::ResolvedInput;
 pub fn prompt_param(
     name: &str,
     type_: &str,
-    description: Option<&str>,
+    ui_help: Option<&str>,
     default: Option<&str>,
 ) -> Result<String> {
     println!();
@@ -31,7 +31,7 @@ pub fn prompt_param(
         style(name).bold().cyan(),
         style(format!("({})", type_)).dim(),
     );
-    if let Some(d) = description {
+    if let Some(d) = ui_help {
         print!("  {}", style(d).italic());
     }
     if let Some(dv) = default {
@@ -125,9 +125,10 @@ pub fn prompt_input_selection(input: &manifest::Input) -> Result<ResolvedInput> 
         "  {} {}",
         style(format!("Input: {}", input.id)).bold().cyan(),
         input
-            .description
-            .as_deref()
-            .map(|d| format!("— {d}"))
+            .ui
+            .as_ref()
+            .and_then(|u| u.label())
+            .map(|l| format!("— {l}"))
             .unwrap_or_default()
     );
 

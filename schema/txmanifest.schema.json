@@ -29,12 +29,6 @@
           ],
           "description": "Constructor-only: defines the new instance written to the instance file."
         },
-        "description": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "inputs": {
           "items": {
             "$ref": "#/definitions/Input"
@@ -170,12 +164,6 @@
           "description": "Actions callable on an instance of this template. Structurally identical to the top-level `actions` — the only difference is that these run against an instance, so their formulas may reference `instance.*`. An action carrying a `create_instance` block constructs a new instance of this template.",
           "type": "object"
         },
-        "description": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "fields": {
           "additionalProperties": {
             "$ref": "#/definitions/FieldDef"
@@ -200,14 +188,15 @@
             "null"
           ]
         },
-        "description": {
+        "type": {
+          "type": "string"
+        },
+        "ui_help": {
+          "description": "Signer-facing help, shown when this field is prompted for because no instance file supplies it. Same rules as [`ParamDef::ui_help`]: hashed, user-facing — developer prose belongs in `$comment`.",
           "type": [
             "string",
             "null"
           ]
-        },
-        "type": {
-          "type": "string"
         }
       },
       "required": [
@@ -254,12 +243,6 @@
             }
           ],
           "description": "The blinding factors of the covenant UTXO this input spends, when it is confidential. Both halves are required. See [`BlindingFactors`]."
-        },
-        "description": {
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "from_address": {
           "description": "For `utxo_source: \"wallet\"` inputs: constrain coin selection to UTXOs whose scriptPubKey equals this address's. A reference (`instance.X` / `params.X`) or a literal address string. Use this to pin an input to a committed address — e.g. so a covenant's collateral is spent from the exact address whose hash it commits to.",
@@ -383,12 +366,6 @@
         },
         "data": {
           "description": "OP_RETURN payload, for `destination: {\"type\":\"op_return\"}` outputs. Either a `concat(ref, …)` string, or an object `{\"parts\": [ … ]}` of typed fields (for exact binary layouts — LE integers, `program_id`, asset-internal bytes). Evaluated to raw bytes and embedded after `OP_RETURN`. Omit for a bare data-less OP_RETURN (NFT burns)."
-        },
-        "description": {
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "destination": {
           "allOf": [
@@ -729,14 +706,15 @@
             "null"
           ]
         },
-        "description": {
+        "type": {
+          "type": "string"
+        },
+        "ui_help": {
+          "description": "Signer-facing help for this param's prompt.\n\nThe param's **name** is its label — a wallet title-cases `collateral_amount` into \"Collateral amount\" — so this is the second line: what the value means, where to get it, what a wrong one costs.\n\n`ui_`-prefixed because a human reads it while deciding what to type, which makes it part of the signing surface and therefore **hashed** (see [`crate::canonical`]). Developer prose no user should read goes in `$comment`, which is stripped at parse time and never reaches a screen.",
           "type": [
             "string",
             "null"
           ]
-        },
-        "type": {
-          "type": "string"
         }
       },
       "required": [
@@ -918,7 +896,7 @@
           "type": "boolean"
         },
         "label": {
-          "description": "Human-readable one-line description of this leg — the **only** signer-facing text for it (`description` is not a fallback; see `preview::input_label`).\n\nCapped at [`crate::validate::MAX_UI_LABEL`] characters so it fits one net-effect row alongside the amount and asset symbol. The cap reaches the schema as a `maxLength` — injected by `crate::schema` from that constant rather than written here as a literal, so the two cannot drift — and an editor flags an over-long label while typing rather than at validate time.",
+          "description": "Human-readable one-line description of this leg — the **only** signer-facing text for it (`$comment` is not a fallback; see `preview::input_label`).\n\nCapped at [`crate::validate::MAX_UI_LABEL`] characters so it fits one net-effect row alongside the amount and asset symbol. The cap reaches the schema as a `maxLength` — injected by `crate::schema` from that constant rather than written here as a literal, so the two cannot drift — and an editor flags an over-long label while typing rather than at validate time.",
           "maxLength": 64,
           "type": [
             "string",
@@ -966,12 +944,6 @@
         },
         "default": {
           "description": "Value to use when a site binds no `args` entry for this param.\n\nEvaluated in **instance scope**: a literal, or `instance.X` naming a field fixed when the contract was instantiated. Action scope is deliberately unreachable — a value that varies per run is exactly what a site must bind explicitly.\n\nWithout a default, every site must bind it, and `validate` says which ones don't.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "description": {
           "type": [
             "string",
             "null"
@@ -1039,9 +1011,6 @@
             "null"
           ]
         },
-        "description": {
-          "type": "string"
-        },
         "params": {
           "additionalProperties": {
             "$ref": "#/definitions/UtxoParamDef"
@@ -1064,9 +1033,6 @@
         },
         "state_vars": true
       },
-      "required": [
-        "description"
-      ],
       "type": "object"
     },
     "WalletValue": {
@@ -1125,12 +1091,6 @@
       "description": "Contract template definitions. Each template has typed fields and actions. An action carrying a `create_instance` block is a constructor for its template.",
       "type": [
         "object",
-        "null"
-      ]
-    },
-    "description": {
-      "type": [
-        "string",
         "null"
       ]
     },

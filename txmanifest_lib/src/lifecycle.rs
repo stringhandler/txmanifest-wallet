@@ -436,14 +436,8 @@ pub fn run(
     // ------------------------------------------------------------------
     println!();
     println!("{}", style(format!("Protocol: {}", manifest.protocol)).bold().cyan());
-    if let Some(desc) = &manifest.description {
-        println!("  {}", style(desc).dim());
-    }
     println!();
     println!("{}", style(format!("Action: {}", action_name)).bold().cyan());
-    if let Some(desc) = &action.description {
-        println!("  {}", style(desc).dim());
-    }
     println!();
     match &loaded_wallet {
         Some(w) => {
@@ -485,7 +479,7 @@ pub fn run(
                 let value = prompt::prompt_param(
                     field_name,
                     &field_def.type_,
-                    field_def.description.as_deref(),
+                    field_def.ui_help.as_deref(),
                     field_def.default.as_deref(),
                 )?;
                 ctx.set_compile_param(field_name, value);
@@ -635,7 +629,7 @@ pub fn run(
                     computed
                 } else {
                     let default = def.default.as_deref();
-                    prompt::prompt_param(name, &def.type_, def.description.as_deref(), default)?
+                    prompt::prompt_param(name, &def.type_, def.ui_help.as_deref(), default)?
                 };
                 ctx.set_param(name, value.clone());
                 // Also write into compile_params so that covenant hash computations
@@ -949,7 +943,7 @@ pub fn run(
                     );
                     // Fall back to interactive prompt so the user can supply the value manually.
                     let default = def.default.as_deref();
-                    let value = prompt::prompt_param(name, &def.type_, def.description.as_deref(), default)?;
+                    let value = prompt::prompt_param(name, &def.type_, def.ui_help.as_deref(), default)?;
                     ctx.set_param(name, value.clone());
                     ctx.set_compile_param(name, value);
                 }
@@ -976,9 +970,6 @@ pub fn run(
                 output.destination_summary(),
                 optional_tag
             );
-            if let Some(desc) = &output.description {
-                println!("    {}", style(desc).dim());
-            }
             if let Some(amount) = &output.amount_sat {
                 println!("    amount_sat = {}", style(amount.to_string()).yellow());
             }
@@ -3878,7 +3869,7 @@ mod tests {
                     None => String::new(),
                 };
                 Manifest::from_json_str(&format!(
-                    r#"{{ "manifest_version": "0.2.0", "protocol": "t", "actions": {{ "A": {{ "outputs": [
+                    r#"{{ "manifest_version": "0.3.0", "protocol": "t", "actions": {{ "A": {{ "outputs": [
                          {{ "id": "o0", "amount_sat": "1", "destination": "params.a"{extra} }} ] }} }} }}"#
                 ))
                 .expect("manifest should parse")
@@ -3918,10 +3909,10 @@ mod tests {
     #[test]
     fn closed_utxo_type_resolves_each_site_independently() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "actions": { "A": { "params": { "claim": { "type": "bytes32" } } } },
                  "utxo_types": { "prize": {
-                   "description": "d",
+                   "$comment": "d",
                    "params": { "STATE": { "type": "bytes32",
                                           "default": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" } },
                    "script": { "type": "simplicity", "source": "./x.simf",
@@ -3966,17 +3957,17 @@ mod tests {
     #[test]
     fn closed_utxo_type_cannot_read_action_scope() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "actions": { "A": { "params": { "claim": { "type": "bytes32" } } } },
                  "utxo_types": {
                    "leaky_leaf": {
-                     "description": "d",
+                     "$comment": "d",
                      "params": {},
                      "script": { "type": "simplicity", "source": "./x.simf",
                        "extra_leaves": [ { "type": "tapdata",
                          "payload": [ { "value": "params.claim", "type": "bytes32" } ] } ] } },
                    "leaky_default": {
-                     "description": "d",
+                     "$comment": "d",
                      "params": { "S": { "type": "bytes32", "default": "params.claim" } },
                      "script": { "type": "simplicity", "source": "./x.simf" } } } }"#,
         )
@@ -4035,7 +4026,7 @@ mod tests {
     #[test]
     fn declared_inputs_that_never_reach_the_pset_are_detected() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": { "inputs": [
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "actions": { "A": { "inputs": [
                  { "id": "contest_in", "utxo_source": "prize_covenant" },
                  { "id": "fees_in",    "utxo_source": "wallet" } ] } } }"#,
         )
@@ -4087,7 +4078,7 @@ mod tests {
     #[test]
     fn change_outputs_are_never_skipped_for_a_missing_amount() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": { "outputs": [
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "actions": { "A": { "outputs": [
                  { "id": "change_out",   "asset": "lbtc", "destination": "change" },
                  { "id": "opt_change",   "asset": "lbtc", "destination": "change", "optional": true },
                  { "id": "opt_wallet",   "asset": "lbtc", "destination": "wallet", "optional": true },
@@ -4186,7 +4177,6 @@ mod tests {
         cp_map.insert("WITH_ASSET_BURN".to_string(), "true".to_string());          // literal
 
         let ut = UtxoType {
-            description: "test".to_string(),
             script: Some(UtxoScript {
                 type_: "simplicity".to_string(),
                 source: None,
@@ -4218,9 +4208,8 @@ mod tests {
         use std::collections::HashMap;
 
         let action: crate::manifest::Action = serde_json::from_value(serde_json::json!({
-            "description": "Pay",
             "params": {
-                "pubkey": { "type": "pubkey", "description": "recipient key" }
+                "pubkey": { "type": "pubkey", "ui_help": "recipient key" }
             }
         })).expect("deserialize action");
 
@@ -4273,7 +4262,7 @@ mod tests {
         use std::collections::HashMap;
 
         let action: crate::manifest::Action =
-            serde_json::from_value(serde_json::json!({ "description": "x" })).expect("action");
+            serde_json::from_value(serde_json::json!({})).expect("action");
         let ctx = ExecutionContext::new();
         let overrides = serde_json::json!({ "COUNT": "7" });
 
@@ -4527,21 +4516,21 @@ mod tests {
         // Populate ctx as if inputs + action params were resolved.
         let mut ctx = ExecutionContext::new();
         // $params.* (offer terms + keeper + factory + zero-hash default)
-        ctx.set_param("COLLATERAL_ASSET_ID", collateral);
-        ctx.set_param("PRINCIPAL_ASSET_ID", principal);
-        ctx.set_param("PROTOCOL_FEE_KEEPER_ASSET_ID", protocol_fee);
-        ctx.set_param("COLLATERAL_AMOUNT", "21000");
-        ctx.set_param("PRINCIPAL_AMOUNT", "1000");
-        ctx.set_param("PRINCIPAL_INTEREST_RATE", "10000");
-        ctx.set_param("LOAN_EXPIRATION_TIME", "2536857");
-        ctx.set_param("ZERO_HASH", &"00".repeat(32));
-        ctx.set_param("FACTORY_ASSET_ID", "0101010101010101010101010101010101010101010101010101010101010101");
+        ctx.set_param("collateral_asset_id", collateral);
+        ctx.set_param("principal_asset_id", principal);
+        ctx.set_param("protocol_fee_keeper_asset_id", protocol_fee);
+        ctx.set_param("collateral_amount", "21000");
+        ctx.set_param("principal_amount", "1000");
+        ctx.set_param("principal_interest_rate", "10000");
+        ctx.set_param("loan_expiration_time", "2536857");
+        ctx.set_param("zero_hash", &"00".repeat(32));
+        ctx.set_param("factory_asset_id", "0101010101010101010101010101010101010101010101010101010101010101");
         // Protocol message-type tag constant (a param default in the manifest; here set directly
         // as a compile param since the test drives create_instance without Step 1).
-        ctx.set_compile_param("LENDING_PROGRAM_ID", "f80c6162");
+        ctx.set_compile_param("lending_program_id", "f80c6162");
         // $instance.* (issuance-resolved NFT asset ids)
-        ctx.set_compile_param("BORROWER_NFT_ASSET_ID", borrower_nft);
-        ctx.set_compile_param("LENDER_NFT_ASSET_ID", lender_nft);
+        ctx.set_compile_param("borrower_nft_asset_id", borrower_nft);
+        ctx.set_compile_param("lender_nft_asset_id", lender_nft);
 
         // Type hints from the template field + action param declarations.
         let mut hints: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -4561,19 +4550,19 @@ mod tests {
         );
 
         // The 5 nested hashes must match the independently-verified recon values.
-        assert_eq!(fields.get("FINALIZED_LENDER_VAULT_COV_HASH").map(String::as_str),
+        assert_eq!(fields.get("finalized_lender_vault_cov_hash").map(String::as_str),
             Some("686766f422bca200851234cc787902d105ae91e7acc97977ff32b84263b286c6"), "F_lender");
-        assert_eq!(fields.get("LENDER_VAULT_COV_HASH").map(String::as_str),
+        assert_eq!(fields.get("lender_vault_cov_hash").map(String::as_str),
             Some("54a0e779d4324f5f5ef45e0e615b34eb0091c4b88a08bfee3ce4fe0e760cf872"), "A_lender");
-        assert_eq!(fields.get("FINALIZED_PROTOCOL_FEE_VAULT_COV_HASH").map(String::as_str),
+        assert_eq!(fields.get("finalized_protocol_fee_vault_cov_hash").map(String::as_str),
             Some("9c2a221b8457112075bf80b46b32878e34a023e3f67653c54d041897926a49bb"), "F_proto");
-        assert_eq!(fields.get("PROTOCOL_FEE_VAULT_COV_HASH").map(String::as_str),
+        assert_eq!(fields.get("protocol_fee_vault_cov_hash").map(String::as_str),
             Some("2a887b2cbd477c94f4b14c03d32216ccb0faeb087ab08fd3862e105ddcdf5e71"), "A_proto");
-        assert_eq!(fields.get("PRINCIPAL_OUTPUT_SCRIPT_HASH").map(String::as_str),
+        assert_eq!(fields.get("principal_output_script_hash").map(String::as_str),
             Some("88c5f4e880bed03eb4e59f99f8d60534cd8c3dc9b405f2af72da2b8c358c7eb6"), "principal_out");
 
         // CURRENT_DEBT (task 10): principal + principal*bps/10000 = 1000 + 1000*10000/10000 = 2000.
-        assert_eq!(fields.get("CURRENT_DEBT").map(String::as_str), Some("2000"), "current_debt");
+        assert_eq!(fields.get("current_debt").map(String::as_str), Some("2000"), "current_debt");
 
         // Drive the ACTUAL lending_collateral utxo_type end-to-end: fold the computed create_instance
         // fields into ctx, resolve the utxo_type's compile_params + computed storage leaves, and
@@ -4603,7 +4592,7 @@ mod tests {
 
         // Task 11: LENDING_COV_SCRIPT_HASH = sha256(out[5] spk, WITH storage), computed via a
         // tapleaf-over-lending.simf that folds the same storage leaves.
-        assert_eq!(fields.get("LENDING_COV_SCRIPT_HASH").map(String::as_str),
+        assert_eq!(fields.get("lending_cov_script_hash").map(String::as_str),
             Some("2f40d78cbd15bd847a995719d707e623520dae2e223f66d77a76599f95685b19"),
             "LENDING_COV_SCRIPT_HASH must equal sha256(out[5] scriptPubKey)");
         // Cross-check: it really is sha256 of the out[5] spk we just reproduced.
@@ -4611,7 +4600,7 @@ mod tests {
             use lwk_wollet::elements::hashes::{sha256, Hash};
             let h = sha256::Hash::hash(addr.script_pubkey().as_bytes()).to_byte_array();
             let hh: String = h.iter().map(|b| format!("{b:02x}")).collect();
-            assert_eq!(fields.get("LENDING_COV_SCRIPT_HASH").map(String::as_str), Some(hh.as_str()));
+            assert_eq!(fields.get("lending_cov_script_hash").map(String::as_str), Some(hh.as_str()));
         }
         // The lender_nft_script_auth covenant (out[3]) compiles from that script hash.
         let sa_ut = manifest.utxo_type("lender_nft_script_auth").expect("script_auth utxo_type");
@@ -4681,7 +4670,7 @@ mod tests {
             use lwk_wollet::elements::hashes::{sha256, Hash};
             let pa_hash: String = sha256::Hash::hash(pa_addr.script_pubkey().as_bytes())
                 .to_byte_array().iter().map(|b| format!("{b:02x}")).collect();
-            assert_eq!(pa_hash, fields.get("PRINCIPAL_OUTPUT_SCRIPT_HASH").cloned().unwrap(),
+            assert_eq!(pa_hash, fields.get("principal_output_script_hash").cloned().unwrap(),
                 "AcceptOffer out[1] AssetAuth spk hash must equal PRINCIPAL_OUTPUT_SCRIPT_HASH");
         }
     }
@@ -4718,18 +4707,18 @@ mod tests {
         // Same live-offer 43ab4efe parameters as the out[5] reproduction test, so the vault
         // hashes computed here are the verified ones.
         let mut ctx = ExecutionContext::new();
-        ctx.set_param("COLLATERAL_ASSET_ID", "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49");
-        ctx.set_param("PRINCIPAL_ASSET_ID", "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5");
-        ctx.set_param("PROTOCOL_FEE_KEEPER_ASSET_ID", "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5");
-        ctx.set_param("COLLATERAL_AMOUNT", "21000");
-        ctx.set_param("PRINCIPAL_AMOUNT", "1000");
-        ctx.set_param("PRINCIPAL_INTEREST_RATE", "10000");
-        ctx.set_param("LOAN_EXPIRATION_TIME", "2536857");
-        ctx.set_param("ZERO_HASH", &"00".repeat(32));
-        ctx.set_param("FACTORY_ASSET_ID", "0101010101010101010101010101010101010101010101010101010101010101");
-        ctx.set_compile_param("LENDING_PROGRAM_ID", "f80c6162");
-        ctx.set_compile_param("BORROWER_NFT_ASSET_ID", "78d61185c79f855fac51a87c191b00266f02d28752f50b3d9092ccf6b978181e");
-        ctx.set_compile_param("LENDER_NFT_ASSET_ID", "213462821a5cdb96f435f5ea6597e8937359d6fd5a64b6ac8ef4262bc279fcfb");
+        ctx.set_param("collateral_asset_id", "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49");
+        ctx.set_param("principal_asset_id", "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5");
+        ctx.set_param("protocol_fee_keeper_asset_id", "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5");
+        ctx.set_param("collateral_amount", "21000");
+        ctx.set_param("principal_amount", "1000");
+        ctx.set_param("principal_interest_rate", "10000");
+        ctx.set_param("loan_expiration_time", "2536857");
+        ctx.set_param("zero_hash", &"00".repeat(32));
+        ctx.set_param("factory_asset_id", "0101010101010101010101010101010101010101010101010101010101010101");
+        ctx.set_compile_param("lending_program_id", "f80c6162");
+        ctx.set_compile_param("borrower_nft_asset_id", "78d61185c79f855fac51a87c191b00266f02d28752f50b3d9092ccf6b978181e");
+        ctx.set_compile_param("lender_nft_asset_id", "213462821a5cdb96f435f5ea6597e8937359d6fd5a64b6ac8ef4262bc279fcfb");
 
         let mut hints: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         if let Some((_, template_def, _)) = manifest.find_template_action("CreateOffer") {
@@ -4750,9 +4739,9 @@ mod tests {
 
         // ZERO_HASH must reach the instance: the vault utxo_types reference it by name to pick up
         // its declared `bytes32` type. Inlined as a literal it would infer as u64 (all digits).
-        assert_eq!(fields.get("ZERO_HASH").map(String::as_str), Some("00".repeat(32).as_str()),
+        assert_eq!(fields.get("zero_hash").map(String::as_str), Some("00".repeat(32).as_str()),
             "ZERO_HASH must be carried into the instance for the vault utxo_types to type it");
-        assert_eq!(hints.get("ZERO_HASH").map(String::as_str), Some("bytes32"),
+        assert_eq!(hints.get("zero_hash").map(String::as_str), Some("bytes32"),
             "ZERO_HASH must be declared bytes32, not left to value-based inference");
 
         let base: std::collections::HashMap<String, String> =
@@ -4768,7 +4757,7 @@ mod tests {
             .expect("lender_vault_finalized address compiles");
         let lender_hash: String = sha256::Hash::hash(lender_addr.script_pubkey().as_bytes())
             .to_byte_array().iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(Some(lender_hash.as_str()), fields.get("FINALIZED_LENDER_VAULT_COV_HASH").map(String::as_str),
+        assert_eq!(Some(lender_hash.as_str()), fields.get("finalized_lender_vault_cov_hash").map(String::as_str),
             "RepayLoan out[1] spk hash must equal the FINALIZED_LENDER_VAULT_COV_HASH the covenant enforces");
 
         // out[2] — the protocol-fee finalized vault (keeper burn = false, unlike the lender's).
@@ -4778,7 +4767,7 @@ mod tests {
             .expect("protocol_fee_vault_finalized address compiles");
         let proto_hash: String = sha256::Hash::hash(proto_addr.script_pubkey().as_bytes())
             .to_byte_array().iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(Some(proto_hash.as_str()), fields.get("FINALIZED_PROTOCOL_FEE_VAULT_COV_HASH").map(String::as_str),
+        assert_eq!(Some(proto_hash.as_str()), fields.get("finalized_protocol_fee_vault_cov_hash").map(String::as_str),
             "RepayLoan out[2] spk hash must equal the FINALIZED_PROTOCOL_FEE_VAULT_COV_HASH the covenant enforces");
 
         // The two vaults must be distinct covenants — a keeper/burn-flag mix-up would collapse them.
@@ -4798,13 +4787,13 @@ mod tests {
                 .map(str::to_string)
                 .unwrap_or_else(|| panic!("{name} has a compute expression"))
         };
-        let protocol_fee = crate::eval::eval_expr_str(&formula_of("TOTAL_PROTOCOL_FEE"), &ctx)
-            .expect("TOTAL_PROTOCOL_FEE evaluates");
-        let lender_amount = crate::eval::eval_expr_str(&formula_of("LENDER_VAULT_AMOUNT"), &ctx)
-            .expect("LENDER_VAULT_AMOUNT evaluates");
+        let protocol_fee = crate::eval::eval_expr_str(&formula_of("total_protocol_fee"), &ctx)
+            .expect("total_protocol_fee evaluates");
+        let lender_amount = crate::eval::eval_expr_str(&formula_of("lender_vault_amount"), &ctx)
+            .expect("lender_vault_amount evaluates");
         assert_eq!(protocol_fee, "100", "protocol fee = 10% of the 1000 interest");
         assert_eq!(lender_amount, "1900", "lender receives the debt less the protocol fee");
-        let debt: u64 = fields.get("CURRENT_DEBT").unwrap().parse().unwrap();
+        let debt: u64 = fields.get("current_debt").unwrap().parse().unwrap();
         assert_eq!(
             protocol_fee.parse::<u64>().unwrap() + lender_amount.parse::<u64>().unwrap(),
             debt,
@@ -4886,13 +4875,13 @@ mod tests {
 
         // Populate ctx as if Step 1 had prompted for the offer terms.
         let mut ctx = ExecutionContext::new();
-        ctx.set_param("OFFER_ASSET_ID", usdt_ish);
-        ctx.set_param("OFFER_AMOUNT", "100000");
-        ctx.set_param("ASSET_B", lbtc_testnet);
-        ctx.set_param("AMOUNT_B", "50000");
-        ctx.set_param("MAKER_PUB_KEY", maker_pub_key);
-        ctx.set_param("TIMEOUT", "2000000");
-        ctx.set_param("MAX_FEE", "5000");
+        ctx.set_param("offer_asset_id", usdt_ish);
+        ctx.set_param("offer_amount", "100000");
+        ctx.set_param("asset_b", lbtc_testnet);
+        ctx.set_param("amount_b", "50000");
+        ctx.set_param("maker_pub_key", maker_pub_key);
+        ctx.set_param("timeout", "2000000");
+        ctx.set_param("max_fee", "5000");
 
         // Type hints from the template field + method param declarations (mirrors Step 7's pre-pass).
         let mut hints: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -4926,15 +4915,15 @@ mod tests {
                 .collect();
 
         assert_eq!(
-            fields.get("MAKER_SPK").map(String::as_str),
+            fields.get("maker_spk").map(String::as_str),
             Some(expect_spk_hash.as_str()),
             "create_instance MAKER_SPK must equal sha256(maker_payout scriptPubKey) for MAKER_PUB_KEY"
         );
 
         // The plain `$params.*` fields carry through untouched.
-        assert_eq!(fields.get("AMOUNT_B").map(String::as_str), Some("50000"));
-        assert_eq!(fields.get("TIMEOUT").map(String::as_str), Some("2000000"));
-        assert_eq!(fields.get("MAX_FEE").map(String::as_str), Some("5000"));
+        assert_eq!(fields.get("amount_b").map(String::as_str), Some("50000"));
+        assert_eq!(fields.get("timeout").map(String::as_str), Some("2000000"));
+        assert_eq!(fields.get("max_fee").map(String::as_str), Some("5000"));
 
         // Drive the ACTUAL tessera_offer utxo_type end-to-end: fold the computed fields back into
         // ctx (as the constructor pre-pass does) and resolve the offer covenant address.

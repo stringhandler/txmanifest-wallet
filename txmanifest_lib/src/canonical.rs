@@ -2,8 +2,8 @@
 //!
 //! A manifest is meant to be signed and published under a stable id. Hashing the
 //! file bytes would make that id depend on things that carry no meaning — key
-//! order, indentation, and prose — so a reformat or a typo fix in a description
-//! would mint a new id and invalidate the signature.
+//! order, indentation, and prose — so a reformat or a typo fix in a comment would
+//! mint a new id and invalidate the signature.
 //!
 //! [`canonicalize`] therefore reduces a manifest to the subset that determines
 //! what a transaction *does* and what a signer *reads*, and [`manifest_id`] hashes
@@ -14,13 +14,21 @@
 //! Only developer prose is dropped: [`UNHASHED_KEYS`]. The rule is not "prose vs
 //! structure" but **"can a user read it before authorising?"**
 //!
-//! - `description` — developer documentation. `preview.rs` deliberately does *not*
-//!   fall back to it, so it never reaches a confirmation screen.
-//! - `$comment` / `$schema` — authoring conventions, already stripped at parse time.
+//! The format answers that question in the key name rather than leaving it to be
+//! rediscovered per field. `$comment` is developer prose and is stripped before
+//! deserialization, so no amount of engine code can leak it onto a screen — that is
+//! what makes dropping it from the hash safe, rather than a promise nobody enforces.
+//! `$schema` is an editor hint, stripped the same way.
 //!
-//! Everything a signer reads — `ui.action`, `ui.label`, `ui.role` — **is** hashed.
-//! Excluding it would let an attacker rewrite the confirmation screen while keeping
-//! a valid signature, which is precisely the attack clear signing exists to stop.
+//! Everything a signer reads — `ui.action`, `ui.label`, `ui.role`, `ui_help` — **is**
+//! hashed. Excluding it would let an attacker rewrite the confirmation screen while
+//! keeping a valid signature, which is precisely the attack clear signing exists to
+//! stop. `ui_help` counts: it is the text a user reads while deciding what value to
+//! type into a prompt, and steering that is as good as steering the screen.
+//!
+//! This is why the format has no `description`. It was a single key doing both jobs —
+//! unhashed like a comment, yet printed to the user like a label — and the invariant
+//! above could only be stated, not enforced.
 //!
 //! # Limits
 //!
@@ -39,9 +47,10 @@ use serde_json::{Map, Value};
 
 /// Keys removed before hashing: documentation that may change without re-signing.
 ///
-/// `description` is included deliberately — see the module docs. If it ever becomes
-/// signer-visible again, it must move back into the hash.
-pub const UNHASHED_KEYS: [&str; 3] = ["description", "$comment", "$schema"];
+/// Identical to [`crate::manifest::STRIPPED_KEYS`], and necessarily so: a key is safe
+/// to leave out of the hash exactly when the parser guarantees it can never reach a
+/// user. Anything added here that the parser still deserializes is a hole.
+pub const UNHASHED_KEYS: [&str; 2] = ["$comment", "$schema"];
 
 /// Domain separator for the manifest id, in the style of BIP-340 tagged hashes.
 ///
@@ -108,21 +117,22 @@ mod tests {
     use super::*;
 
     const BASE: &str = r#"{
-        "manifest_version": "0.2.0",
+        "manifest_version": "0.3.0",
         "protocol": "test",
-        "description": "the original prose",
+        "$comment": "the original prose",
         "actions": { "A": {
-            "description": "does a thing",
+            "$comment": "does a thing",
+            "params": { "amount": { "type": "u64", "ui_help": "how much to send" } },
             "outputs": [
                 { "id": "o0", "destination": "change",
-                  "description": "developer note",
+                  "$comment": "developer note",
                   "ui": { "label": "change back to you", "role": "change" } }
             ]
         }}
     }"#;
 
     #[test]
-    fn editing_a_description_does_not_change_the_id() {
+    fn editing_a_comment_does_not_change_the_id() {
         // The whole point: prose churn must not mint a new registry entry.
         let edited = BASE
             .replace("the original prose", "completely rewritten, much longer prose")
@@ -149,6 +159,15 @@ mod tests {
     }
 
     #[test]
+    fn editing_prompt_help_does_change_the_id() {
+        // `ui_help` is read by a user deciding what to type. Rewriting "how much to
+        // send" into "enter the attacker's amount" must invalidate the signature, or
+        // the prompt is a steering surface with no integrity behind it.
+        let attacked = BASE.replace("how much to send", "how much to send (any value is fine)");
+        assert_ne!(manifest_id(BASE).unwrap(), manifest_id(&attacked).unwrap());
+    }
+
+    #[test]
     fn changing_structure_changes_the_id() {
         let attacked = BASE.replace("\"destination\": \"change\"", "\"destination\": \"wallet\"");
         assert_ne!(manifest_id(BASE).unwrap(), manifest_id(&attacked).unwrap());
@@ -157,9 +176,9 @@ mod tests {
     #[test]
     fn array_order_is_significant() {
         // Input/output ordering is consensus-relevant — covenants introspect by index.
-        let two = r#"{"manifest_version":"0.2.0","protocol":"t","actions":{"A":{"outputs":[
+        let two = r#"{"manifest_version": "0.3.0","protocol":"t","actions":{"A":{"outputs":[
             {"id":"a","destination":"change"},{"id":"b","destination":"change"}]}}}"#;
-        let swapped = r#"{"manifest_version":"0.2.0","protocol":"t","actions":{"A":{"outputs":[
+        let swapped = r#"{"manifest_version": "0.3.0","protocol":"t","actions":{"A":{"outputs":[
             {"id":"b","destination":"change"},{"id":"a","destination":"change"}]}}}"#;
         assert_ne!(manifest_id(two).unwrap(), manifest_id(swapped).unwrap());
     }
@@ -172,6 +191,7 @@ mod tests {
             assert!(!text.contains(key), "canonical form still contains '{key}'");
         }
         assert!(text.contains("change back to you"), "ui.label must be hashed");
+        assert!(text.contains("how much to send"), "ui_help must be hashed");
     }
 
     #[test]

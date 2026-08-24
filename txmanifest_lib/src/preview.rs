@@ -603,13 +603,15 @@ fn output_amount(output: &Output, ctx: &ExecutionContext) -> Option<(u64, String
 
 /// The signer-facing label for an input.
 ///
-/// `ui.label` is the **only** source. `description` is deliberately not a fallback:
-/// it is developer prose (median 60 chars, 38% over 80, longest 1193 in this repo's
-/// own examples) and dumping it into a one-line net-effect row wrecks the display.
-/// More importantly, `description` is excluded from the manifest's registry hash so
-/// it can be edited without re-signing — which means it must never appear on a
-/// screen the user reads before authorising a transaction. Legs with no `ui.label`
-/// fall back to their `id`, which `validate` flags.
+/// `ui.label` is the **only** source. `$comment` is deliberately not a fallback: it
+/// is developer prose (median 60 chars, 38% over 80, longest 1193 in this repo's own
+/// examples) and dumping it into a one-line net-effect row wrecks the display. More
+/// importantly, `$comment` is excluded from the manifest's registry hash so it can be
+/// edited without re-signing — which means it must never appear on a screen the user
+/// reads before authorising a transaction. The parser now enforces that rather than
+/// trusting this comment: `$comment` is stripped before deserialization, so an
+/// [`Input`] has no field to fall back to. Legs with no `ui.label` fall back to their
+/// `id`, which `validate` flags.
 fn input_label(input: &Input) -> String {
     input
         .ui
@@ -620,7 +622,7 @@ fn input_label(input: &Input) -> String {
 }
 
 /// The output's label without any "(if any)" suffix. See [`input_label`] for why
-/// `description` is not a fallback.
+/// `$comment` is not a fallback.
 fn output_base_label(output: &Output) -> String {
     output
         .ui
@@ -682,13 +684,13 @@ mod tests {
         let manifest: Manifest = Manifest::from_json_str(src).expect("parse example manifest");
         let mut ctx = ExecutionContext::new();
         for (k, v) in [
-            ("PRINCIPAL_AMOUNT", "1000"),
-            ("COLLATERAL_AMOUNT", "3400"),
-            ("PRINCIPAL_ASSET_ID", PRINCIPAL_ID),
-            ("COLLATERAL_ASSET_ID", COLLATERAL_ID),
-            ("FACTORY_ASSET_ID", "c6b7a5fdf1a01787af534dc9252d1c99908d929a16f8862b8925dcf53d089c6b"),
-            ("BORROWER_NFT_ASSET_ID", "1c424b82d66f37b9efea9f55bb5fab6dd2524742f8cc2741ed1be185a848c507"),
-            ("LENDER_NFT_ASSET_ID", "7eae7d537d90257c78220a1fd89915b39a2cb293111914e5a2e20d965acf361f"),
+            ("principal_amount", "1000"),
+            ("collateral_amount", "3400"),
+            ("principal_asset_id", PRINCIPAL_ID),
+            ("collateral_asset_id", COLLATERAL_ID),
+            ("factory_asset_id", "c6b7a5fdf1a01787af534dc9252d1c99908d929a16f8862b8925dcf53d089c6b"),
+            ("borrower_nft_asset_id", "1c424b82d66f37b9efea9f55bb5fab6dd2524742f8cc2741ed1be185a848c507"),
+            ("lender_nft_asset_id", "7eae7d537d90257c78220a1fd89915b39a2cb293111914e5a2e20d965acf361f"),
         ] {
             ctx.set_compile_param(k, v);
         }
@@ -845,9 +847,9 @@ mod tests {
         let manifest: Manifest = Manifest::from_json_str(src).unwrap();
         let mut ctx = ExecutionContext::new();
         for (k, v) in [
-            ("PRINCIPAL_AMOUNT", "1000"),
-            ("PRINCIPAL_ASSET_ID", PRINCIPAL_ID),
-            ("BORROWER_NFT_ASSET_ID", "a2f1d6000000000000000000000000000000000000000000000000000000001059"),
+            ("principal_amount", "1000"),
+            ("principal_asset_id", PRINCIPAL_ID),
+            ("borrower_nft_asset_id", "a2f1d6000000000000000000000000000000000000000000000000000000001059"),
         ] {
             ctx.set_compile_param(k, v);
         }

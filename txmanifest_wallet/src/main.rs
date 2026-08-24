@@ -657,7 +657,7 @@ fn cmd_describe(manifest_path: &Path, action_name: Option<&str>) -> Result<()> {
         .with_context(|| format!("Cannot read manifest file: {}", manifest_path.display()))?;
     let manifest = manifest::Manifest::from_json_str(&raw)
         .with_context(|| format!("Cannot parse manifest file: {}", manifest_path.display()))?;
-    describe::describe(&manifest, action_name)
+    describe::describe(&manifest, &raw, action_name)
 }
 
 fn main() -> Result<()> {

@@ -1,76 +1,76 @@
 {
   "$schema": "../../schema/txmanifest.schema.json",
-  "manifest_version": "0.2.0",
+  "manifest_version": "0.3.0",
   "protocol": "simplicity-lending",
-  "description": "P2P collateralised lending protocol on Liquid using SimplicityHL covenants. Borrower locks collateral in a PreLockCovenant and advertises terms via bit-packed Parameter NFTs. A Lender accepts by providing the principal, activating the LendingCovenant. Settlement is either repayment (borrower returns principal+interest, reclaims collateral) or liquidation (lender claims collateral after loan expiry). All covenants are enforced on-chain via Simplicity programs; no trusted backend is required.",
+  "$comment": "P2P collateralised lending protocol on Liquid using SimplicityHL covenants. Borrower locks collateral in a PreLockCovenant and advertises terms via bit-packed Parameter NFTs. A Lender accepts by providing the principal, activating the LendingCovenant. Settlement is either repayment (borrower returns principal+interest, reclaims collateral) or liquidation (lender claims collateral after loan expiry). All covenants are enforced on-chain via Simplicity programs; no trusted backend is required.",
   "utxo_types": {
     "p2pk": {
-      "description": "Simple Schnorr-signature covenant (p2pk.simf) keyed to BORROWER_PUB_KEY. Used as the borrower's principal-payment and NFT-release address.",
+      "$comment": "Simple Schnorr-signature covenant (p2pk.simf) keyed to BORROWER_PUB_KEY. Used as the borrower's principal-payment and NFT-release address.",
       "script": {
         "type": "simplicity",
         "source": "./p2pk.simf",
         "compile_params": {
-          "PUB_KEY": "BORROWER_PUB_KEY"
+          "PUB_KEY": "borrower_pub_key"
         }
       }
     },
     "pre_lock": {
-      "description": "Collateral held in the PreLockCovenant while the borrower's offer is open. Two spending paths: PATH::LEFT (create_lending_path) allows a lender to activate the loan; PATH::RIGHT (cancel_pre_lock_path) allows the borrower to cancel with a Schnorr signature, burning all Utility NFTs.",
+      "$comment": "Collateral held in the PreLockCovenant while the borrower's offer is open. Two spending paths: PATH::LEFT (create_lending_path) allows a lender to activate the loan; PATH::RIGHT (cancel_pre_lock_path) allows the borrower to cancel with a Schnorr signature, burning all Utility NFTs.",
       "script": {
         "type": "simplicity",
         "source": "./pre_lock.simf"
       },
-      "asset": "COLLATERAL_ASSET_ID"
+      "asset": "collateral_asset_id"
     },
     "lending_collateral": {
-      "description": "Collateral locked in the active LendingCovenant. Released via repayment (borrower returns principal+interest, reclaims collateral) or liquidation (lender claims collateral after LOAN_EXPIRATION_TIME).",
+      "$comment": "Collateral locked in the active LendingCovenant. Released via repayment (borrower returns principal+interest, reclaims collateral) or liquidation (lender claims collateral after LOAN_EXPIRATION_TIME).",
       "script": {
         "type": "simplicity",
         "source": "./lending.simf"
       },
-      "asset": "COLLATERAL_ASSET_ID"
+      "asset": "collateral_asset_id"
     },
     "prelock_script_auth": {
-      "description": "ScriptAuth covenant wrapping Utility NFTs during the offer phase. Verifies co-spending with the pre_lock UTXO.",
+      "$comment": "ScriptAuth covenant wrapping Utility NFTs during the offer phase. Verifies co-spending with the pre_lock UTXO.",
       "script": {
         "type": "simplicity",
         "source": "./script_auth.simf",
         "compile_params": {
-          "SCRIPT_HASH": "PRE_LOCK_COV_HASH"
+          "SCRIPT_HASH": "pre_lock_cov_hash"
         }
       }
     },
     "lending_script_auth": {
-      "description": "ScriptAuth covenant wrapping Parameter NFTs and the Borrower NFT during the active loan phase. Verifies co-spending with the lending_collateral UTXO.",
+      "$comment": "ScriptAuth covenant wrapping Parameter NFTs and the Borrower NFT during the active loan phase. Verifies co-spending with the lending_collateral UTXO.",
       "script": {
         "type": "simplicity",
         "source": "./script_auth.simf",
         "compile_params": {
-          "SCRIPT_HASH": "LENDING_COV_HASH"
+          "SCRIPT_HASH": "lending_cov_hash"
         }
       }
     },
     "lender_principal_vault": {
-      "description": "AssetAuth covenant holding the principal+interest payment from the borrower. The lender withdraws by co-spending and burning the Lender NFT.",
+      "$comment": "AssetAuth covenant holding the principal+interest payment from the borrower. The lender withdraws by co-spending and burning the Lender NFT.",
       "script": {
         "type": "simplicity",
         "source": "./asset_auth.simf",
         "compile_params": {
-          "ASSET_ID": "LENDER_NFT_ASSET_ID",
+          "ASSET_ID": "lender_nft_asset_id",
           "ASSET_AMOUNT": "1",
           "WITH_ASSET_BURN": "true"
         }
       },
-      "asset": "PRINCIPAL_ASSET_ID"
+      "asset": "principal_asset_id"
     }
   },
   "actions": {
     "Prepare": {
-      "description": "Utility method to split a utxo into 4 utxos for the IssueUtilityNFTs action",
+      "$comment": "Utility method to split a utxo into 4 utxos for the IssueUtilityNFTs action",
       "inputs": [
         {
           "id": "input",
-          "description": "Wallet UTXO to split into 4 for IssueUtilityNFTs",
+          "$comment": "Wallet UTXO to split into 4 for IssueUtilityNFTs",
           "utxo_source": "wallet",
           "asset": "lbtc"
         }
@@ -103,25 +103,25 @@
     },
     "PrepareLender": {
       "allow_change": "any",
-      "description": "Utility: ensure the lender wallet has a PRINCIPAL_AMOUNT-sat UTXO of PRINCIPAL_ASSET_ID ready for SetupLending. Accepts any UTXO of that asset and splits off the exact amount needed.",
+      "$comment": "Utility: ensure the lender wallet has a PRINCIPAL_AMOUNT-sat UTXO of PRINCIPAL_ASSET_ID ready for SetupLending. Accepts any UTXO of that asset and splits off the exact amount needed.",
       "inputs": [
         {
           "id": "principal_input",
-          "description": "Any wallet UTXO holding PRINCIPAL_ASSET_ID (at least PRINCIPAL_AMOUNT sat).",
+          "$comment": "Any wallet UTXO holding PRINCIPAL_ASSET_ID (at least PRINCIPAL_AMOUNT sat).",
           "utxo_source": "wallet",
-          "asset": "instance.PRINCIPAL_ASSET_ID",
+          "asset": "instance.principal_asset_id",
           "amount_sat": {
-            "min_amount": "instance.PRINCIPAL_AMOUNT"
+            "min_amount": "instance.principal_amount"
           }
         }
       ],
       "outputs": [
         {
           "id": "principal_out",
-          "description": "Exact PRINCIPAL_AMOUNT sat ready for SetupLending principal_in.",
+          "$comment": "Exact PRINCIPAL_AMOUNT sat ready for SetupLending principal_in.",
           "destination": "wallet",
-          "asset": "instance.PRINCIPAL_ASSET_ID",
-          "amount_sat": "instance.PRINCIPAL_AMOUNT",
+          "asset": "instance.principal_asset_id",
+          "amount_sat": "instance.principal_amount",
           "confidential": false
         }
       ]
@@ -129,156 +129,156 @@
   },
   "contract_templates": {
     "lending_contract": {
-      "description": "P2P collateralised lending contract. One instance per loan offer. Created by IssueUtilityNFTs; advanced through LockCollateral, SetupLending, RepayLoan / LiquidateAfterExpiry, and ClaimPrincipalWithInterest.",
+      "$comment": "P2P collateralised lending contract. One instance per loan offer. Created by IssueUtilityNFTs; advanced through LockCollateral, SetupLending, RepayLoan / LiquidateAfterExpiry, and ClaimPrincipalWithInterest.",
       "fields": {
-        "BORROWER_NFT_ASSET_ID": {
+        "borrower_nft_asset_id": {
           "type": "liquid.asset_id"
         },
-        "BORROWER_NFT_OUTPUT_SCRIPT_HASH": {
+        "borrower_nft_output_script_hash": {
           "type": "bytes32"
         },
-        "BORROWER_PUB_KEY": {
+        "borrower_pub_key": {
           "type": "pubkey"
         },
-        "COLLATERAL_AMOUNT": {
+        "collateral_amount": {
           "type": "u64"
         },
-        "COLLATERAL_ASSET_ID": {
+        "collateral_asset_id": {
           "type": "liquid.asset_id"
         },
-        "COLLATERAL_DECIMALS_MANTISSA": {
+        "collateral_decimals_mantissa": {
           "type": "u8"
         },
-        "FIRST_PARAMETERS_ENCODED": {
+        "first_parameters_encoded": {
           "type": "u64"
         },
-        "FIRST_PARAMETERS_NFT_ASSET_ID": {
+        "first_parameters_nft_asset_id": {
           "type": "liquid.asset_id"
         },
-        "LENDER_NFT_ASSET_ID": {
+        "lender_nft_asset_id": {
           "type": "liquid.asset_id"
         },
-        "LENDER_PRINCIPAL_COV_HASH": {
+        "lender_principal_cov_hash": {
           "type": "bytes32"
         },
-        "LENDING_COV_HASH": {
+        "lending_cov_hash": {
           "type": "bytes32"
         },
-        "LOAN_EXPIRATION_TIME": {
+        "loan_expiration_time": {
           "type": "u32"
         },
-        "PARAMETERS_NFT_OUTPUT_SCRIPT_HASH": {
+        "parameters_nft_output_script_hash": {
           "type": "bytes32"
         },
-        "PRE_LOCK_COV_HASH": {
+        "pre_lock_cov_hash": {
           "type": "bytes32"
         },
-        "PRELOCK_PARAMETERS_NFT_SCRIPT_HASH": {
+        "prelock_parameters_nft_script_hash": {
           "type": "bytes32"
         },
-        "PRINCIPAL_AMOUNT": {
+        "principal_amount": {
           "type": "u64"
         },
-        "PRINCIPAL_ASSET_ID": {
+        "principal_asset_id": {
           "type": "liquid.asset_id"
         },
-        "PRINCIPAL_DECIMALS_MANTISSA": {
+        "principal_decimals_mantissa": {
           "type": "u8"
         },
-        "PRINCIPAL_INTEREST_AMOUNT": {
+        "principal_interest_amount": {
           "type": "u64"
         },
-        "PRINCIPAL_INTEREST_RATE": {
+        "principal_interest_rate": {
           "type": "u16"
         },
-        "PRINCIPAL_OUTPUT_SCRIPT_HASH": {
+        "principal_output_script_hash": {
           "type": "bytes32"
         },
-        "SECOND_PARAMETERS_ENCODED": {
+        "second_parameters_encoded": {
           "type": "u64"
         },
-        "SECOND_PARAMETERS_NFT_ASSET_ID": {
+        "second_parameters_nft_asset_id": {
           "type": "liquid.asset_id"
         }
       },
       "actions": {
         "IssueUtilityNFTs": {
-          "description": "Borrower issues four Liquid NFTs (Borrower NFT, Lender NFT, First/Second Parameters NFTs). Computes all covenant hashes and writes the instance file.",
+          "$comment": "Borrower issues four Liquid NFTs (Borrower NFT, Lender NFT, First/Second Parameters NFTs). Computes all covenant hashes and writes the instance file.",
           "params": {
-            "BORROWER_PUB_KEY": {
+            "borrower_pub_key": {
               "type": "pubkey",
               "compute": {
                 "type": "wallet", "wallet": "key"
               },
-              "description": "Borrower's BIP340 Schnorr public key. Used for cancellation authorization and as the destination for the principal output."
+              "ui_help": "Borrower's BIP340 Schnorr public key. Used for cancellation authorization and as the destination for the principal output."
             },
-            "COLLATERAL_ASSET_ID": {
+            "collateral_asset_id": {
               "type": "liquid.asset_id",
-              "description": "Liquid asset ID of the collateral (e.g., L-BTC)."
+              "ui_help": "Liquid asset ID of the collateral (e.g., L-BTC)."
             },
-            "COLLATERAL_AMOUNT": {
+            "collateral_amount": {
               "type": "u64",
-              "description": "Exact collateral amount in asset base units."
+              "ui_help": "Exact collateral amount in asset base units."
             },
-            "COLLATERAL_DECIMALS_MANTISSA": {
+            "collateral_decimals_mantissa": {
               "type": "u8",
               "default": "8",
-              "description": "Decimal exponent of the collateral asset (e.g., 8 for L-BTC). Used for parameter NFT encoding."
+              "ui_help": "Decimal exponent of the collateral asset (e.g., 8 for L-BTC). Used for parameter NFT encoding."
             },
-            "PRINCIPAL_ASSET_ID": {
+            "principal_asset_id": {
               "type": "liquid.asset_id",
-              "description": "Liquid asset ID of the loan currency (e.g., L-USDT)."
+              "ui_help": "Liquid asset ID of the loan currency (e.g., L-USDT)."
             },
-            "PRINCIPAL_AMOUNT": {
+            "principal_amount": {
               "type": "u64",
-              "description": "Exact principal amount requested, in asset base units."
+              "ui_help": "Exact principal amount requested, in asset base units."
             },
-            "PRINCIPAL_DECIMALS_MANTISSA": {
+            "principal_decimals_mantissa": {
               "type": "u8",
-              "description": "Decimal exponent of the principal asset."
+              "ui_help": "Decimal exponent of the principal asset."
             },
-            "PRINCIPAL_INTEREST_RATE": {
+            "principal_interest_rate": {
               "type": "u16",
-              "description": "Interest rate in basis points (10,000 = 100%). Max 65,535 basis points."
+              "ui_help": "Interest rate in basis points (10,000 = 100%). Max 65,535 basis points."
             },
-            "LOAN_EXPIRATION_TIME": {
+            "loan_expiration_time": {
               "type": "u32",
-              "description": "Block height at or after which the lender may liquidate (CLTV)."
+              "ui_help": "Block height at or after which the lender may liquidate (CLTV)."
             }
           },
           "on_pre_broadcast": {
             "set": {
-              "instance.FIRST_PARAMETERS_ENCODED": "params.PRINCIPAL_INTEREST_RATE + params.LOAN_EXPIRATION_TIME * 65536 + params.COLLATERAL_DECIMALS_MANTISSA * 8796093022208 + params.PRINCIPAL_DECIMALS_MANTISSA * 140737488355328",
-              "instance.SECOND_PARAMETERS_ENCODED": "params.COLLATERAL_AMOUNT / pow(10, COLLATERAL_DECIMALS_MANTISSA) + params.PRINCIPAL_AMOUNT / pow(10, PRINCIPAL_DECIMALS_MANTISSA) * 33554432"
+              "instance.first_parameters_encoded": "params.principal_interest_rate + params.loan_expiration_time * 65536 + params.collateral_decimals_mantissa * 8796093022208 + params.principal_decimals_mantissa * 140737488355328",
+              "instance.second_parameters_encoded": "params.collateral_amount / pow(10, collateral_decimals_mantissa) + params.principal_amount / pow(10, principal_decimals_mantissa) * 33554432"
             }
           },
           "create_instance": {
             "fields": {
-              "BORROWER_NFT_ASSET_ID": "$instance.BORROWER_NFT_ASSET_ID",
-              "BORROWER_NFT_OUTPUT_SCRIPT_HASH": {
+              "borrower_nft_asset_id": "$instance.borrower_nft_asset_id",
+              "borrower_nft_output_script_hash": {
                 "type": "tapleaf",
                 "simf": "./script_auth.simf",
                 "params": {
                   "SCRIPT_HASH": {
                     "type": "bytes32",
-                    "value": "LENDING_COV_HASH"
+                    "value": "lending_cov_hash"
                   }
                 }
               },
-              "BORROWER_PUB_KEY": "$params.BORROWER_PUB_KEY",
-              "COLLATERAL_AMOUNT": "$params.COLLATERAL_AMOUNT",
-              "COLLATERAL_ASSET_ID": "$params.COLLATERAL_ASSET_ID",
-              "COLLATERAL_DECIMALS_MANTISSA": "$params.COLLATERAL_DECIMALS_MANTISSA",
-              "FIRST_PARAMETERS_ENCODED": "$instance.FIRST_PARAMETERS_ENCODED",
-              "FIRST_PARAMETERS_NFT_ASSET_ID": "$instance.FIRST_PARAMETERS_NFT_ASSET_ID",
-              "LENDER_NFT_ASSET_ID": "$instance.LENDER_NFT_ASSET_ID",
-              "LENDER_PRINCIPAL_COV_HASH": {
+              "borrower_pub_key": "$params.borrower_pub_key",
+              "collateral_amount": "$params.collateral_amount",
+              "collateral_asset_id": "$params.collateral_asset_id",
+              "collateral_decimals_mantissa": "$params.collateral_decimals_mantissa",
+              "first_parameters_encoded": "$instance.first_parameters_encoded",
+              "first_parameters_nft_asset_id": "$instance.first_parameters_nft_asset_id",
+              "lender_nft_asset_id": "$instance.lender_nft_asset_id",
+              "lender_principal_cov_hash": {
                 "type": "tapleaf",
                 "simf": "./asset_auth.simf",
                 "params": {
                   "ASSET_ID": {
                     "type": "liquid.asset_id",
-                    "value": "LENDER_NFT_ASSET_ID"
+                    "value": "lender_nft_asset_id"
                   },
                   "ASSET_AMOUNT": {
                     "type": "u64",
@@ -290,166 +290,166 @@
                   }
                 }
               },
-              "LENDING_COV_HASH": {
+              "lending_cov_hash": {
                 "type": "tapleaf",
                 "simf": "./lending.simf",
                 "params": {
                   "COLLATERAL_AMOUNT": {
                     "type": "u64",
-                    "value": "COLLATERAL_AMOUNT"
+                    "value": "collateral_amount"
                   },
                   "PRINCIPAL_AMOUNT": {
                     "type": "u64",
-                    "value": "PRINCIPAL_AMOUNT"
+                    "value": "principal_amount"
                   },
                   "LOAN_EXPIRATION_TIME": {
                     "type": "u32",
-                    "value": "LOAN_EXPIRATION_TIME"
+                    "value": "loan_expiration_time"
                   },
                   "PRINCIPAL_INTEREST_RATE": {
                     "type": "u16",
-                    "value": "PRINCIPAL_INTEREST_RATE"
+                    "value": "principal_interest_rate"
                   },
                   "COLLATERAL_ASSET_ID": {
                     "type": "liquid.asset_id",
-                    "value": "COLLATERAL_ASSET_ID"
+                    "value": "collateral_asset_id"
                   },
                   "FIRST_PARAMETERS_NFT_ASSET_ID": {
                     "type": "liquid.asset_id",
-                    "value": "FIRST_PARAMETERS_NFT_ASSET_ID"
+                    "value": "first_parameters_nft_asset_id"
                   },
                   "SECOND_PARAMETERS_NFT_ASSET_ID": {
                     "type": "liquid.asset_id",
-                    "value": "SECOND_PARAMETERS_NFT_ASSET_ID"
+                    "value": "second_parameters_nft_asset_id"
                   },
                   "BORROWER_NFT_ASSET_ID": {
                     "type": "liquid.asset_id",
-                    "value": "BORROWER_NFT_ASSET_ID"
+                    "value": "borrower_nft_asset_id"
                   },
                   "PRINCIPAL_ASSET_ID": {
                     "type": "liquid.asset_id",
-                    "value": "PRINCIPAL_ASSET_ID"
+                    "value": "principal_asset_id"
                   },
                   "LENDER_PRINCIPAL_COV_HASH": {
                     "type": "bytes32",
-                    "value": "LENDER_PRINCIPAL_COV_HASH"
+                    "value": "lender_principal_cov_hash"
                   },
                   "LENDER_NFT_ASSET_ID": {
                     "type": "liquid.asset_id",
-                    "value": "LENDER_NFT_ASSET_ID"
+                    "value": "lender_nft_asset_id"
                   }
                 }
               },
-              "LOAN_EXPIRATION_TIME": "$params.LOAN_EXPIRATION_TIME",
-              "PARAMETERS_NFT_OUTPUT_SCRIPT_HASH": {
+              "loan_expiration_time": "$params.loan_expiration_time",
+              "parameters_nft_output_script_hash": {
                 "type": "tapleaf",
                 "simf": "./script_auth.simf",
                 "params": {
                   "SCRIPT_HASH": {
                     "type": "bytes32",
-                    "value": "LENDING_COV_HASH"
+                    "value": "lending_cov_hash"
                   }
                 }
               },
-              "PRE_LOCK_COV_HASH": {
+              "pre_lock_cov_hash": {
                 "type": "tapleaf",
                 "simf": "./pre_lock.simf",
                 "params": {
                   "COLLATERAL_AMOUNT": {
                     "type": "u64",
-                    "value": "COLLATERAL_AMOUNT"
+                    "value": "collateral_amount"
                   },
                   "PRINCIPAL_AMOUNT": {
                     "type": "u64",
-                    "value": "PRINCIPAL_AMOUNT"
+                    "value": "principal_amount"
                   },
                   "LOAN_EXPIRATION_TIME": {
                     "type": "u32",
-                    "value": "LOAN_EXPIRATION_TIME"
+                    "value": "loan_expiration_time"
                   },
                   "PRINCIPAL_INTEREST_RATE": {
                     "type": "u16",
-                    "value": "PRINCIPAL_INTEREST_RATE"
+                    "value": "principal_interest_rate"
                   },
                   "COLLATERAL_ASSET_ID": {
                     "type": "liquid.asset_id",
-                    "value": "COLLATERAL_ASSET_ID"
+                    "value": "collateral_asset_id"
                   },
                   "FIRST_PARAMETERS_NFT_ASSET_ID": {
                     "type": "liquid.asset_id",
-                    "value": "FIRST_PARAMETERS_NFT_ASSET_ID"
+                    "value": "first_parameters_nft_asset_id"
                   },
                   "SECOND_PARAMETERS_NFT_ASSET_ID": {
                     "type": "liquid.asset_id",
-                    "value": "SECOND_PARAMETERS_NFT_ASSET_ID"
+                    "value": "second_parameters_nft_asset_id"
                   },
                   "BORROWER_NFT_ASSET_ID": {
                     "type": "liquid.asset_id",
-                    "value": "BORROWER_NFT_ASSET_ID"
+                    "value": "borrower_nft_asset_id"
                   },
                   "LENDER_NFT_ASSET_ID": {
                     "type": "liquid.asset_id",
-                    "value": "LENDER_NFT_ASSET_ID"
+                    "value": "lender_nft_asset_id"
                   },
                   "PRINCIPAL_ASSET_ID": {
                     "type": "liquid.asset_id",
-                    "value": "PRINCIPAL_ASSET_ID"
+                    "value": "principal_asset_id"
                   },
                   "LENDING_COV_HASH": {
                     "type": "bytes32",
-                    "value": "LENDING_COV_HASH"
+                    "value": "lending_cov_hash"
                   },
                   "PRINCIPAL_OUTPUT_SCRIPT_HASH": {
                     "type": "bytes32",
-                    "value": "PRINCIPAL_OUTPUT_SCRIPT_HASH"
+                    "value": "principal_output_script_hash"
                   },
                   "PARAMETERS_NFT_OUTPUT_SCRIPT_HASH": {
                     "type": "bytes32",
-                    "value": "PARAMETERS_NFT_OUTPUT_SCRIPT_HASH"
+                    "value": "parameters_nft_output_script_hash"
                   },
                   "BORROWER_NFT_OUTPUT_SCRIPT_HASH": {
                     "type": "bytes32",
-                    "value": "BORROWER_NFT_OUTPUT_SCRIPT_HASH"
+                    "value": "borrower_nft_output_script_hash"
                   },
                   "BORROWER_PUB_KEY": {
                     "type": "pubkey",
-                    "value": "BORROWER_PUB_KEY"
+                    "value": "borrower_pub_key"
                   }
                 }
               },
-              "PRELOCK_PARAMETERS_NFT_SCRIPT_HASH": {
+              "prelock_parameters_nft_script_hash": {
                 "type": "tapleaf",
                 "simf": "./script_auth.simf",
                 "params": {
                   "SCRIPT_HASH": {
                     "type": "bytes32",
-                    "value": "PRE_LOCK_COV_HASH"
+                    "value": "pre_lock_cov_hash"
                   }
                 }
               },
-              "PRINCIPAL_AMOUNT": "$params.PRINCIPAL_AMOUNT",
-              "PRINCIPAL_ASSET_ID": "$params.PRINCIPAL_ASSET_ID",
-              "PRINCIPAL_DECIMALS_MANTISSA": "$params.PRINCIPAL_DECIMALS_MANTISSA",
-              "PRINCIPAL_INTEREST_AMOUNT": "params.PRINCIPAL_AMOUNT * params.PRINCIPAL_INTEREST_RATE / 10000",
-              "PRINCIPAL_INTEREST_RATE": "$params.PRINCIPAL_INTEREST_RATE",
-              "PRINCIPAL_OUTPUT_SCRIPT_HASH": {
+              "principal_amount": "$params.principal_amount",
+              "principal_asset_id": "$params.principal_asset_id",
+              "principal_decimals_mantissa": "$params.principal_decimals_mantissa",
+              "principal_interest_amount": "params.principal_amount * params.principal_interest_rate / 10000",
+              "principal_interest_rate": "$params.principal_interest_rate",
+              "principal_output_script_hash": {
                 "type": "tapleaf",
                 "simf": "./p2pk.simf",
                 "params": {
                   "PUB_KEY": {
                     "type": "pubkey",
-                    "value": "BORROWER_PUB_KEY"
+                    "value": "borrower_pub_key"
                   }
                 }
               },
-              "SECOND_PARAMETERS_ENCODED": "$instance.SECOND_PARAMETERS_ENCODED",
-              "SECOND_PARAMETERS_NFT_ASSET_ID": "$instance.SECOND_PARAMETERS_NFT_ASSET_ID"
+              "second_parameters_encoded": "$instance.second_parameters_encoded",
+              "second_parameters_nft_asset_id": "$instance.second_parameters_nft_asset_id"
             }
           },
           "inputs": [
             {
               "id": "borrower_nft_issuance_input",
-              "description": "Wallet UTXO whose outpoint determines BORROWER_NFT_ASSET_ID.",
+              "$comment": "Wallet UTXO whose outpoint determines BORROWER_NFT_ASSET_ID.",
               "utxo_source": "wallet",
               "asset": "lbtc",
               "issuance": {
@@ -459,13 +459,13 @@
               },
               "on_resolved": {
                 "set": {
-                  "instance.BORROWER_NFT_ASSET_ID": "asset"
+                  "instance.borrower_nft_asset_id": "asset"
                 }
               }
             },
             {
               "id": "lender_nft_issuance_input",
-              "description": "Wallet UTXO whose outpoint determines LENDER_NFT_ASSET_ID.",
+              "$comment": "Wallet UTXO whose outpoint determines LENDER_NFT_ASSET_ID.",
               "utxo_source": "wallet",
               "asset": "lbtc",
               "issuance": {
@@ -475,39 +475,39 @@
               },
               "on_resolved": {
                 "set": {
-                  "instance.LENDER_NFT_ASSET_ID": "asset"
+                  "instance.lender_nft_asset_id": "asset"
                 }
               }
             },
             {
               "id": "first_params_issuance_input",
-              "description": "Wallet UTXO whose outpoint determines FIRST_PARAMETERS_NFT_ASSET_ID.",
+              "$comment": "Wallet UTXO whose outpoint determines FIRST_PARAMETERS_NFT_ASSET_ID.",
               "utxo_source": "wallet",
               "asset": "lbtc",
               "issuance": {
                 "kind": "new",
-                "asset_amount_sat": "instance.FIRST_PARAMETERS_ENCODED",
+                "asset_amount_sat": "instance.first_parameters_encoded",
                 "inflation_amount_sat": 0
               },
               "on_resolved": {
                 "set": {
-                  "instance.FIRST_PARAMETERS_NFT_ASSET_ID": "asset"
+                  "instance.first_parameters_nft_asset_id": "asset"
                 }
               }
             },
             {
               "id": "second_params_issuance_input",
-              "description": "Wallet UTXO whose outpoint determines SECOND_PARAMETERS_NFT_ASSET_ID.",
+              "$comment": "Wallet UTXO whose outpoint determines SECOND_PARAMETERS_NFT_ASSET_ID.",
               "utxo_source": "wallet",
               "asset": "lbtc",
               "issuance": {
                 "kind": "new",
-                "asset_amount_sat": "instance.SECOND_PARAMETERS_ENCODED",
+                "asset_amount_sat": "instance.second_parameters_encoded",
                 "inflation_amount_sat": 0
               },
               "on_resolved": {
                 "set": {
-                  "instance.SECOND_PARAMETERS_NFT_ASSET_ID": "asset"
+                  "instance.second_parameters_nft_asset_id": "asset"
                 }
               }
             }
@@ -515,39 +515,39 @@
           "outputs": [
             {
               "id": "borrower_nft_out",
-              "description": "Borrower auth NFT. Amount=1, no reissuance.",
+              "$comment": "Borrower auth NFT. Amount=1, no reissuance.",
               "destination": "wallet",
-              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "asset": "instance.borrower_nft_asset_id",
               "amount_sat": 1,
               "confidential": false
             },
             {
               "id": "lender_nft_out",
-              "description": "Lender auth NFT. Amount=1, no reissuance.",
+              "$comment": "Lender auth NFT. Amount=1, no reissuance.",
               "destination": "wallet",
-              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "asset": "instance.lender_nft_asset_id",
               "amount_sat": 1,
               "confidential": false
             },
             {
               "id": "first_params_nft_out",
-              "description": "First Parameter NFT carrying bit-packed loan terms in amount field.",
+              "$comment": "First Parameter NFT carrying bit-packed loan terms in amount field.",
               "destination": "wallet",
-              "asset": "instance.FIRST_PARAMETERS_NFT_ASSET_ID",
-              "amount_sat": "instance.FIRST_PARAMETERS_ENCODED",
+              "asset": "instance.first_parameters_nft_asset_id",
+              "amount_sat": "instance.first_parameters_encoded",
               "confidential": false
             },
             {
               "id": "second_params_nft_out",
-              "description": "Second Parameter NFT carrying bit-packed base amounts in amount field.",
+              "$comment": "Second Parameter NFT carrying bit-packed base amounts in amount field.",
               "destination": "wallet",
-              "asset": "instance.SECOND_PARAMETERS_NFT_ASSET_ID",
-              "amount_sat": "instance.SECOND_PARAMETERS_ENCODED",
+              "asset": "instance.second_parameters_nft_asset_id",
+              "amount_sat": "instance.second_parameters_encoded",
               "confidential": false
             },
             {
               "id": "fee_change",
-              "description": "L-BTC change back to borrower.",
+              "$comment": "L-BTC change back to borrower.",
               "destination": "change",
               "asset": "lbtc",
               "optional": true
@@ -555,48 +555,48 @@
           ]
         },
         "LockCollateral": {
-          "description": "Borrower locks collateral and all four Utility NFTs into their covenant addresses, creating the open offer on-chain.",
+          "$comment": "Borrower locks collateral and all four Utility NFTs into their covenant addresses, creating the open offer on-chain.",
           "inputs": [
             {
               "id": "collateral_in",
-              "description": "Borrower's collateral UTXO.",
+              "$comment": "Borrower's collateral UTXO.",
               "utxo_source": "wallet",
-              "asset": "instance.COLLATERAL_ASSET_ID",
+              "asset": "instance.collateral_asset_id",
               "amount_sat": {
-                "min_amount": "instance.COLLATERAL_AMOUNT"
+                "min_amount": "instance.collateral_amount"
               }
             },
             {
               "id": "borrower_nft_in",
-              "description": "Borrower NFT from wallet.",
+              "$comment": "Borrower NFT from wallet.",
               "utxo_source": "wallet",
-              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "asset": "instance.borrower_nft_asset_id",
               "amount_sat": 1
             },
             {
               "id": "lender_nft_in",
-              "description": "Lender NFT from wallet.",
+              "$comment": "Lender NFT from wallet.",
               "utxo_source": "wallet",
-              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "asset": "instance.lender_nft_asset_id",
               "amount_sat": 1
             },
             {
               "id": "first_params_in",
-              "description": "First Parameter NFT from wallet.",
+              "$comment": "First Parameter NFT from wallet.",
               "utxo_source": "wallet",
-              "asset": "instance.FIRST_PARAMETERS_NFT_ASSET_ID",
-              "amount_sat": "instance.FIRST_PARAMETERS_ENCODED"
+              "asset": "instance.first_parameters_nft_asset_id",
+              "amount_sat": "instance.first_parameters_encoded"
             },
             {
               "id": "second_params_in",
-              "description": "Second Parameter NFT from wallet.",
+              "$comment": "Second Parameter NFT from wallet.",
               "utxo_source": "wallet",
-              "asset": "instance.SECOND_PARAMETERS_NFT_ASSET_ID",
-              "amount_sat": "instance.SECOND_PARAMETERS_ENCODED"
+              "asset": "instance.second_parameters_nft_asset_id",
+              "amount_sat": "instance.second_parameters_encoded"
             },
             {
               "id": "fee_input",
-              "description": "Wallet L-BTC UTXO covering the transaction fee.",
+              "$comment": "Wallet L-BTC UTXO covering the transaction fee.",
               "utxo_source": "wallet",
               "asset": "lbtc"
             }
@@ -604,67 +604,67 @@
           "outputs": [
             {
               "id": "pre_lock_out",
-              "description": "Collateral locked in the PreLockCovenant.",
+              "$comment": "Collateral locked in the PreLockCovenant.",
               "destination": {
                 "utxo_type": "pre_lock"
               },
-              "asset": "instance.COLLATERAL_ASSET_ID",
-              "amount_sat": "instance.COLLATERAL_AMOUNT"
+              "asset": "instance.collateral_asset_id",
+              "amount_sat": "instance.collateral_amount"
             },
             {
               "id": "borrower_nft_locked",
-              "description": "Borrower NFT locked in prelock ScriptAuth.",
+              "$comment": "Borrower NFT locked in prelock ScriptAuth.",
               "destination": {
                 "utxo_type": "prelock_script_auth"
               },
-              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "asset": "instance.borrower_nft_asset_id",
               "amount_sat": 1
             },
             {
               "id": "lender_nft_locked",
-              "description": "Lender NFT locked in prelock ScriptAuth.",
+              "$comment": "Lender NFT locked in prelock ScriptAuth.",
               "destination": {
                 "utxo_type": "prelock_script_auth"
               },
-              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "asset": "instance.lender_nft_asset_id",
               "amount_sat": 1
             },
             {
               "id": "first_params_locked",
-              "description": "First Parameter NFT locked in prelock ScriptAuth.",
+              "$comment": "First Parameter NFT locked in prelock ScriptAuth.",
               "destination": {
                 "utxo_type": "prelock_script_auth"
               },
-              "asset": "instance.FIRST_PARAMETERS_NFT_ASSET_ID",
-              "amount_sat": "instance.FIRST_PARAMETERS_ENCODED"
+              "asset": "instance.first_parameters_nft_asset_id",
+              "amount_sat": "instance.first_parameters_encoded"
             },
             {
               "id": "second_params_locked",
-              "description": "Second Parameter NFT locked in prelock ScriptAuth.",
+              "$comment": "Second Parameter NFT locked in prelock ScriptAuth.",
               "destination": {
                 "utxo_type": "prelock_script_auth"
               },
-              "asset": "instance.SECOND_PARAMETERS_NFT_ASSET_ID",
-              "amount_sat": "instance.SECOND_PARAMETERS_ENCODED"
+              "asset": "instance.second_parameters_nft_asset_id",
+              "amount_sat": "instance.second_parameters_encoded"
             },
             {
               "id": "indexer_op_return",
-              "description": "OP_RETURN for indexer discovery.",
+              "$comment": "OP_RETURN for indexer discovery.",
               "destination": {
                 "type": "op_return"
               },
-              "data": "concat(instance.BORROWER_PUB_KEY, instance.PRINCIPAL_ASSET_ID)"
+              "data": "concat(instance.borrower_pub_key, instance.principal_asset_id)"
             },
             {
               "id": "collateral_change",
-              "description": "Collateral change back to borrower.",
+              "$comment": "Collateral change back to borrower.",
               "destination": "change",
-              "asset": "instance.COLLATERAL_ASSET_ID",
+              "asset": "instance.collateral_asset_id",
               "optional": true
             },
             {
               "id": "fee_change",
-              "description": "L-BTC change back to borrower.",
+              "$comment": "L-BTC change back to borrower.",
               "destination": "change",
               "asset": "lbtc",
               "optional": true
@@ -672,11 +672,11 @@
           ]
         },
         "CancelOffer": {
-          "description": "Borrower cancels the open offer. Requires BORROWER_PUB_KEY signature. Collateral returned; all Utility NFTs burned. Spends pre_lock via PATH::RIGHT.",
+          "$comment": "Borrower cancels the open offer. Requires BORROWER_PUB_KEY signature. Collateral returned; all Utility NFTs burned. Spends pre_lock via PATH::RIGHT.",
           "inputs": [
             {
               "id": "pre_lock_in",
-              "description": "Pre-lock collateral UTXO (index 0).",
+              "$comment": "Pre-lock collateral UTXO (index 0).",
               "utxo_source": {
                 "utxo_type": "pre_lock"
               },
@@ -685,16 +685,16 @@
                   "type": "simplicityhl",
                   "simplicity_type": "Either<()>",
                   "value": "Right(())",
-                  "description": "Selects cancel_pre_lock_path (PATH::RIGHT)."
+                  "$comment": "Selects cancel_pre_lock_path (PATH::RIGHT)."
                 },
                 "SIGNATURE": {
                   "type": "Signature",
                   "sig_type": "sig_hash_all",
                   "source": {
                     "type": "wallet",
-                    "key": "instance.BORROWER_PUB_KEY"
+                    "key": "instance.borrower_pub_key"
                   },
-                  "description": "BIP340 Schnorr signature from BORROWER_PUB_KEY."
+                  "$comment": "BIP340 Schnorr signature from BORROWER_PUB_KEY."
                 },
                 "SPEND_PATH": {
                   "type": "taproot_leaf",
@@ -707,11 +707,11 @@
             },
             {
               "id": "first_params_in",
-              "description": "First Parameter NFT in prelock ScriptAuth (index 1).",
+              "$comment": "First Parameter NFT in prelock ScriptAuth (index 1).",
               "utxo_source": {
                 "utxo_type": "prelock_script_auth"
               },
-              "asset": "instance.FIRST_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.first_parameters_nft_asset_id",
               "witnesses": {
                 "INPUT_SCRIPT_INDEX": {
                   "type": "simplicityhl",
@@ -729,11 +729,11 @@
             },
             {
               "id": "second_params_in",
-              "description": "Second Parameter NFT in prelock ScriptAuth (index 2).",
+              "$comment": "Second Parameter NFT in prelock ScriptAuth (index 2).",
               "utxo_source": {
                 "utxo_type": "prelock_script_auth"
               },
-              "asset": "instance.SECOND_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.second_parameters_nft_asset_id",
               "witnesses": {
                 "INPUT_SCRIPT_INDEX": {
                   "type": "simplicityhl",
@@ -751,11 +751,11 @@
             },
             {
               "id": "borrower_nft_in",
-              "description": "Borrower NFT in prelock ScriptAuth (index 3).",
+              "$comment": "Borrower NFT in prelock ScriptAuth (index 3).",
               "utxo_source": {
                 "utxo_type": "prelock_script_auth"
               },
-              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "asset": "instance.borrower_nft_asset_id",
               "witnesses": {
                 "INPUT_SCRIPT_INDEX": {
                   "type": "simplicityhl",
@@ -773,11 +773,11 @@
             },
             {
               "id": "lender_nft_in",
-              "description": "Lender NFT in prelock ScriptAuth (index 4).",
+              "$comment": "Lender NFT in prelock ScriptAuth (index 4).",
               "utxo_source": {
                 "utxo_type": "prelock_script_auth"
               },
-              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "asset": "instance.lender_nft_asset_id",
               "witnesses": {
                 "INPUT_SCRIPT_INDEX": {
                   "type": "simplicityhl",
@@ -795,7 +795,7 @@
             },
             {
               "id": "fee_input",
-              "description": "Wallet L-BTC for fees.",
+              "$comment": "Wallet L-BTC for fees.",
               "utxo_source": "wallet",
               "asset": "lbtc"
             }
@@ -804,7 +804,7 @@
             {
               "id": "collateral_returned",
               "destination": "wallet",
-              "asset": "instance.COLLATERAL_ASSET_ID",
+              "asset": "instance.collateral_asset_id",
               "amount_sat": "pre_lock_in.amount_sat"
             },
             {
@@ -812,7 +812,7 @@
               "destination": {
                 "type": "op_return"
               },
-              "asset": "instance.FIRST_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.first_parameters_nft_asset_id",
               "amount_sat": "first_params_in.amount_sat"
             },
             {
@@ -820,7 +820,7 @@
               "destination": {
                 "type": "op_return"
               },
-              "asset": "instance.SECOND_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.second_parameters_nft_asset_id",
               "amount_sat": "second_params_in.amount_sat"
             },
             {
@@ -828,7 +828,7 @@
               "destination": {
                 "type": "op_return"
               },
-              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "asset": "instance.borrower_nft_asset_id",
               "amount_sat": 1
             },
             {
@@ -836,7 +836,7 @@
               "destination": {
                 "type": "op_return"
               },
-              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "asset": "instance.lender_nft_asset_id",
               "amount_sat": 1
             },
             {
@@ -848,11 +848,11 @@
           ]
         },
         "SetupLending": {
-          "description": "Lender activates the loan by spending the pre_lock covenant (PATH::LEFT). Collateral moves to LendingCovenant; principal delivered to borrower.",
+          "$comment": "Lender activates the loan by spending the pre_lock covenant (PATH::LEFT). Collateral moves to LendingCovenant; principal delivered to borrower.",
           "inputs": [
             {
               "id": "collateral_in",
-              "description": "Pre-lock collateral UTXO (index 0).",
+              "$comment": "Pre-lock collateral UTXO (index 0).",
               "utxo_source": {
                 "utxo_type": "pre_lock"
               },
@@ -862,7 +862,7 @@
                   "type": "simplicityhl",
                   "simplicity_type": "Either<()>",
                   "value": "Left(())",
-                  "description": "Selects create_lending_path (PATH::LEFT)."
+                  "$comment": "Selects create_lending_path (PATH::LEFT)."
                 },
                 "SIGNATURE": "unused",
                 "SPEND_PATH": {
@@ -876,12 +876,12 @@
             },
             {
               "id": "first_params_in",
-              "description": "First Parameter NFT in prelock ScriptAuth (index 1).",
+              "$comment": "First Parameter NFT in prelock ScriptAuth (index 1).",
               "utxo_source": {
                 "utxo_type": "prelock_script_auth"
               },
               "required_index": 1,
-              "asset": "instance.FIRST_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.first_parameters_nft_asset_id",
               "witnesses": {
                 "INPUT_SCRIPT_INDEX": {
                   "type": "simplicityhl",
@@ -899,12 +899,12 @@
             },
             {
               "id": "second_params_in",
-              "description": "Second Parameter NFT in prelock ScriptAuth (index 2).",
+              "$comment": "Second Parameter NFT in prelock ScriptAuth (index 2).",
               "utxo_source": {
                 "utxo_type": "prelock_script_auth"
               },
               "required_index": 2,
-              "asset": "instance.SECOND_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.second_parameters_nft_asset_id",
               "witnesses": {
                 "INPUT_SCRIPT_INDEX": {
                   "type": "simplicityhl",
@@ -922,12 +922,12 @@
             },
             {
               "id": "borrower_nft_in",
-              "description": "Borrower NFT in prelock ScriptAuth (index 3).",
+              "$comment": "Borrower NFT in prelock ScriptAuth (index 3).",
               "utxo_source": {
                 "utxo_type": "prelock_script_auth"
               },
               "required_index": 3,
-              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "asset": "instance.borrower_nft_asset_id",
               "witnesses": {
                 "INPUT_SCRIPT_INDEX": {
                   "type": "simplicityhl",
@@ -945,12 +945,12 @@
             },
             {
               "id": "lender_nft_in",
-              "description": "Lender NFT in prelock ScriptAuth (index 4).",
+              "$comment": "Lender NFT in prelock ScriptAuth (index 4).",
               "utxo_source": {
                 "utxo_type": "prelock_script_auth"
               },
               "required_index": 4,
-              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "asset": "instance.lender_nft_asset_id",
               "witnesses": {
                 "INPUT_SCRIPT_INDEX": {
                   "type": "simplicityhl",
@@ -968,17 +968,17 @@
             },
             {
               "id": "principal_in",
-              "description": "Lender's wallet UTXO providing the principal.",
+              "$comment": "Lender's wallet UTXO providing the principal.",
               "utxo_source": "wallet",
-              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "asset": "instance.principal_asset_id",
               "amount_sat": {
-                "min_amount": "instance.PRINCIPAL_AMOUNT"
+                "min_amount": "instance.principal_amount"
               },
               "required_index": 5
             },
             {
               "id": "fee_input",
-              "description": "Wallet L-BTC for fees.",
+              "$comment": "Wallet L-BTC for fees.",
               "utxo_source": "wallet",
               "asset": "lbtc",
               "required_index": 6
@@ -987,64 +987,64 @@
           "outputs": [
             {
               "id": "lending_collateral_out",
-              "description": "Collateral at LendingCovenant (output 0).",
+              "$comment": "Collateral at LendingCovenant (output 0).",
               "destination": {
                 "utxo_type": "lending_collateral"
               },
-              "asset": "instance.COLLATERAL_ASSET_ID",
-              "amount_sat": "instance.COLLATERAL_AMOUNT",
+              "asset": "instance.collateral_asset_id",
+              "amount_sat": "instance.collateral_amount",
               "required_index": 0,
               "confidential": false
             },
             {
               "id": "principal_to_borrower",
-              "description": "Principal to borrower P2PK (output 1).",
+              "$comment": "Principal to borrower P2PK (output 1).",
               "destination": {
                 "utxo_type": "p2pk"
               },
-              "asset": "instance.PRINCIPAL_ASSET_ID",
-              "amount_sat": "instance.PRINCIPAL_AMOUNT",
+              "asset": "instance.principal_asset_id",
+              "amount_sat": "instance.principal_amount",
               "confidential": false,
               "required_index": 1
             },
             {
               "id": "first_params_relocked",
-              "description": "First Parameter NFT under lending ScriptAuth (output 2).",
+              "$comment": "First Parameter NFT under lending ScriptAuth (output 2).",
               "destination": {
                 "utxo_type": "lending_script_auth"
               },
-              "asset": "instance.FIRST_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.first_parameters_nft_asset_id",
               "amount_sat": "first_params_in.amount_sat",
               "required_index": 2,
               "confidential": false
             },
             {
               "id": "second_params_relocked",
-              "description": "Second Parameter NFT under lending ScriptAuth (output 3).",
+              "$comment": "Second Parameter NFT under lending ScriptAuth (output 3).",
               "destination": {
                 "utxo_type": "lending_script_auth"
               },
-              "asset": "instance.SECOND_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.second_parameters_nft_asset_id",
               "amount_sat": "second_params_in.amount_sat",
               "required_index": 3,
               "confidential": false
             },
             {
               "id": "borrower_nft_released",
-              "description": "Borrower NFT under lending ScriptAuth (output 4).",
+              "$comment": "Borrower NFT under lending ScriptAuth (output 4).",
               "destination": {
                 "utxo_type": "lending_script_auth"
               },
-              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "asset": "instance.borrower_nft_asset_id",
               "amount_sat": 1,
               "required_index": 4,
               "confidential": false
             },
             {
               "id": "lender_nft_released",
-              "description": "Lender NFT to lender's wallet (output 5).",
+              "$comment": "Lender NFT to lender's wallet (output 5).",
               "destination": "wallet",
-              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "asset": "instance.lender_nft_asset_id",
               "amount_sat": 1,
               "required_index": 5,
               "confidential": false
@@ -1052,7 +1052,7 @@
             {
               "id": "principal_change",
               "destination": "change",
-              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "asset": "instance.principal_asset_id",
               "optional": true,
               "required_index": -2
             },
@@ -1066,11 +1066,11 @@
           ]
         },
         "ClaimLoanFunds": {
-          "description": "As a borrower, claim the funds from a p2pk.simf into a normal wallet output.",
+          "$comment": "As a borrower, claim the funds from a p2pk.simf into a normal wallet output.",
           "inputs": [
             {
               "id": "principal_in",
-              "description": "Principal UTXO at borrower P2PK (index 0).",
+              "$comment": "Principal UTXO at borrower P2PK (index 0).",
               "utxo_source": {
                 "utxo_type": "p2pk"
               },
@@ -1087,15 +1087,15 @@
                   "sig_type": "sig_hash_all",
                   "source": {
                     "type": "wallet",
-                    "key": "$params.BORROWER_PUB_KEY"
+                    "key": "$params.borrower_pub_key"
                   },
-                  "description": "BIP340 Schnorr signature from BORROWER_PUB_KEY."
+                  "$comment": "BIP340 Schnorr signature from BORROWER_PUB_KEY."
                 }
               }
             },
             {
               "id": "fee_input",
-              "description": "Wallet L-BTC for fees (optional if principal is L-BTC).",
+              "$comment": "Wallet L-BTC for fees (optional if principal is L-BTC).",
               "utxo_source": "wallet",
               "asset": "lbtc",
               "optional": true
@@ -1104,14 +1104,14 @@
           "outputs": [
             {
               "id": "principal_to_borrower",
-              "description": "Principal to borrower wallet (output 0).",
+              "$comment": "Principal to borrower wallet (output 0).",
               "destination": "wallet",
-              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "asset": "instance.principal_asset_id",
               "amount_sat": "principal_in.amount_sat"
             },
             {
               "id": "fee_change",
-              "description": "L-BTC change back to borrower.",
+              "$comment": "L-BTC change back to borrower.",
               "destination": "change",
               "asset": "lbtc",
               "optional": true
@@ -1119,11 +1119,11 @@
           ]
         },
         "RepayLoan": {
-          "description": "Borrower repays principal+interest and reclaims collateral. Spends lending_collateral via PATH::LEFT.",
+          "$comment": "Borrower repays principal+interest and reclaims collateral. Spends lending_collateral via PATH::LEFT.",
           "inputs": [
             {
               "id": "lending_in",
-              "description": "Active lending collateral UTXO (index 0).",
+              "$comment": "Active lending collateral UTXO (index 0).",
               "utxo_source": {
                 "utxo_type": "lending_collateral"
               },
@@ -1132,7 +1132,7 @@
                   "type": "simplicityhl",
                   "simplicity_type": "Either<()>",
                   "value": "Left(())",
-                  "description": "Selects loan_repayment_path (PATH::LEFT)."
+                  "$comment": "Selects loan_repayment_path (PATH::LEFT)."
                 },
                 "SPEND_PATH": {
                   "type": "taproot_leaf",
@@ -1145,11 +1145,11 @@
             },
             {
               "id": "first_params_in",
-              "description": "First Parameter NFT in lending ScriptAuth (index 1).",
+              "$comment": "First Parameter NFT in lending ScriptAuth (index 1).",
               "utxo_source": {
                 "utxo_type": "lending_script_auth"
               },
-              "asset": "instance.FIRST_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.first_parameters_nft_asset_id",
               "witnesses": {
                 "INPUT_SCRIPT_INDEX": {
                   "type": "simplicityhl",
@@ -1167,11 +1167,11 @@
             },
             {
               "id": "second_params_in",
-              "description": "Second Parameter NFT in lending ScriptAuth (index 2).",
+              "$comment": "Second Parameter NFT in lending ScriptAuth (index 2).",
               "utxo_source": {
                 "utxo_type": "lending_script_auth"
               },
-              "asset": "instance.SECOND_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.second_parameters_nft_asset_id",
               "witnesses": {
                 "INPUT_SCRIPT_INDEX": {
                   "type": "simplicityhl",
@@ -1189,11 +1189,11 @@
             },
             {
               "id": "borrower_nft_in",
-              "description": "Borrower NFT in lending ScriptAuth (index 3).",
+              "$comment": "Borrower NFT in lending ScriptAuth (index 3).",
               "utxo_source": {
                 "utxo_type": "lending_script_auth"
               },
-              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "asset": "instance.borrower_nft_asset_id",
               "witnesses": {
                 "INPUT_SCRIPT_INDEX": {
                   "type": "simplicityhl",
@@ -1211,16 +1211,16 @@
             },
             {
               "id": "repayment_in",
-              "description": "Borrower's wallet UTXO providing principal+interest.",
+              "$comment": "Borrower's wallet UTXO providing principal+interest.",
               "utxo_source": "wallet",
-              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "asset": "instance.principal_asset_id",
               "amount_sat": {
-                "min_amount": "instance.PRINCIPAL_AMOUNT + instance.PRINCIPAL_INTEREST_AMOUNT"
+                "min_amount": "instance.principal_amount + instance.principal_interest_amount"
               }
             },
             {
               "id": "fee_input",
-              "description": "Wallet L-BTC for fees (optional if principal is L-BTC).",
+              "$comment": "Wallet L-BTC for fees (optional if principal is L-BTC).",
               "utxo_source": "wallet",
               "asset": "lbtc",
               "optional": true
@@ -1229,20 +1229,20 @@
           "outputs": [
             {
               "id": "collateral_returned",
-              "description": "Collateral returned to borrower (output 0).",
+              "$comment": "Collateral returned to borrower (output 0).",
               "destination": "wallet",
-              "asset": "instance.COLLATERAL_ASSET_ID",
-              "amount_sat": "instance.COLLATERAL_AMOUNT",
+              "asset": "instance.collateral_asset_id",
+              "amount_sat": "instance.collateral_amount",
               "confidential": false
             },
             {
               "id": "principal_interest_to_vault",
-              "description": "Principal+interest to lender vault at LENDER_PRINCIPAL_COV_HASH (output 1).",
+              "$comment": "Principal+interest to lender vault at LENDER_PRINCIPAL_COV_HASH (output 1).",
               "destination": {
                 "utxo_type": "lender_principal_vault"
               },
-              "asset": "instance.PRINCIPAL_ASSET_ID",
-              "amount_sat": "instance.PRINCIPAL_AMOUNT + instance.PRINCIPAL_INTEREST_AMOUNT",
+              "asset": "instance.principal_asset_id",
+              "amount_sat": "instance.principal_amount + instance.principal_interest_amount",
               "confidential": false
             },
             {
@@ -1250,7 +1250,7 @@
               "destination": {
                 "type": "op_return"
               },
-              "asset": "instance.FIRST_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.first_parameters_nft_asset_id",
               "amount_sat": "first_params_in.amount_sat"
             },
             {
@@ -1258,7 +1258,7 @@
               "destination": {
                 "type": "op_return"
               },
-              "asset": "instance.SECOND_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.second_parameters_nft_asset_id",
               "amount_sat": "second_params_in.amount_sat"
             },
             {
@@ -1266,13 +1266,13 @@
               "destination": {
                 "type": "op_return"
               },
-              "asset": "instance.BORROWER_NFT_ASSET_ID",
+              "asset": "instance.borrower_nft_asset_id",
               "amount_sat": 1
             },
             {
               "id": "repayment_change",
               "destination": "change",
-              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "asset": "instance.principal_asset_id",
               "optional": true
             },
             {
@@ -1284,11 +1284,11 @@
           ]
         },
         "LiquidateAfterExpiry": {
-          "description": "Lender claims collateral after loan expiry. Spends lending_collateral via PATH::RIGHT.",
+          "$comment": "Lender claims collateral after loan expiry. Spends lending_collateral via PATH::RIGHT.",
           "inputs": [
             {
               "id": "lending_in",
-              "description": "Active lending collateral UTXO (index 0).",
+              "$comment": "Active lending collateral UTXO (index 0).",
               "utxo_source": {
                 "utxo_type": "lending_collateral"
               },
@@ -1297,7 +1297,7 @@
                   "type": "simplicityhl",
                   "simplicity_type": "Either<()>",
                   "value": "Right(())",
-                  "description": "Selects loan_liquidation_path (PATH::RIGHT)."
+                  "$comment": "Selects loan_liquidation_path (PATH::RIGHT)."
                 },
                 "SPEND_PATH": {
                   "type": "taproot_leaf",
@@ -1310,11 +1310,11 @@
             },
             {
               "id": "first_params_in",
-              "description": "First Parameter NFT in lending ScriptAuth (index 1).",
+              "$comment": "First Parameter NFT in lending ScriptAuth (index 1).",
               "utxo_source": {
                 "utxo_type": "lending_script_auth"
               },
-              "asset": "instance.FIRST_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.first_parameters_nft_asset_id",
               "witnesses": {
                 "INPUT_SCRIPT_INDEX": {
                   "type": "simplicityhl",
@@ -1332,11 +1332,11 @@
             },
             {
               "id": "second_params_in",
-              "description": "Second Parameter NFT in lending ScriptAuth (index 2).",
+              "$comment": "Second Parameter NFT in lending ScriptAuth (index 2).",
               "utxo_source": {
                 "utxo_type": "lending_script_auth"
               },
-              "asset": "instance.SECOND_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.second_parameters_nft_asset_id",
               "witnesses": {
                 "INPUT_SCRIPT_INDEX": {
                   "type": "simplicityhl",
@@ -1354,14 +1354,14 @@
             },
             {
               "id": "lender_nft_in",
-              "description": "Lender NFT from wallet (index 3).",
+              "$comment": "Lender NFT from wallet (index 3).",
               "utxo_source": "wallet",
-              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "asset": "instance.lender_nft_asset_id",
               "amount_sat": 1
             },
             {
               "id": "fee_input",
-              "description": "Wallet L-BTC for fees.",
+              "$comment": "Wallet L-BTC for fees.",
               "utxo_source": "wallet",
               "asset": "lbtc"
             }
@@ -1369,17 +1369,17 @@
           "outputs": [
             {
               "id": "collateral_to_lender",
-              "description": "Collateral sent to lender (output 0).",
+              "$comment": "Collateral sent to lender (output 0).",
               "destination": "wallet",
-              "asset": "instance.COLLATERAL_ASSET_ID",
-              "amount_sat": "instance.COLLATERAL_AMOUNT"
+              "asset": "instance.collateral_asset_id",
+              "amount_sat": "instance.collateral_amount"
             },
             {
               "id": "first_params_burned",
               "destination": {
                 "type": "op_return"
               },
-              "asset": "instance.FIRST_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.first_parameters_nft_asset_id",
               "amount_sat": "first_params_in.amount_sat"
             },
             {
@@ -1387,7 +1387,7 @@
               "destination": {
                 "type": "op_return"
               },
-              "asset": "instance.SECOND_PARAMETERS_NFT_ASSET_ID",
+              "asset": "instance.second_parameters_nft_asset_id",
               "amount_sat": "second_params_in.amount_sat"
             },
             {
@@ -1395,7 +1395,7 @@
               "destination": {
                 "type": "op_return"
               },
-              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "asset": "instance.lender_nft_asset_id",
               "amount_sat": 1
             },
             {
@@ -1407,11 +1407,11 @@
           ]
         },
         "ClaimPrincipalWithInterest": {
-          "description": "Lender withdraws principal+interest from the lender_principal_vault by co-spending and burning the Lender NFT.",
+          "$comment": "Lender withdraws principal+interest from the lender_principal_vault by co-spending and burning the Lender NFT.",
           "inputs": [
             {
               "id": "vault_in",
-              "description": "The lender_principal_vault UTXO.",
+              "$comment": "The lender_principal_vault UTXO.",
               "utxo_source": {
                 "utxo_type": "lender_principal_vault"
               },
@@ -1437,15 +1437,15 @@
             },
             {
               "id": "lender_nft_in",
-              "description": "Lender NFT (amount=1).",
+              "$comment": "Lender NFT (amount=1).",
               "utxo_source": "wallet",
-              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "asset": "instance.lender_nft_asset_id",
               "amount_sat": 1,
               "required_index": 1
             },
             {
               "id": "fee_input",
-              "description": "Wallet L-BTC for fees.",
+              "$comment": "Wallet L-BTC for fees.",
               "utxo_source": "wallet",
               "asset": "lbtc"
             }
@@ -1453,18 +1453,18 @@
           "outputs": [
             {
               "id": "principal_interest_out",
-              "description": "Principal+interest delivered to lender.",
+              "$comment": "Principal+interest delivered to lender.",
               "destination": "wallet",
-              "asset": "instance.PRINCIPAL_ASSET_ID",
+              "asset": "instance.principal_asset_id",
               "amount_sat": "vault_in.amount_sat"
             },
             {
               "id": "lender_nft_burned",
-              "description": "Lender NFT burned (required by WITH_ASSET_BURN=true).",
+              "$comment": "Lender NFT burned (required by WITH_ASSET_BURN=true).",
               "destination": {
                 "type": "op_return"
               },
-              "asset": "instance.LENDER_NFT_ASSET_ID",
+              "asset": "instance.lender_nft_asset_id",
               "amount_sat": 1,
               "required_index": 1
             },

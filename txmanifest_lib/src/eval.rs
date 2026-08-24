@@ -27,7 +27,7 @@ pub fn eval_amount(value: &serde_json::Value, ctx: &ExecutionContext) -> Result<
                 .ok_or_else(|| anyhow::anyhow!("amount_sat number is not a valid u64: {n}"))
         }
         serde_json::Value::String(s) => eval_expr(s.trim(), ctx),
-        // { "value": "<expr>", "description": "..." } — documented amount field
+        // { "value": "<expr>", "$comment": "..." } — documented amount field
         serde_json::Value::Object(m) => match m.get("value") {
             Some(v) => eval_amount(v, ctx),
             None => bail!("Unsupported amount_sat object (no 'value' field): {}", serde_json::Value::Object(m.clone())),
@@ -1000,8 +1000,7 @@ mod witness_ref_tests {
             "PATH": {
                 "type": "simplicityhl",
                 "simplicity_type": "Either<Either<(), ()>, Either<Either<(u64, u64), u64>, u64>>",
-                "value": "Right(Left(Right(instance.CURRENT_DEBT)))",
-                "description": "FullRepayment"
+                "value": "Right(Left(Right(instance.CURRENT_DEBT)))"
             }
         });
         let out = resolve_witness_refs(&wits, &ctx);
@@ -1011,7 +1010,10 @@ mod witness_ref_tests {
             "instance ref inside the witness payload must resolve"
         );
         // Untouched fields survive.
-        assert_eq!(out["PATH"]["description"].as_str(), Some("FullRepayment"));
+        assert_eq!(
+            out["PATH"]["simplicity_type"].as_str(),
+            Some("Either<Either<(), ()>, Either<Either<(u64, u64), u64>, u64>>")
+        );
         assert_eq!(out["PATH"]["type"].as_str(), Some("simplicityhl"));
     }
 

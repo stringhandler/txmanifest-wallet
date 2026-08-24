@@ -8,6 +8,71 @@ released together.
 
 No changelog was kept before 0.2.0; for 0.1.x see the git history.
 
+## [Unreleased]
+
+**Breaking:** `description` is gone from every position in the format. Developer
+prose moves to `$comment`; the prose a *user* reads at a param prompt moves to
+`ui_help`. A manifest that still sets `description` does not parse.
+
+**Breaking:** `manifest_version` must now read `"0.3.0"`.
+
+**Breaking:** every manifest-side name is `snake_case` — action `params`,
+contract-template `fields`, and `create_instance.fields`. A wallet has no label
+field for a param: the name *is* the label, so `collateral_amount` title-cases
+into "Collateral amount" and reads as a value someone supplies rather than as a
+compiled-in constant.
+
+The one thing that stays SCREAMING is a `.simf` `param::` identifier, and drawing
+the line there is what makes `compile_params` legible for the first time. An entry
+now reads `SIMF_PARAM: manifest_name`, where before it read `"X": "X"` and nothing
+told a reader which side was which — the left is compiled into the covenant, the
+right is looked up in the manifest.
+
+Every `params.json` collapses accordingly: the two spellings that used to serve a
+param and a same-named field are now one key.
+
+### Changed
+
+- **`description` split into `$comment` and `ui_help`.** One key had been doing
+  two jobs. It was excluded from the registry hash like a comment, yet `describe`
+  printed it, `prompt` used it as the hint beside a param, and `lifecycle` put
+  the manifest's, the action's, and each output's copy on screen during a run —
+  four paths by which text nobody had signed reached a user about to authorise a
+  transaction. `canonical.rs` asserted this could not happen and `preview.rs`
+  refused `description` as a label fallback for exactly that reason; neither was
+  true of the run itself.
+
+  The split makes the rule structural rather than aspirational. `$comment` is
+  stripped in `Manifest::from_json_str` before deserialization, so no field
+  survives for a renderer to reach — the guarantee holds whether or not anyone
+  remembers it. `ui_help` is a declared field and **is** hashed, because the text
+  beside a prompt steers what a user types and is worth as much to an attacker
+  as the confirmation screen.
+
+  `UNHASHED_KEYS` is now identical to `STRIPPED_KEYS`, and that is the invariant:
+  a key may be left out of the hash exactly when the parser guarantees it can
+  never be shown.
+
+- **`describe` reads `$comment` back from the file.** It is the one renderer that
+  shows developer prose, and it is a documentation command that authorises
+  nothing, so it re-parses the original bytes and looks comments up by path. The
+  parsed `Manifest` every other renderer holds carries none.
+
+- **Prose in the examples follows the rename** where it is decidable: a SCREAMING
+  word in a `$comment` or `ui_help` was rewritten when no `.simf` constant shares
+  its spelling. 139 mentions where one does are left as they were — at that point
+  the prose is as likely to mean the compiled-in constant as the manifest name,
+  and only a reader can tell.
+
+### Removed
+
+- `Manifest::description`, `Action::description`, `Input::description`,
+  `Output::description`, `ContractTemplate::description`, and
+  `UtxoParamDef::description` — use `$comment`.
+- `UtxoType::description`, which was additionally the format's only *required*
+  prose field.
+- `ParamDef::description` and `FieldDef::description` — use `ui_help`.
+
 ## [0.2.0] - 2026-08-20
 
 **Breaking:** a manifest that sets `utxo_type.confidential` no longer parses.

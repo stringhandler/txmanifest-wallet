@@ -1,12 +1,12 @@
 {
     "$schema": "../../schema/txmanifest.schema.json",
-    "manifest_version": "0.2.0",
+    "manifest_version": "0.3.0",
     "protocol": "p2pk-simplicity",
-    "description": "Hello World — Pay-to-public-key using a Simplicity checksig program on Liquid.",
+    "$comment": "Hello World — Pay-to-public-key using a Simplicity checksig program on Liquid.",
     "chain": "liquid",
     "utxo_types": {
         "p2pk_output": {
-            "description": "A Liquid UTXO locked to PUBKEY via the compiled p2pk.simf program.",
+            "$comment": "A Liquid UTXO locked to pubkey via the compiled p2pk.simf program.",
             "script": {
                 "type": "simplicity",
                 "source": "./p2pk.simf"
@@ -16,21 +16,21 @@
     },
     "actions": {
         "Pay": {
-            "description": "Lock funds into a p2pk output that only PUBKEY's owner can spend.",
+            "$comment": "Lock funds into a p2pk output that only pubkey's owner can spend.",
             "params": {
                 "pubkey": {
                     "type": "pubkey",
-                    "description": "The x-only public key that will be able to spend this output (the recipient)."
+                    "ui_help": "The x-only public key that will be able to spend this output (the recipient)."
                 },
                 "amount_sat": {
                     "type": "u64",
-                    "description": "Amount in satoshis to lock in the output."
+                    "ui_help": "Amount in satoshis to lock in the output."
                 }
             },
             "inputs": [
                 {
                     "id": "funding_input",
-                    "description": "Wallet UTXO providing the funds.",
+                    "$comment": "Wallet UTXO providing the funds.",
                     "utxo_source": "wallet",
                     "asset": "lbtc",
                     "amount_sat": {
@@ -41,7 +41,7 @@
             "outputs": [
                 {
                     "id": "p2pk_out",
-                    "description": "The funded p2pk output, locked to PUBKEY.",
+                    "$comment": "The funded p2pk output, locked to PUBKEY.",
                     "destination": {
                         "utxo_type": "p2pk_output",
                         "compile_params": {
@@ -53,7 +53,7 @@
                 },
                 {
                     "id": "change_out",
-                    "description": "Change returned to the funding wallet.",
+                    "$comment": "Change returned to the funding wallet.",
                     "destination": "change",
                     "asset": "lbtc",
                     "optional": true
@@ -61,17 +61,17 @@
             ]
         },
         "Receive": {
-            "description": "Spend a p2pk output back into your wallet. Requires a BIP340 signature from the pubkey the output was locked to.",
+            "$comment": "Spend a p2pk output back into your wallet. Requires a BIP340 signature from the pubkey the output was locked to.",
             "params": {
                 "pubkey": {
                     "type": "pubkey",
-                    "description": "The x-only public key the output was locked to in Pay. Must be one of your own wallet's keys so the wallet can sign the spend."
+                    "ui_help": "The x-only public key the output was locked to in Pay. Must be one of your own wallet's keys so the wallet can sign the spend."
                 }
             },
             "inputs": [
                 {
                     "id": "p2pk_in",
-                    "description": "The p2pk covenant UTXO to spend, located via the state file by its utxo_type.",
+                    "$comment": "The p2pk covenant UTXO to spend, located via the state file by its utxo_type.",
                     "utxo_source": {
                         "utxo_type": "p2pk_output",
                         "compile_params": {
@@ -86,13 +86,13 @@
                                 "type": "wallet",
                                 "key": "params.pubkey"
                             },
-                            "description": "BIP340 Schnorr signature over the whole transaction, from the recipient key."
+                            "$comment": "BIP340 Schnorr signature over the whole transaction, from the recipient key."
                         }
                     }
                 },
                 {
                     "id": "fee_input",
-                    "description": "Wallet L-BTC UTXO to pay the network fee.",
+                    "$comment": "Wallet L-BTC UTXO to pay the network fee.",
                     "utxo_source": "wallet",
                     "asset": "lbtc",
                     "optional": true
@@ -101,14 +101,14 @@
             "outputs": [
                 {
                     "id": "received_out",
-                    "description": "The reclaimed funds, sent to your wallet.",
+                    "$comment": "The reclaimed funds, sent to your wallet.",
                     "destination": "wallet",
                     "asset": "lbtc",
                     "amount_sat": "p2pk_in.amount_sat"
                 },
                 {
                     "id": "fee_change",
-                    "description": "L-BTC change from the fee input.",
+                    "$comment": "L-BTC change from the fee input.",
                     "destination": "change",
                     "asset": "lbtc",
                     "optional": true
