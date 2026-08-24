@@ -124,6 +124,20 @@ enum Commands {
         manifest_file: PathBuf,
     },
 
+    /// Print the manifest's registry id: a tagged SHA-256 over its canonical form.
+    ///
+    /// The id ignores `$comment`/`$schema`, key order, and whitespace, so prose edits
+    /// and reformatting keep the same id (and any signature over it). Everything a
+    /// signer reads — labels, roles, prompt help — is covered.
+    ManifestId {
+        /// Path to the manifest (txmanifest.json) file
+        manifest_file: PathBuf,
+        /// Print the exact bytes that are hashed (canonical JSON) instead of the id,
+        /// so a registry can store or re-verify the preimage.
+        #[arg(long)]
+        canonical: bool,
+    },
+
     /// Interactively explore a manifest file's contract_templates and actions
     Describe {
         /// Path to the manifest (txmanifest.json) file
@@ -613,6 +627,45 @@ fn cmd_split(
     Ok(())
 }
 
+/// Print the manifest's registry id, or the canonical bytes it is computed over.
+///
+/// The file is parsed before it is hashed: an id is a promise that the manifest can be
+/// executed, so minting one for a file the engine would reject is worse than no id.
+fn cmd_manifest_id(manifest_path: &Path, canonical: bool) -> Result<()> {
+    use tx_manifest_lib::canonical as canon;
+
+    let raw = std::fs::read_to_string(manifest_path)
+        .with_context(|| format!("Cannot read manifest file: {}", manifest_path.display()))?;
+    manifest::Manifest::from_json_str(&raw)
+        .with_context(|| format!("Cannot parse manifest file: {}", manifest_path.display()))?;
+
+    // An id that another implementation would compute differently, or that a look-alike
+    // file could share a rendering with, is worse than no id at all — so this refuses to
+    // print one rather than leaving the hazard to be found after the signature exists.
+    let hazards = tx_manifest_lib::validate::validate_canonical(&raw);
+    if !hazards.is_ok() {
+        for issue in &hazards.issues {
+            eprintln!("  {} — {}", issue.location, issue.message);
+        }
+        anyhow::bail!(
+            "{} has no unambiguous id ({} problem(s) above); run `validate` for the full report",
+            manifest_path.display(),
+            hazards.errors()
+        );
+    }
+
+    if canonical {
+        // Written raw, with no trailing newline: these are the exact preimage bytes, and
+        // `... --canonical | sha256sum` must agree with the id rather than hash a stray \n.
+        use std::io::Write as _;
+        let bytes = canon::canonical_bytes(&raw)?;
+        std::io::stdout().write_all(&bytes).context("cannot write canonical form to stdout")?;
+    } else {
+        println!("{}", canon::manifest_id_hex(&raw)?);
+    }
+    Ok(())
+}
+
 fn cmd_validate(manifest_path: &Path) -> Result<()> {
     use tx_manifest_lib::validate::Severity;
     use console::style;
@@ -627,7 +680,14 @@ fn cmd_validate(manifest_path: &Path) -> Result<()> {
     let manifest = manifest::Manifest::from_json_str(&raw)
         .with_context(|| format!("Cannot parse manifest file: {}", manifest_path.display()))?;
 
-    let report = validate::validate(&manifest);
+    let mut report = validate::validate(&manifest);
+    // Whether the file *runs*, then whether the id it would be signed under is
+    // unambiguous. Both are things an author wants to hear about before publishing.
+    report.extend(validate::validate_canonical(&raw));
+    // And whether any signature the file carries still stands. A stale entry is an
+    // error: it survives every edit to the manifest, so it reads as "signed" long after
+    // it stopped meaning anything.
+    report.extend(validate::check_signatures(&raw));
 
     for issue in &report.issues {
         let tag = match issue.severity {
@@ -720,6 +780,9 @@ fn main() -> Result<()> {
         Commands::Validate { manifest_file } => cmd_validate(&manifest_file),
         Commands::Describe { manifest_file, action_name } => {
             cmd_describe(&manifest_file, action_name.as_deref())
+        }
+        Commands::ManifestId { manifest_file, canonical } => {
+            cmd_manifest_id(&manifest_file, canonical)
         }
         Commands::Config { key, value } => cmd_config(key.as_deref(), value.as_deref()),
         Commands::Prepare { manifest_file, action_name, wallet, esplora, data_dir, split_amount } =>

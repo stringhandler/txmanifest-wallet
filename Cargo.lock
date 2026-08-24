@@ -3346,6 +3346,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "tx-manifest-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "schemars",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "tx-manifest-lib"
 version = "0.2.0"
 dependencies = [
@@ -3366,7 +3379,18 @@ dependencies = [
  "serde",
  "serde_json",
  "simplicityhl",
+ "tx-manifest-core",
  "ureq",
+]
+
+[[package]]
+name = "tx-manifest-sign"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "tx-manifest-core",
 ]
 
 [[package]]

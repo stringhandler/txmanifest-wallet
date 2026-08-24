@@ -8,6 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
+
 use tx_manifest_lib::schema::{json_schema, json_schema_string, SCHEMA_ID, SCHEMA_PATH};
 use tx_manifest_lib::validate::MAX_UI_LABEL;
 
@@ -212,4 +214,79 @@ fn every_example_manifest_validates_against_the_schema() {
         manifests.len(),
         failures.join("\n")
     );
+}
+
+/// A fractional number in a free-form slot must be caught in the editor, not left for
+/// `validate` to find after the file is written. `amount_sat` is typed `Value` in the
+/// model, so without the injected guard the schema admits anything at all here.
+#[test]
+fn free_form_slots_reject_a_fractional_number() {
+    let schema = compiled_schema();
+
+    let bad = serde_json::json!({
+        "manifest_version": "0.3.0",
+        "protocol": "test",
+        "actions": { "A": { "outputs": [
+            { "id": "o0", "amount_sat": 1.5, "destination": "change" }
+        ] } }
+    });
+    assert!(schema.validate(&bad).is_err(), "schema must reject a fractional amount");
+
+    // The two spellings the format actually uses stay valid.
+    for amount in [serde_json::json!(1), serde_json::json!("params.amount_sat")] {
+        let good = serde_json::json!({
+            "manifest_version": "0.3.0",
+            "protocol": "test",
+            "actions": { "A": { "outputs": [
+                { "id": "o0", "amount_sat": amount, "destination": "change" }
+            ] } }
+        });
+        assert!(
+            schema.validate(&good).is_ok(),
+            "schema must still accept {amount}"
+        );
+    }
+}
+
+/// The guard is applied structurally, to every property the generator left
+/// unconstrained. This test is what makes that claim true tomorrow: a new
+/// `serde_json::Value` field on the model arrives already covered, and a change to the
+/// injection that silently misses a slot fails here rather than in a registry.
+#[test]
+fn every_free_form_slot_carries_the_number_guard() {
+    /// Property subschemas that constrain nothing on their own.
+    fn unguarded(node: &Value, path: &str, found: &mut Vec<String>) {
+        if let Some(Value::Object(props)) = node.get("properties") {
+            for (name, slot) in props {
+                let constrained = ["type", "$ref", "anyOf", "oneOf", "enum", "const"]
+                    .iter()
+                    .any(|key| slot.get(key).is_some());
+                let guarded = slot
+                    .get("allOf")
+                    .and_then(Value::as_array)
+                    .is_some_and(|all| all.iter().any(|b| b.get("$ref").is_some()));
+                if !constrained && !guarded {
+                    found.push(format!("{path}/properties/{name}"));
+                }
+            }
+        }
+        match node {
+            Value::Object(map) => {
+                for (key, nested) in map {
+                    unguarded(nested, &format!("{path}/{key}"), found);
+                }
+            }
+            Value::Array(items) => {
+                for (index, nested) in items.iter().enumerate() {
+                    unguarded(nested, &format!("{path}[{index}]"), found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let schema = json_schema();
+    let mut found = Vec::new();
+    unguarded(&schema, "", &mut found);
+    assert!(found.is_empty(), "free-form slots with no number guard: {found:?}");
 }

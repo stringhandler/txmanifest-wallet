@@ -1,0 +1,19 @@
+[package]
+name = "tx-manifest-core"
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Canonical form, registry id and publisher signatures for transaction manifests. No wallet, no covenant runtime."
+repository = "https://github.com/stringhandler/txmanifest-wallet"
+keywords = ["liquid", "elements", "manifest", "signature"]
+
+# Deliberately tiny. Anything added here is added to the build of every tool that
+# only wants to hash or verify a manifest — the reason this crate exists at all.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+schemars = "0.8"
+sha2 = "0.10"
+unicode-normalization = "0.1"
+secp256k1 = { version = "0.29", features = ["std", "rand-std"] }

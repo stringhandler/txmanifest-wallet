@@ -84,6 +84,16 @@ pub struct Manifest {
     /// Contract template definitions. Each template has typed fields and actions.
     /// An action carrying a `create_instance` block is a constructor for its template.
     pub contract_templates: Option<BTreeMap<String, ContractTemplate>>,
+    /// Publisher endorsements of this manifest's registry id.
+    ///
+    /// The **only** key excluded from the hash that the engine still reads, and legal at
+    /// the root and nowhere else — nested, `signatures` is a field no type declares, so
+    /// `deny_unknown_fields` rejects the file. Excluded because a signature that changed
+    /// the id would invalidate every other signature over the same file; see
+    /// [`crate::canonical`] for the full argument and
+    /// [`crate::signature`] for why a verified entry still says nothing about whether
+    /// the *key* deserves trust.
+    pub signatures: Option<Vec<tx_manifest_core::signature::ManifestSignature>>,
 }
 
 /// SimplicityHL toolchain settings — how the `.simf` programs are compiled, as

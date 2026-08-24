@@ -1,0 +1,15 @@
+[package]
+name = "tx-manifest-sign"
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Sign and verify transaction manifests. Depends on nothing that executes one."
+repository = "https://github.com/stringhandler/txmanifest-wallet"
+
+# Four dependencies, on purpose. A publisher signing a JSON file should not have to
+# build a wallet, an Esplora client or a SimplicityHL compiler — see tx-manifest-core.
+[dependencies]
+tx-manifest-core = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

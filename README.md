@@ -17,12 +17,20 @@ This is a Cargo workspace with two crates:
 
 | Crate | Kind | Purpose |
 |-------|------|---------|
+| [`tx-manifest-core`](txmanifest_core) | library | Canonical form, registry id, the id-stability rules, and publisher signatures. Depends on nothing that executes a manifest — 55 crates, against 296 for the wallet — so a registry or an air-gapped signer can build it alone. |
 | [`tx-manifest-lib`](txmanifest_lib) | library | The manifest model, lifecycle engine, covenant compilation/dry-run, parameter resolution, PSET building, and wallet primitives. |
 | [`tx-manifest-wallet`](txmanifest_wallet) | binary | The `tx-manifest-wallet` CLI that drives the library interactively. |
+| [`tx-manifest-sign`](txmanifest_sign) | binary | The `tx-manifest-sign` CLI: hash, sign and verify a manifest. Cannot build, sign or broadcast a transaction, and needs no network. |
 
 ```
 manifest-wallet/
 ├── Cargo.toml              # workspace
+├── txmanifest_core/        # publish-side crate — no wallet, no covenant runtime
+│   └── src/
+│       ├── canonical.rs    # canonical form + registry id (tagged SHA-256)
+│       ├── checks.rs       # rules that keep an id unambiguous (integers, NFC)
+│       ├── signature.rs    # the `signatures` block: sign, verify, attach
+│       └── report.rs       # the finding vocabulary both crates share
 ├── txmanifest_lib/         # library crate
 │   └── src/
 │       ├── manifest.rs     # manifest schema (deserialized from txmanifest.json)
@@ -35,7 +43,8 @@ manifest-wallet/
 │       ├── describe.rs     # interactive manifest explorer
 │       ├── wallet.rs       # key management & signing
 │       └── …               # config, context, params, instance, state, prompt
-├── txmanifest_wallet/      # CLI crate
+├── txmanifest_wallet/      # wallet CLI crate
+├── txmanifest_sign/        # signing CLI crate
 └── examples/               # sample manifests + .simf programs
     ├── p2pk/               # "hello world" — pay-to-public-key via Simplicity
     ├── lending/            # P2P collateralised lending protocol
@@ -109,6 +118,9 @@ cargo run -- sync --wallet wallet.json
 cargo run -- describe examples/p2pk/txmanifest.json
 cargo run -- validate examples/p2pk/txmanifest.json
 
+# The manifest's registry id — the hash a signature commits to
+cargo run -- manifest-id examples/p2pk/txmanifest.json
+
 # Ensure the wallet has the UTXOs an action needs (splits a funding tx if required)
 cargo run -- prepare examples/p2pk/txmanifest.json Pay --wallet wallet.json
 
@@ -116,14 +128,54 @@ cargo run -- prepare examples/p2pk/txmanifest.json Pay --wallet wallet.json
 cargo run -- run examples/p2pk/txmanifest.json Pay --wallet wallet.json
 ```
 
+### Publishing a manifest
+
+A manifest is published under its **registry id**: a tagged SHA-256 of its canonical
+form. The id ignores `$comment`, `$schema`, key order and whitespace, and covers
+everything a signer reads — `ui.label`, `ui.role`, `ui_help`. Reindenting a file or
+rewriting a developer note keeps the id, and any signature over it, intact.
+
+```sh
+# The id, and the exact bytes it is computed over. (`--canonical` is the preimage,
+# not the digest: the id is a *tagged* hash, so plain sha256 of it will not match.)
+cargo run -p tx-manifest-sign -- id examples/p2pk/txmanifest.json
+cargo run -p tx-manifest-sign -- id examples/p2pk/txmanifest.json --canonical > preimage.json
+
+# Sign it. The input is untouched; the signature lands in a new file.
+cargo run -p tx-manifest-sign -- sign examples/p2pk/txmanifest.json --key publisher.key
+#   → examples/p2pk/txmanifest.signed.json
+
+# Air-gapped: print what to sign, then fold the result back in
+cargo run -p tx-manifest-sign -- digest examples/p2pk/txmanifest.json
+cargo run -p tx-manifest-sign -- attach examples/p2pk/txmanifest.json \
+    --public-key <64 hex> --signature <128 hex>
+
+# Ask the only question worth asking — did *this* key sign?
+cargo run -p tx-manifest-sign -- verify examples/p2pk/txmanifest.signed.json \
+    --require <64 hex>
+```
+
+**The signature does not make the manifest trustworthy.** It says the file is what the
+holder of key K published; K itself comes with the file, so anyone can add their own
+entry. Trust in K has to come from elsewhere — a registry, a pinned key. `verify` prints
+keys rather than a verdict for that reason, and `--require` fails closed. A wallet that
+renders "✓ Signed" from a key the file supplied has reintroduced the exact problem clear
+signing exists to solve.
+
+Signed files are **not** checked into this repo, and `.gitignore` keeps them out. A
+signature is over the id, so any later edit leaves it behind — well-formed, verifying
+nothing, and still reading as an endorsement to anything that does not check. `validate`
+treats a stale signature as an error for the same reason.
+
 ### Commands
 
 | Command | Description |
 |---------|-------------|
 | `run <manifest> <action>` | Walk through a manifest action interactively (resolve inputs → build → sign → broadcast). |
 | `prepare <manifest> <action>` | Ensure the wallet holds the UTXOs the action needs; broadcasts a split tx if not. |
-| `validate <manifest>` | Static schema/sanity checks on a manifest. |
+| `validate <manifest>` | Static schema/sanity checks on a manifest, plus the rules that keep its registry id unambiguous (integer-only numbers, NFC strings). |
 | `describe <manifest>` | Interactively explore a manifest's classes and actions. |
+| `manifest-id <manifest>` | Registry id: a tagged SHA-256 over the manifest's canonical form. `--canonical` prints the exact bytes hashed. |
 | `create-wallet` | Generate a new wallet JSON file. |
 | `info` | Show wallet fingerprint, xpub, oracle key, and a receive address. |
 | `sync` | Sync wallet state against an Esplora server and show balance. |
@@ -132,6 +184,16 @@ cargo run -- run examples/p2pk/txmanifest.json Pay --wallet wallet.json
 | `config` | Show or update configuration (`default_network`, `default_esplora`). |
 
 Run `cargo run -- <command> --help` for full flag details.
+
+#### `tx-manifest-sign`
+
+| Command | Description |
+|---------|-------------|
+| `id <manifest>` | Registry id; `--canonical` prints the exact preimage bytes. |
+| `digest <manifest>` | The 32 bytes a publisher signs — `tagged("txmanifest/signature/v1", id)`, not the id itself. |
+| `sign <manifest> --key <file>` | Sign and write `<name>.signed.json`. The key is read from a file, never an argument. |
+| `attach <manifest> --public-key … --signature …` | Fold in a signature made elsewhere; refuses one that does not verify. |
+| `verify <manifest> [--require <pubkey>]` | List the keys that signed. With `--require`, exit non-zero unless that key is among them. |
 
 ### Configuration
 

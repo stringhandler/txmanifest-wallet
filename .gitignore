@@ -15,3 +15,11 @@ oracle.json
 *.instance.json
 *.instance.*.json
 meta
+
+# Signed manifests are build products of `tx-manifest-sign`, never sources. The repo
+# keeps the unsigned file: a checked-in signature goes stale on the next content edit
+# and then reads as an endorsement of text nobody endorsed.
+*.signed.json
+
+# Publisher secret keys.
+*.key

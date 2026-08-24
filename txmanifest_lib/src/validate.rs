@@ -17,62 +17,12 @@ use serde_json::Value;
 
 use crate::manifest::{Action, Manifest};
 
-/// Severity of a single validation finding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Severity {
-    /// A definite problem: the file will not run correctly as written.
-    Error,
-    /// A likely mistake or smell, but not necessarily fatal.
-    Warning,
-}
-
-/// One finding produced by [`validate`].
-#[derive(Debug, Clone)]
-pub struct Issue {
-    pub severity: Severity,
-    /// Dot-path to the offending element, e.g. `actions.Pay.outputs.p2pk_out`.
-    pub location: String,
-    pub message: String,
-}
-
-/// The result of validating a manifest file.
-#[derive(Debug, Default)]
-pub struct Report {
-    pub issues: Vec<Issue>,
-}
-
-impl Report {
-    fn error(&mut self, location: impl Into<String>, message: impl Into<String>) {
-        self.issues.push(Issue {
-            severity: Severity::Error,
-            location: location.into(),
-            message: message.into(),
-        });
-    }
-
-    fn warn(&mut self, location: impl Into<String>, message: impl Into<String>) {
-        self.issues.push(Issue {
-            severity: Severity::Warning,
-            location: location.into(),
-            message: message.into(),
-        });
-    }
-
-    /// Number of error-severity issues.
-    pub fn errors(&self) -> usize {
-        self.issues.iter().filter(|i| i.severity == Severity::Error).count()
-    }
-
-    /// Number of warning-severity issues.
-    pub fn warnings(&self) -> usize {
-        self.issues.iter().filter(|i| i.severity == Severity::Warning).count()
-    }
-
-    /// True when there are no errors (warnings are allowed).
-    pub fn is_ok(&self) -> bool {
-        self.errors() == 0
-    }
-}
+/// The finding vocabulary and the id-stability rules both live in `tx-manifest-core`,
+/// where a signing tool can reach them without an execution engine. Re-exported so that
+/// `validate::Report` and `validate::validate_canonical` still resolve here.
+pub use tx_manifest_core::checks::validate_canonical;
+pub use tx_manifest_core::report::{Issue, Report, Severity};
+pub use tx_manifest_core::signature::check_signatures;
 
 /// Declared manifest types visible to one action's `ui.action` references: the
 /// enclosing contract template's fields (`instance.X`) plus the action's own

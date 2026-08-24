@@ -11,8 +11,12 @@
 //!
 //! # What is excluded, and why that is safe
 //!
-//! Only developer prose is dropped: [`UNHASHED_KEYS`]. The rule is not "prose vs
-//! structure" but **"can a user read it before authorising?"**
+//! Two kinds of key are dropped, and they are safe for **different reasons**. Conflating
+//! them is how a hole gets added by analogy, so they are stated separately.
+//!
+//! ## Developer prose: [`UNHASHED_KEYS`]
+//!
+//! The rule is not "prose vs structure" but **"can a user read it before authorising?"**
 //!
 //! The format answers that question in the key name rather than leaving it to be
 //! rediscovered per field. `$comment` is developer prose and is stripped before
@@ -30,6 +34,28 @@
 //! unhashed like a comment, yet printed to the user like a label — and the invariant
 //! above could only be stated, not enforced.
 //!
+//! ## Publisher signatures: [`UNHASHED_ROOT_KEYS`]
+//!
+//! `signatures` fails *both* halves of the rule above — the engine must read it to
+//! verify it, and a wallet does show who signed — so it is unhashed on a different
+//! argument entirely: **its content is checked against the hash**. A prose key is
+//! trusted; a signature key is verified. An attacker who rewrites an entry produces one
+//! that fails [`crate::signature::verify`], and cannot assert anything not derived from
+//! a public key and this id.
+//!
+//! Excluding it is also what makes the block useful. A signature that changed the id
+//! would invalidate every other signature over the same file, so only the first signer
+//! could ever exist; excluded, any number of parties sign the same id independently, in
+//! any order, and stripping the block back off leaves the id untouched.
+//!
+//! The corollary is that the file cannot prove its own signature set: removing an entry
+//! is as invisible as adding one. Trust policy must therefore be "I require key X",
+//! which fails closed, and never "show me who signed", which an attacker fills in.
+//!
+//! Unhashed at the **root only**. Nested, `signatures` is a key no model type declares,
+//! so `deny_unknown_fields` rejects the file outright — deliberately, because "unhashed"
+//! must not be a property that can appear at arbitrary depth.
+//!
 //! # Limits
 //!
 //! This implements structural canonicalization (key ordering, whitespace, prose
@@ -42,8 +68,8 @@
 //! [jcs]: https://www.rfc-editor.org/rfc/rfc8785
 
 use anyhow::{Context, Result};
-use lwk_wollet::elements::hashes::{sha256, Hash as _, HashEngine as _};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 /// Keys removed before hashing: documentation that may change without re-signing.
 ///
@@ -51,6 +77,12 @@ use serde_json::{Map, Value};
 /// to leave out of the hash exactly when the parser guarantees it can never reach a
 /// user. Anything added here that the parser still deserializes is a hole.
 pub const UNHASHED_KEYS: [&str; 2] = ["$comment", "$schema"];
+
+/// Keys removed before hashing **at the root only**: the signatures over this very id.
+///
+/// Unlike [`UNHASHED_KEYS`] these are parsed and read — see the module docs for why that
+/// is safe here and nowhere else.
+pub const UNHASHED_ROOT_KEYS: [&str; 1] = ["signatures"];
 
 /// Domain separator for the manifest id, in the style of BIP-340 tagged hashes.
 ///
@@ -63,6 +95,19 @@ pub const MANIFEST_ID_TAG: &str = "txmanifest/id/v1";
 ///
 /// Array order is preserved — input and output ordering is consensus-relevant.
 pub fn canonicalize(value: &Value) -> Value {
+    canonicalize_inner(value, false)
+}
+
+/// [`canonicalize`] for a whole manifest document: also drops [`UNHASHED_ROOT_KEYS`].
+///
+/// Separate from [`canonicalize`] because the root is the only place those keys are
+/// legal, and a function that dropped them at any depth would quietly launder a nested
+/// `signatures` key that the parser is supposed to reject.
+pub fn canonicalize_document(value: &Value) -> Value {
+    canonicalize_inner(value, true)
+}
+
+fn canonicalize_inner(value: &Value, is_root: bool) -> Value {
     match value {
         Value::Object(map) => {
             // serde_json's Map is a BTreeMap unless `preserve_order` is on; rebuilding
@@ -70,15 +115,18 @@ pub fn canonicalize(value: &Value) -> Value {
             let mut entries: Vec<(&String, &Value)> = map
                 .iter()
                 .filter(|(k, _)| !UNHASHED_KEYS.contains(&k.as_str()))
+                .filter(|(k, _)| !(is_root && UNHASHED_ROOT_KEYS.contains(&k.as_str())))
                 .collect();
             entries.sort_by(|a, b| a.0.cmp(b.0));
             let mut out = Map::new();
             for (k, v) in entries {
-                out.insert(k.clone(), canonicalize(v));
+                out.insert(k.clone(), canonicalize_inner(v, false));
             }
             Value::Object(out)
         }
-        Value::Array(items) => Value::Array(items.iter().map(canonicalize).collect()),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|item| canonicalize_inner(item, false)).collect())
+        }
         other => other.clone(),
     }
 }
@@ -89,7 +137,7 @@ pub fn canonicalize(value: &Value) -> Value {
 /// bare digest, and so another implementation can diff its own canonical form.
 pub fn canonical_bytes(raw: &str) -> Result<Vec<u8>> {
     let value: Value = serde_json::from_str(raw).context("manifest is not valid JSON")?;
-    let canonical = canonicalize(&value);
+    let canonical = canonicalize_document(&value);
     serde_json::to_vec(&canonical).context("canonical form should serialise")
 }
 
@@ -98,13 +146,21 @@ pub fn canonical_bytes(raw: &str) -> Result<Vec<u8>> {
 /// `sha256(sha256(tag) || sha256(tag) || canonical_bytes)`, per BIP-340's tagged
 /// hash construction.
 pub fn manifest_id(raw: &str) -> Result<[u8; 32]> {
-    let bytes = canonical_bytes(raw)?;
-    let tag = sha256::Hash::hash(MANIFEST_ID_TAG.as_bytes());
-    let mut engine = sha256::HashEngine::default();
-    engine.input(tag.as_byte_array());
-    engine.input(tag.as_byte_array());
-    engine.input(&bytes);
-    Ok(sha256::Hash::from_engine(engine).to_byte_array())
+    Ok(tagged_hash(MANIFEST_ID_TAG, &canonical_bytes(raw)?))
+}
+
+/// BIP-340's tagged hash: `sha256(sha256(tag) || sha256(tag) || message)`.
+///
+/// Shared with [`crate::signature`], which tags again rather than signing a manifest id
+/// directly, so that one key signing for several purposes can never be replayed across
+/// them.
+pub fn tagged_hash(tag: &str, message: &[u8]) -> [u8; 32] {
+    let tag_hash = Sha256::digest(tag.as_bytes());
+    let mut engine = Sha256::new();
+    engine.update(tag_hash);
+    engine.update(tag_hash);
+    engine.update(message);
+    engine.finalize().into()
 }
 
 /// [`manifest_id`] as lowercase hex — the form a registry key would take.
@@ -194,11 +250,52 @@ mod tests {
         assert!(text.contains("how much to send"), "ui_help must be hashed");
     }
 
+    /// A pinned vector. The id is the registry's primary key and the thing signatures
+    /// commit to, so it must not move when the hash implementation is swapped, the JSON
+    /// crate is upgraded, or this module is refactored — none of which a behavioural test
+    /// would catch. If this fails, every published id and signature just broke.
+    #[test]
+    fn the_id_of_a_fixed_manifest_never_moves() {
+        const PINNED: &str =
+            r#"{"manifest_version":"0.3.0","protocol":"test","actions":{"A":{"outputs":[{"id":"o0","destination":"change"}]}}}"#;
+        // Preimage, for an implementation in another language to diff against:
+        // {"actions":{"A":{"outputs":[{"destination":"change","id":"o0"}]}},
+        //  "manifest_version":"0.3.0","protocol":"test"}
+        assert_eq!(
+            manifest_id_hex(PINNED).unwrap(),
+            "b9efb57ed611668af0c97f3bae1b1fa9bfd1c4d61b945e3e5a1200faf7462168"
+        );
+    }
+
+    /// Signing must not change what was signed — the property the whole scheme rests on.
+    #[test]
+    fn a_root_signatures_block_is_not_hashed() {
+        let signed = BASE.replace(
+            "\"protocol\": \"test\",",
+            "\"protocol\": \"test\", \"signatures\": [{\"public_key\": \"aa\", \"signature\": \"bb\"}],",
+        );
+        assert_eq!(manifest_id(BASE).unwrap(), manifest_id(&signed).unwrap());
+        let text = String::from_utf8(canonical_bytes(&signed).unwrap()).unwrap();
+        assert!(!text.contains("signatures"), "the block must not reach the preimage");
+    }
+
+    /// Only at the root. Nested, `signatures` is a key no model type declares — so the
+    /// parser rejects the file — but the canonicaliser must not launder it in the
+    /// meantime, or "unhashed" becomes a property that can hide at any depth.
+    #[test]
+    fn a_nested_signatures_key_is_still_hashed() {
+        let nested = BASE.replace(
+            "\"params\": {",
+            "\"signatures\": [{\"public_key\": \"aa\"}], \"params\": {",
+        );
+        assert_ne!(manifest_id(BASE).unwrap(), manifest_id(&nested).unwrap());
+    }
+
     #[test]
     fn id_is_tagged() {
         // A bare sha256 over the same preimage must not equal the tagged id.
         let bytes = canonical_bytes(BASE).unwrap();
-        let untagged = sha256::Hash::hash(&bytes).to_byte_array();
+        let untagged: [u8; 32] = Sha256::digest(&bytes).into();
         assert_ne!(manifest_id(BASE).unwrap(), untagged);
     }
 }

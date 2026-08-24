@@ -85,6 +85,76 @@ updated.
 
 ### Added
 
+- **Two rules that keep a manifest id unambiguous**, checked by `validate` and, as
+  far as JSON Schema can express them, by the published schema. `manifest-id`
+  refuses to print an id for a file that breaks either — an id another
+  implementation would compute differently is worse than no id, and worst of all
+  once a signature exists over it.
+
+  *Numbers must be integers.* `1.0`, `1e2` and `1.5` all parse, and JSON
+  libraries disagree about how to write them back out, so the id would depend on
+  which one computed it. Integers round-trip identically everywhere, which is why
+  the rule is "integers only" rather than a full RFC 8785 number normalisation.
+  The schema catches `1.5` at edit time; it cannot catch `1.0`, because draft-07
+  validates parsed values and `1.0` *is* an integer by then — only the checker,
+  which sees how the number was written, catches that.
+
+  *Strings must be in Unicode NFC.* `é` as one code point and as `e` + U+0301
+  render identically and hash differently. RFC 8785 leaves normalisation to the
+  application, so this has to be a rule about what a manifest may contain: left
+  open, a look-alike manifest could show a signer the same confirmation screen,
+  character for character, under a different id. No schema keyword can express
+  this, so it lives in `validate` alone.
+
+- **Publisher signatures, and a `tx-manifest-sign` CLI to make them.** A manifest
+  may carry a root `signatures` array of `{ public_key, signature }` — BIP-340
+  x-only keys over `tagged("txmanifest/signature/v1", manifest_id)`.
+
+  *Unhashed, at the root only.* A signature that changed the id would invalidate
+  every other signature over the same file, so only the first signer could ever
+  exist; excluded, any number of parties sign the same id independently and
+  stripping the block leaves the id untouched. This is the **second** reason a key
+  may be left out of the hash, and it is not the first one: `$comment` is safe
+  because the parser guarantees it never reaches a user, while `signatures` is
+  read *and* displayed and is safe because its content is checked against the
+  hash. Both arguments are written out in `canonical.rs`; a third key needs its
+  own, not an analogy. Nested, `signatures` is a field no type declares, so
+  `deny_unknown_fields` rejects the file — "unhashed" must not be a property that
+  can appear at any depth.
+
+  *The entry carries only what the signature covers.* No role, no timestamp, no
+  display name: an unsigned field beside a signature is free for anyone to edit,
+  and `"role": "auditor"` relabelled to `"publisher"` costs an attacker nothing.
+
+  *A signature is not trust.* The file supplies the key, so anyone can add an
+  entry. `verified_keys` returns which keys verified rather than a bool, `verify
+  --require <key>` fails closed, and the block is capped and rejects a repeated
+  key — a list of plausible strangers is a display attack, not an endorsement.
+
+  *A stale signature is an error, not a warning.* The block survives every edit to
+  the manifest, so an author who changes a label leaves an entry that still reads
+  as "signed" to anything that does not check. `validate` and both CLIs reject it.
+
+  The signing tool is a separate binary over a new **`tx-manifest-core`** crate —
+  canonical form, id, id-stability rules, signatures — because a publisher signing
+  a JSON file should not build a wallet, an Esplora client and a SimplicityHL
+  compiler to do it: 55 crates instead of 296. `tx-manifest-lib` re-exports it, so
+  `tx_manifest_lib::canonical::…` paths are unchanged, and a pinned test vector
+  fixes the id against the hash-backend swap that move required. Signed files are
+  build products: the examples here stay unsigned and `.gitignore` keeps
+  `*.signed.json` out.
+
+- **`manifest-id <manifest>`**, the id a registry keys a manifest by and a
+  signature commits to: a BIP-340-style tagged SHA-256 (`txmanifest/id/v1`) over
+  the manifest's canonical form. Canonicalization sorts keys at every depth and
+  drops `$comment` and `$schema`, so reindenting a file or rewriting a developer
+  note leaves the id — and any signature over it — intact, while everything a
+  signer reads (`ui.label`, `ui.role`, `ui_help`) is covered. That split is only
+  safe because those two keys are stripped before deserialization and so cannot
+  reach a screen; it is why `description`, which was unhashed yet printed, had
+  to go. `--canonical` writes the exact preimage bytes, unterminated, so a
+  registry can store them or pipe them to its own hasher.
+
 - **`manifest_version` is enforced.** It was parsed, printed by `describe`, and
   otherwise ignored, so a `0.1.0` file went on being read under `0.2.0` rules.
   It is now checked in `Manifest::from_json_str` — the one door every caller

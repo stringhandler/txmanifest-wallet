@@ -124,9 +124,19 @@
           "type": "string"
         },
         "asset_bf": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HashStableNumber"
+            }
+          ],
           "description": "Asset blinding factor (`abf`). Also the value Elements requires as the `assetBlindingNonce` of any later reissuance spending this output."
         },
         "value_bf": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HashStableNumber"
+            }
+          ],
           "description": "Value blinding factor (`vbf`)."
         }
       },
@@ -204,6 +214,15 @@
       ],
       "type": "object"
     },
+    "HashStableNumber": {
+      "description": "Any value, except a number with a fractional part. Manifest ids are hashes of the file's canonical form, and JSON libraries disagree on how to re-serialise a non-integer, so such a number would give the same manifest different ids. Write amounts as integers or as decimal strings.",
+      "not": {
+        "not": {
+          "type": "integer"
+        },
+        "type": "number"
+      }
+    },
     "HookBlock": {
       "additionalProperties": false,
       "description": "A hook: a flat map of setter targets to the values they take.\n\nOne type serves every hook position — an action's `on_pre_broadcast` / `on_post_broadcast` and an input's `on_resolved` — because they only ever differed in when they run, never in shape.\n\nTargets use dot-path notation: `\"instance.FOO\"` — sets a contract-template field `\"params.FOO\"`   — sets an action param\n\nValues are [`ComputeSpec`], the same type `create_instance.fields` uses, so all three \"name → how to produce a value\" maps in the format read alike. In hook position only the expression forms are meaningful; `validate` rejects the rest (see `validate::check_hook`).\n\nWithin an input's own `on_resolved`, two bare keywords are self-referential: `\"asset\"` resolves to that input's computed issuance asset ID (or its UTXO asset for non-issuance inputs), and `\"reissuance_token\"` to the computed reissuance token asset ID.",
@@ -231,8 +250,20 @@
           "description": "Documentation only; ignored by the engine.",
           "type": "string"
         },
-        "amount_sat": true,
-        "asset": true,
+        "amount_sat": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HashStableNumber"
+            }
+          ]
+        },
+        "asset": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HashStableNumber"
+            }
+          ]
+        },
         "blinding": {
           "anyOf": [
             {
@@ -255,6 +286,11 @@
           "type": "string"
         },
         "issuance": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HashStableNumber"
+            }
+          ],
           "description": "An Elements asset issuance carried by this input.\n\n- `{\"kind\": \"new\", \"asset_amount_sat\": <expr>, \"inflation_amount_sat\": <expr>}` — mint a brand-new asset, whose id is derived from this input's outpoint. Either amount may be `0` (reissuance tokens only, or a fixed supply with no reissuance rights). - `{\"kind\": \"reissue\", \"asset_amount_sat\": <expr>, \"entropy\": <ref>}` — mint more of an existing asset by spending its reissuance token.\n\nA reissuance needs the **issuance entropy** of the original mint — `fast_merkle_root([sha256d(defining outpoint), contract_hash])`, the value the asset id itself is derived from. It cannot be recovered from anything on chain: the reissuance token UTXO carries no trace of the outpoint that created it. So a constructor has to capture it at the one moment it exists, and hand it back later:\n\n```json // in the minting action's create_instance: \"YES_ISSUANCE_ENTROPY\": \"$inputs.yes_defining_in.issuance_entropy\" // in the reissuing action's input: \"issuance\": { \"kind\": \"reissue\", \"asset_amount_sat\": \"params.PAIRS\", \"entropy\": \"instance.YES_ISSUANCE_ENTROPY\", \"issued_asset\": \"instance.YES_TOKEN_ASSET\" } ```\n\n`issued_asset` is optional and is a **check**, not an input: the engine re-derives the asset id from the entropy and refuses to build if the two disagree. An entropy is opaque, and the byte order block explorers print is the reverse of the one used here — without the check a transposed value still builds a broadcastable transaction that reissues the wrong asset.\n\nFailing that, the entropy may come from `provided_inputs.<input_id>.issuance_entropy` in the instance file. That works, but it travels with an outpoint override which pins the input for *every* action sharing its id — long after the pin is correct."
         },
         "on_resolved": {
@@ -284,6 +320,11 @@
           ]
         },
         "sequence": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HashStableNumber"
+            }
+          ],
           "description": "Per-input `nSequence`. Drives BIP68 relative timelocks (the `check_lock_distance` / `check_lock_duration` Simplicity jets). Accepts: - `{\"relative_blocks\": <expr>}`  — block-based relative lock (≤ 65535 blocks) - `{\"relative_seconds\": <expr>}` — time-based relative lock, rounded up to 512s units - a bare integer / expression    — raw nSequence value\n\nOmitted → the input stays at `Sequence::MAX` (relative locktime disabled)."
         },
         "ui": {
@@ -298,9 +339,19 @@
           "description": "Clear-signing UI hint for this input (net-effect debit line)."
         },
         "utxo_source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HashStableNumber"
+            }
+          ],
           "description": "\"wallet\" or {\"utxo_type\": \"...\"} or conditional object"
         },
         "witnesses": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HashStableNumber"
+            }
+          ],
           "description": "Simplicity witnesses for this input: map of witness name → definition.\n\nMust name **every** witness the input's program declares, and nothing else. A definition is either an object carrying a `type` — `simplicityhl` (a concrete value), `Signature` (a BIP340 signature the engine computes), `taproot_leaf` (a leaf selector, which is not a program witness and so is exempt from both halves of that rule) — or the bare string `\"unused\"` for a witness this spending path does not depend on, which supplies the zero its pruned branch wants.\n\nNothing is inferred from an omission. Anything left out is an error, at `validate` time against the `.simf` and again at run time against the compiled program."
         }
       },
@@ -331,6 +382,29 @@
       ],
       "type": "object"
     },
+    "ManifestSignature": {
+      "additionalProperties": false,
+      "description": "One endorsement of a manifest id.\n\nDeliberately carries *only* what the signature covers. Any other field — a role, a timestamp, a display name — would be unsigned and therefore free for anyone to edit: `\"role\": \"auditor\"` relabelled to `\"publisher\"` costs an attacker nothing. If such a field is ever wanted it has to go into the signed message, not beside it.",
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "public_key": {
+          "description": "BIP-340 x-only public key, 64 lowercase hex characters.",
+          "type": "string"
+        },
+        "signature": {
+          "description": "BIP-340 Schnorr signature over [`signing_message`], 128 lowercase hex characters.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "public_key",
+        "signature"
+      ],
+      "type": "object"
+    },
     "Output": {
       "additionalProperties": false,
       "properties": {
@@ -338,8 +412,20 @@
           "description": "Documentation only; ignored by the engine.",
           "type": "string"
         },
-        "amount_sat": true,
-        "asset": true,
+        "amount_sat": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HashStableNumber"
+            }
+          ]
+        },
+        "asset": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HashStableNumber"
+            }
+          ]
+        },
         "blinding": {
           "anyOf": [
             {
@@ -365,6 +451,11 @@
           ]
         },
         "data": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HashStableNumber"
+            }
+          ],
           "description": "OP_RETURN payload, for `destination: {\"type\":\"op_return\"}` outputs. Either a `concat(ref, …)` string, or an object `{\"parts\": [ … ]}` of typed fields (for exact binary layouts — LE integers, `program_id`, asset-internal bytes). Evaluated to raw bytes and embedded after `OP_RETURN`. Omit for a bare data-less OP_RETURN (NFT burns)."
         },
         "destination": {
@@ -1031,7 +1122,13 @@
             }
           ]
         },
-        "state_vars": true
+        "state_vars": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HashStableNumber"
+            }
+          ]
+        }
       },
       "type": "object"
     },
@@ -1100,6 +1197,16 @@
     },
     "protocol": {
       "type": "string"
+    },
+    "signatures": {
+      "description": "Publisher endorsements of this manifest's registry id.\n\nThe **only** key excluded from the hash that the engine still reads, and legal at the root and nowhere else — nested, `signatures` is a field no type declares, so `deny_unknown_fields` rejects the file. Excluded because a signature that changed the id would invalidate every other signature over the same file; see [`crate::canonical`] for the full argument and [`crate::signature`] for why a verified entry still says nothing about whether the *key* deserves trust.",
+      "items": {
+        "$ref": "#/definitions/ManifestSignature"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
     },
     "simplicity_hl": {
       "anyOf": [

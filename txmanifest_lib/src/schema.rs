@@ -46,6 +46,7 @@ pub fn json_schema() -> Value {
     // `$comment` is legal at any depth; admit it everywhere first.
     admit_comment_key(&mut value);
     apply_ui_label_cap(&mut value);
+    apply_integer_only_numbers(&mut value);
 
     let root = value.as_object_mut().expect("root schema is an object");
     root.insert("$id".to_string(), json!(SCHEMA_ID));
@@ -133,6 +134,88 @@ fn apply_ui_label_cap(root: &mut Value) {
         if let Some(obj) = branch.as_object_mut() {
             obj.insert("maxLength".to_string(), cap.clone());
         }
+    }
+}
+
+/// Name of the guard definition injected by [`apply_integer_only_numbers`].
+const INTEGER_ONLY: &str = "HashStableNumber";
+
+/// Constrain the free-form slots so an editor rejects a fractional number.
+///
+/// Fields typed `serde_json::Value` in the model — `amount_sat`, `asset`, `witnesses`,
+/// `state_vars` and friends — generate as the always-true schema, which admits `1.5`
+/// where the engine and the registry both want an integer. See
+/// [`crate::validate::validate_canonical`] for why a non-integer number makes a
+/// manifest id implementation-dependent.
+///
+/// The slots are found *structurally* — every property carrying no type constraint —
+/// rather than by a hardcoded list of names, so a new `Value` field on the model is
+/// covered the day it is added rather than the day someone remembers this function.
+///
+/// This is a weaker rule than the checker's, and unavoidably so: JSON Schema validates
+/// parsed values, and draft-07 counts `1.0` and `1e2` as integers because they *are*
+/// integers once parsed. It catches `1.5` at edit time; only `validate`, which sees how
+/// the number was written, catches the rest.
+fn apply_integer_only_numbers(root: &mut Value) {
+    fn constrain(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                if let Some(Value::Object(props)) = map.get_mut("properties") {
+                    for slot in props.values_mut() {
+                        if !is_unconstrained(slot) {
+                            continue;
+                        }
+                        // `true` cannot carry keywords, and a `$ref` sibling is ignored
+                        // in draft-07 — so wrap in `allOf`, which keeps any description.
+                        let obj = match slot {
+                            Value::Object(obj) => obj,
+                            other => {
+                                *other = json!({});
+                                other.as_object_mut().expect("just built an object")
+                            }
+                        };
+                        obj.insert(
+                            "allOf".to_string(),
+                            json!([{ "$ref": format!("#/definitions/{INTEGER_ONLY}") }]),
+                        );
+                    }
+                }
+                for nested in map.values_mut() {
+                    constrain(nested);
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(constrain),
+            _ => {}
+        }
+    }
+
+    constrain(root);
+
+    let Some(Value::Object(defs)) = root.get_mut("definitions") else {
+        return;
+    };
+    defs.insert(
+        INTEGER_ONLY.to_string(),
+        json!({
+            "description": "Any value, except a number with a fractional part. Manifest \
+                            ids are hashes of the file's canonical form, and JSON \
+                            libraries disagree on how to re-serialise a non-integer, so \
+                            such a number would give the same manifest different ids. \
+                            Write amounts as integers or as decimal strings.",
+            "not": { "type": "number", "not": { "type": "integer" } },
+        }),
+    );
+}
+
+/// True for a subschema that constrains nothing — `true`, or an object carrying only
+/// annotations such as `description`. These are the generated form of a free-form
+/// `serde_json::Value` field.
+fn is_unconstrained(schema: &Value) -> bool {
+    const CONSTRAINTS: [&str; 7] = ["type", "$ref", "anyOf", "allOf", "oneOf", "enum", "const"];
+    match schema {
+        Value::Bool(true) => true,
+        Value::Object(map) => !CONSTRAINTS.iter().any(|key| map.contains_key(*key)),
+        _ => false,
     }
 }
 
