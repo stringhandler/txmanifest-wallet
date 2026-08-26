@@ -42,6 +42,10 @@ fn checked_in_schema_matches_the_model() {
             path.display()
         )
     });
+    // A Windows checkout can rewrite the file to CRLF (see .gitattributes); the model
+    // always emits LF, so compare on normalized line endings rather than failing on
+    // the checkout config.
+    let on_disk = on_disk.replace("\r\n", "\n");
 
     assert_eq!(
         on_disk,
