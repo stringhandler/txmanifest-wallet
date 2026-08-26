@@ -8,6 +8,42 @@ released together.
 
 No changelog was kept before 0.2.0; for 0.1.x see the git history.
 
+## [Unreleased]
+
+### Added
+
+- **Messages inside rangeproofs.** A confidential output may carry
+  `rangeproof_embed`: plain text (with `params.X` / `instance.X` references
+  resolved), raw bytes in the OP_RETURN `data` dialect, or a nostr event signed
+  at build time. Elements uses only the first 64 bytes of a rangeproof's message
+  field, so ≈3125 bytes per output are free — the proof is the same size either
+  way, so neither the transaction's weight nor its fee changes, and the message
+  is readable only by the holder of the output's blinding key.
+- **Signed nostr events.** `rangeproof_embed.nostr` takes the unsigned event
+  fields (`kind`, `content`, `tags`, `created_at`); the engine fills in `pubkey`,
+  `id` and `sig` so a relay will accept what lands on chain. `sign_with` names
+  which wallet key signs — `"wallet"`, `"oracle"`, or a BIP32 path — so the
+  manifest never carries a secret and the nostr identity is the key's x-only
+  pubkey. The build report and the clear-signing preview both show the event's
+  content and its signing key before broadcast.
+- **`read-messages` command.** Reads embedded messages back out of the wallet's
+  own confidential outputs from persisted state, rendering a payload as a nostr
+  event when it is one. Only wallet-owned outputs are readable: rewinding a
+  rangeproof needs the output's blinding key, which is the gate that makes the
+  message private.
+- The frame is byte-compatible with `liquidrangeproof` / `liquid-nostr-bridge`,
+  so their reader and the bridge relay can read outputs written here.
+
+### Changed
+
+- The engine's own blinding pass now also runs when an output carries a
+  rangeproof message, not only when it pins blinding factors: Elements'
+  `blind_last` writes the 64-byte message itself and offers no way to extend it.
+  Rather than rewind and replace a finished proof, the builder signs the longer
+  message on the first pass — which means an embed can ride on an output paying
+  someone *else's* confidential address, since the receiver's blinding key is
+  never needed.
+
 ## [0.2.0] - 2026-08-20
 
 **Breaking:** a manifest that sets `utxo_type.confidential` no longer parses.

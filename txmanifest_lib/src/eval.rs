@@ -61,6 +61,17 @@ pub fn eval_destination_str(dest: &str, ctx: &ExecutionContext) -> Option<String
     resolve_ref(dest, ctx)
 }
 
+/// Resolve a free-text value: a whole-string reference (`params.X`, `instance.X`, an
+/// input attribute) becomes its value; anything else is taken literally.
+///
+/// Deliberately all-or-nothing rather than interpolating `{{…}}` inside prose: an
+/// author writing a rangeproof message or a nostr `content` field is writing text, and
+/// a substitution rule that fires on a substring would mangle the ones that are not
+/// references at all.
+pub fn eval_text(text: &str, ctx: &ExecutionContext) -> String {
+    resolve_ref(text.trim(), ctx).unwrap_or_else(|| text.to_string())
+}
+
 /// Evaluate an OP_RETURN `data` value into a raw byte payload.
 ///
 /// Two forms are accepted:

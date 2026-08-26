@@ -31,6 +31,8 @@ manifest-wallet/
 │       ├── eval.rs         # expression evaluator (amounts, formulas, references)
 │       ├── prepare.rs      # UTXO pre-funding / splitting
 │       ├── pset_builder.rs # PSET construction
+│       ├── rangeproof.rs   # messages embedded in a confidential output's rangeproof
+│       ├── nostr_embed.rs  # signing a nostr event for such a message
 │       ├── validate.rs     # static manifest schema checks
 │       ├── describe.rs     # interactive manifest explorer
 │       ├── wallet.rs       # key management & signing
@@ -43,7 +45,8 @@ manifest-wallet/
     ├── deadcat/            # binary prediction market with on-chain oracle resolution
     ├── deadcat_v2/         # …unblinded tokens — a documented dead end
     ├── deadcat_v3/         # …derivable blinding factors; the runnable fork
-    └── last_will/          # time-locked inheritance
+    ├── last_will/          # time-locked inheritance
+    └── rangeproof_message/ # messages (and signed nostr events) inside rangeproofs
 ```
 
 ## How a manifest works
@@ -62,6 +65,50 @@ A manifest is a JSON document describing a protocol. The key sections:
 See [`examples/p2pk/txmanifest.json`](examples/p2pk/txmanifest.json) for a minimal
 example, or [`examples/lending/txmanifest.json`](examples/lending/txmanifest.json)
 for a full multi-action covenant protocol.
+
+### Messages inside rangeproofs
+
+Elements signs every confidential output's value rangeproof over an author-supplied
+message, uses only the first 64 bytes of it (asset id ‖ asset blinding factor), and
+discards the rest. Those spare bytes are recovered verbatim by a rewind, are readable
+only by the holder of the output's blinding key, and — because `min_bits = 52` fixes
+the ring count — cost nothing: **≈3125 bytes per output, at no change in transaction
+size or fee.**
+
+Any confidential output may carry one, via `rangeproof_embed`:
+
+```jsonc
+// plain text; params.X / instance.X references are resolved first
+"rangeproof_embed": "hello from inside a rangeproof"
+"rangeproof_embed": { "message": "params.note" }
+
+// raw bytes, in the same dialect as an OP_RETURN `data` field
+"rangeproof_embed": { "data": { "parts": [ { "type": "u64", "value": "params.seq" } ] } }
+
+// a nostr event, signed at build time with a key this wallet derives
+"rangeproof_embed": { "nostr": {
+  "kind": 1,
+  "content": "params.content",
+  "tags": [["t", "liquid"]],
+  "sign_with": "wallet"          // or "oracle", or a BIP32 path
+} }
+```
+
+For the nostr form the engine fills in `pubkey`, `id` and `sig`, so what lands on chain
+is a complete NIP-01 event a relay will accept. The manifest never carries a secret:
+`sign_with` names a wallet key, and the resulting nostr identity is that key's x-only
+pubkey — the one `info` prints. Signing at the authoring end is what makes a bridge that
+republishes these events a transport rather than an authority.
+
+Read them back with `read-messages` (wallet-owned outputs only — the blinding key is the
+gate). The frame is byte-compatible with
+[`liquidrangeproof`](https://github.com/stringhandler/liquidrangeproof) and the
+`liquid-nostr-bridge` relay, so outputs written here can be read by those tools.
+
+A message only exists on a *confidential* output. `validate` rejects one on a change,
+OP_RETURN, burn, fee or `script_hash` destination, or on an output that sets
+`"confidential": false`, rather than silently dropping it. See
+[`examples/rangeproof_message/txmanifest.json`](examples/rangeproof_message/txmanifest.json).
 
 ## Building
 
@@ -128,6 +175,7 @@ cargo run -- run examples/p2pk/txmanifest.json Pay --wallet wallet.json
 | `info` | Show wallet fingerprint, xpub, oracle key, and a receive address. |
 | `sync` | Sync wallet state against an Esplora server and show balance. |
 | `get-balance` | Show last-synced balance (no network call). |
+| `read-messages` | Read messages embedded in the rangeproofs of the wallet's confidential outputs. |
 | `split` | Split a wallet asset into N equal UTXOs. |
 | `config` | Show or update configuration (`default_network`, `default_esplora`). |
 

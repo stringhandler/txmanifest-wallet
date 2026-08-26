@@ -838,6 +838,9 @@ pub struct Output {
     /// Pin this confidential output's blinding factors instead of letting the builder
     /// pick them. See [`BlindingFactors`].
     pub blinding: Option<BlindingFactors>,
+    /// A message to carry inside this output's value rangeproof, readable only by the
+    /// holder of the output's blinding key. See [`RangeproofEmbed`].
+    pub rangeproof_embed: Option<RangeproofEmbed>,
     /// Clear-signing UI hint for this output (net-effect credit line).
     pub ui: Option<UiSpec>,
 }
@@ -1031,6 +1034,157 @@ impl JsonSchema for OutputDestination {
 ///
 /// The alternative is assembling `SchemaObject`s field by field, which for a `anyOf` of
 /// object shapes is several times the code and reads nothing like the schema it produces.
+/// A message carried inside a confidential output's value rangeproof.
+///
+/// Elements uses only the first 64 bytes of a rangeproof's message field and leaves the
+/// rest — about 3125 usable bytes — unused. Writing there costs nothing: the proof is
+/// the same size either way, so the transaction's weight and fee do not change, and the
+/// output is indistinguishable from an ordinary one to anyone not holding its blinding
+/// key. See [`crate::rangeproof`] for the frame layout and the measured properties.
+///
+/// The field only means something on a **confidential** output; on an explicit one there
+/// is no rangeproof to carry it, and the engine errors rather than dropping the message.
+///
+/// Three forms:
+///
+/// | form | meaning |
+/// |---|---|
+/// | `"some text"` or `{"message": "some text"}` | UTF-8 text; `params.X` / `instance.X` references are resolved first |
+/// | `{"data": …}` | raw bytes, using the same evaluator as an OP_RETURN `data` field (a `concat(…)` expression or a typed `{"parts": […]}` layout) |
+/// | `{"nostr": {…}}` | the unsigned fields of a nostr event, signed at build time with a wallet key — see [`NostrEmbed`] |
+///
+/// A payload of more than 3125 bytes is refused at build time rather than truncated.
+#[derive(Debug, Clone)]
+pub enum RangeproofEmbed {
+    /// UTF-8 text, with references resolved.
+    Message(String),
+    /// Raw bytes, in the OP_RETURN `data` dialect.
+    Data(serde_json::Value),
+    /// A nostr event, signed by the wallet as it is built.
+    Nostr(NostrEmbed),
+}
+
+/// The unsigned fields of a nostr event to embed, plus which wallet key signs it.
+///
+/// The engine fills in `pubkey`, `id` and `sig`, so what reaches the chain is a complete
+/// NIP-01 event that a relay will accept: authorship survives the trip, and a bridge that
+/// republishes it is only a transport — it cannot forge events on this author's behalf.
+///
+/// The signature is made by a key this wallet derives, so the manifest never carries a
+/// secret. `sign_with` names it: `"wallet"` (the general signing key, the default),
+/// `"oracle"`, or a literal BIP32 path. The resulting nostr identity is that key's
+/// x-only pubkey — the same one `tx-manifest-wallet info` prints.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NostrEmbed {
+    /// Event kind. Defaults to 1 (a text note).
+    pub kind: Option<u16>,
+    /// Event content. `params.X` / `instance.X` references are resolved first.
+    pub content: String,
+    /// Event tags, each an array of strings whose first element is the tag name —
+    /// `[["t", "liquid"], ["e", "<event id>"]]`. Every element is reference-resolved.
+    pub tags: Option<Vec<Vec<String>>>,
+    /// Unix seconds. Defaults to the moment the transaction is built. Pin it only when
+    /// a reproducible event id matters, since it is part of what the id commits to.
+    pub created_at: Option<serde_json::Value>,
+    /// Which wallet key signs: `"wallet"` (default), `"oracle"`, or a BIP32 path such
+    /// as `"m/86h/1h/7h/0/0"`. May be a reference resolving to one of those.
+    pub sign_with: Option<String>,
+}
+
+/// Object keys `rangeproof_embed` accepts. Kept next to the parser so the schema, the
+/// parser and `validate` cannot drift apart.
+const EMBED_FORMS: [&str; 3] = ["message", "data", "nostr"];
+
+impl<'de> Deserialize<'de> for RangeproofEmbed {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(s) => Ok(Self::Message(s)),
+            serde_json::Value::Object(map) => {
+                let present: Vec<&str> = EMBED_FORMS
+                    .iter()
+                    .copied()
+                    .filter(|k| map.contains_key(*k))
+                    .collect();
+                match present.as_slice() {
+                    [_] if map.len() > 1 => Err(serde::de::Error::custom(format!(
+                        "rangeproof_embed has unknown key(s) alongside '{}'; expected exactly \
+                         one of: {}",
+                        present[0],
+                        EMBED_FORMS.join(", ")
+                    ))),
+                    ["message"] => match &map["message"] {
+                        serde_json::Value::String(s) => Ok(Self::Message(s.clone())),
+                        other => Err(serde::de::Error::custom(format!(
+                            "rangeproof_embed.message must be a string, got {other}"
+                        ))),
+                    },
+                    ["data"] => Ok(Self::Data(map["data"].clone())),
+                    ["nostr"] => serde_json::from_value(map["nostr"].clone())
+                        .map(Self::Nostr)
+                        .map_err(|e| {
+                            serde::de::Error::custom(format!("rangeproof_embed.nostr: {e}"))
+                        }),
+                    [] => Err(serde::de::Error::custom(format!(
+                        "rangeproof_embed object must carry exactly one of: {}",
+                        EMBED_FORMS.join(", ")
+                    ))),
+                    many => Err(serde::de::Error::custom(format!(
+                        "rangeproof_embed carries {} at once ({}); they are alternative \
+                         spellings of the same payload, so exactly one is expected",
+                        many.len(),
+                        many.join(" and ")
+                    ))),
+                }
+            }
+            other => Err(serde::de::Error::custom(format!(
+                "rangeproof_embed must be a string or an object, got {other}"
+            ))),
+        }
+    }
+}
+
+impl JsonSchema for RangeproofEmbed {
+    fn schema_name() -> String {
+        "RangeproofEmbed".to_string()
+    }
+
+    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        let nostr = gen.subschema_for::<NostrEmbed>();
+        subschema(serde_json::json!({
+            "description":
+                "A message to carry inside this confidential output's value rangeproof \
+                 (about 3125 bytes, at no cost in transaction size or fee, readable only \
+                 by the holder of the output's blinding key). A string is UTF-8 text with \
+                 references resolved; an object carries exactly one of `message`, `data` \
+                 (OP_RETURN-style raw bytes) or `nostr` (event fields, signed at build \
+                 time).",
+            "oneOf": [
+                { "type": "string" },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": { "message": { "type": "string" } },
+                    "required": ["message"]
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": { "data": {} },
+                    "required": ["data"]
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": { "nostr": nostr },
+                    "required": ["nostr"]
+                }
+            ]
+        }))
+    }
+}
+
 fn subschema(value: serde_json::Value) -> schemars::schema::Schema {
     serde_json::from_value(value).expect("hand-written subschema is a valid JSON Schema")
 }
@@ -1616,6 +1770,79 @@ mod tests {
                 ] }} }}
             }}"#
         )
+    }
+
+    /// A manifest with one output carrying `extra` inside it.
+    fn output_manifest(extra: &str) -> String {
+        format!(
+            r#"{{
+                "manifest_version": "1",
+                "protocol": "test",
+                "actions": {{ "A": {{ "outputs": [
+                    {{ "id": "out0", "destination": "wallet", "amount_sat": 1000{extra} }}
+                ] }} }}
+            }}"#
+        )
+    }
+
+    fn parse_embed(json: &str) -> RangeproofEmbed {
+        let m = Manifest::from_json_str(&output_manifest(&format!(
+            r#", "rangeproof_embed": {json}"#
+        )))
+        .expect("manifest with a rangeproof_embed should parse");
+        m.actions["A"].outputs.as_ref().unwrap()[0]
+            .rangeproof_embed
+            .clone()
+            .expect("the embed reaches the model")
+    }
+
+    #[test]
+    fn rangeproof_embed_accepts_all_three_forms() {
+        assert!(matches!(parse_embed(r#""a bare string""#), RangeproofEmbed::Message(m) if m == "a bare string"));
+        assert!(matches!(parse_embed(r#"{"message": "spelled out"}"#), RangeproofEmbed::Message(m) if m == "spelled out"));
+        assert!(matches!(parse_embed(r#"{"data": "concat(params.a, params.b)"}"#), RangeproofEmbed::Data(_)));
+
+        let RangeproofEmbed::Nostr(n) = parse_embed(
+            r#"{"nostr": {"kind": 1, "content": "hi", "tags": [["t", "liquid"]], "sign_with": "oracle"}}"#,
+        ) else {
+            panic!("expected the nostr form");
+        };
+        assert_eq!(n.kind, Some(1));
+        assert_eq!(n.content, "hi");
+        assert_eq!(n.tags.unwrap(), vec![vec!["t".to_string(), "liquid".to_string()]]);
+        assert_eq!(n.sign_with.as_deref(), Some("oracle"));
+    }
+
+    #[test]
+    fn rangeproof_embed_defaults_the_optional_nostr_fields() {
+        let RangeproofEmbed::Nostr(n) = parse_embed(r#"{"nostr": {"content": "minimal"}}"#) else {
+            panic!("expected the nostr form");
+        };
+        assert_eq!((n.kind, n.tags, n.created_at, n.sign_with), (None, None, None, None));
+    }
+
+    /// The forms are alternative spellings of one payload, so more than one at a time is
+    /// an author error rather than a merge — and a typo'd key must not be ignored.
+    #[test]
+    fn rangeproof_embed_rejects_ambiguous_and_misspelled_shapes() {
+        for (json, expect) in [
+            (r#"{"message": "a", "data": "b"}"#, "exactly one"),
+            (r#"{}"#, "exactly one"),
+            (r#"{"mesage": "typo"}"#, "exactly one"),
+            (r#"{"message": 42}"#, "must be a string"),
+            (r#"42"#, "must be a string or an object"),
+            (r#"{"nostr": {"content": "hi", "kynd": 1}}"#, "kynd"),
+            (r#"{"nostr": {"kind": 1}}"#, "content"),
+        ] {
+            let err = Manifest::from_json_str(&output_manifest(&format!(
+                r#", "rangeproof_embed": {json}"#
+            )))
+            .expect_err(&format!("{json} must not parse"));
+            assert!(
+                err.to_string().contains(expect),
+                "error for {json} should mention '{expect}', got: {err}"
+            );
+        }
     }
 
     #[test]

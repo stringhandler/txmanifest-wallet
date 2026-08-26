@@ -1,0 +1,145 @@
+{
+  "$schema": "../../schema/txmanifest.schema.json",
+  "manifest_version": "0.1.0",
+  "protocol": "rangeproof-message",
+  "description": "Carry a message inside a confidential output's value rangeproof. Elements uses only the first 64 bytes of a rangeproof's message field, so about 3125 bytes per output are free \u2014 at no cost in transaction size or fee, and readable only by the holder of the output's blinding key.",
+  "chain": "liquid",
+  "actions": {
+    "Post": {
+      "description": "Publish a signed nostr event inside a confidential output's rangeproof. The event is signed by a key this wallet derives, so authorship survives the trip: a bridge that reads the chain and republishes to nostr is a transport, not an authority \u2014 it cannot forge events, and it runs on a view key that cannot spend.",
+      "params": {
+        "recipient": {
+          "type": "string",
+          "description": "A confidential Liquid address to carry the event. Whoever holds this address's blinding key is the only party who can read the note \u2014 so send it where the intended reader is looking: one of your own addresses if you want `read-messages` to find it, or an address covered by the descriptor a nostr bridge watches. An unblinded address has no rangeproof and is rejected."
+        },
+        "content": {
+          "type": "string",
+          "description": "The note's text. Roughly 3000 bytes fit once the event's JSON framing and signature are accounted for."
+        },
+        "amount_sat": {
+          "type": "u64",
+          "description": "Satoshis to send to the recipient. The event rides along for free, so this only needs to clear the dust limit.",
+          "default": "1000"
+        },
+        "sign_with": {
+          "type": "string",
+          "description": "Which wallet key signs the event: \"wallet\" (the general signing key), \"oracle\", or a BIP32 path. The resulting nostr identity is that key's x-only pubkey \u2014 the one `tx-manifest-wallet info` prints.",
+          "default": "wallet"
+        }
+      },
+      "inputs": [
+        {
+          "id": "funding_input",
+          "description": "Wallet UTXO providing the funds and the fee.",
+          "utxo_source": "wallet",
+          "asset": "lbtc",
+          "amount_sat": {
+            "min_amount": "params.amount_sat"
+          },
+          "ui": {
+            "label": "input funding the carrier output and the fee",
+            "role": "funding"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "id": "carrier_out",
+          "description": "The output whose rangeproof carries the event. It must be confidential \u2014 that is what gives it a rangeproof to write into \u2014 so the address must be a blinded one.",
+          "destination": "params.recipient",
+          "amount_sat": "params.amount_sat",
+          "asset": "lbtc",
+          "rangeproof_embed": {
+            "nostr": {
+              "kind": 1,
+              "content": "params.content",
+              "tags": [
+                [
+                  "t",
+                  "liquid"
+                ]
+              ],
+              "sign_with": "params.sign_with"
+            }
+          },
+          "ui": {
+            "label": "the output carrying your nostr note",
+            "role": "carrier"
+          }
+        },
+        {
+          "id": "change_out",
+          "description": "Change returned to the funding wallet.",
+          "destination": "change",
+          "asset": "lbtc",
+          "optional": true,
+          "ui": {
+            "label": "change back to your wallet",
+            "role": "change"
+          }
+        }
+      ],
+      "intent": "post a nostr note on chain to {params.recipient}: {params.content}"
+    },
+    "Send": {
+      "description": "Pay a confidential address with a plain-text message in the rangeproof. Only the recipient can read it \u2014 the message is gated on the output's blinding key, which is theirs.",
+      "params": {
+        "recipient": {
+          "type": "string",
+          "description": "A confidential Liquid address. An unblinded address has no rangeproof and is rejected."
+        },
+        "message": {
+          "type": "string",
+          "description": "The text to embed. Up to 3125 bytes."
+        },
+        "amount_sat": {
+          "type": "u64",
+          "description": "Satoshis to send."
+        }
+      },
+      "inputs": [
+        {
+          "id": "funding_input",
+          "description": "Wallet UTXO providing the funds and the fee.",
+          "utxo_source": "wallet",
+          "asset": "lbtc",
+          "amount_sat": {
+            "min_amount": "params.amount_sat"
+          },
+          "ui": {
+            "label": "input funding the payment and the fee",
+            "role": "funding"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "id": "recipient_out",
+          "description": "The recipient's output, carrying the message.",
+          "destination": "params.recipient",
+          "amount_sat": "params.amount_sat",
+          "asset": "lbtc",
+          "rangeproof_embed": {
+            "message": "params.message"
+          },
+          "ui": {
+            "label": "payment to the recipient, carrying your message",
+            "role": "payment"
+          }
+        },
+        {
+          "id": "change_out",
+          "description": "Change returned to the funding wallet.",
+          "destination": "change",
+          "asset": "lbtc",
+          "optional": true,
+          "ui": {
+            "label": "change back to your wallet",
+            "role": "change"
+          }
+        }
+      ],
+      "intent": "send {params.amount_sat} sat with a private message: {params.message}"
+    }
+  }
+}

@@ -469,7 +469,7 @@ fn build_net_effect(action: &Action, ctx: &ExecutionContext, fee_sat: Option<u64
 
         let amt = output_amount(output, ctx);
         push(
-            heading,
+            heading.clone(),
             Leg {
                 credit: true,
                 units: amt.as_ref().map(|(n, _, _)| *n),
@@ -478,6 +478,17 @@ fn build_net_effect(action: &Action, ctx: &ExecutionContext, fee_sat: Option<u64
                 label: output_label(output),
             },
         );
+
+        // A rangeproof message is not a value movement, so it gets its own amount-less
+        // line rather than being netted. It belongs on this screen all the same: the
+        // message goes on chain, and a nostr one goes out under the signer's own
+        // identity, which is exactly the sort of thing clear signing exists to show.
+        if let Some(note) = rangeproof_note(output, ctx) {
+            push(
+                heading,
+                Leg { credit: true, units: None, asset: None, precision: 0, label: note },
+            );
+        }
     }
 
     // Group each bucket's legs by asset so an asset going out and coming back reads
@@ -640,6 +651,42 @@ fn output_label(output: &Output) -> String {
     label
 }
 
+/// A one-line description of the message an output's rangeproof will carry, for the
+/// detailed-effect screen.
+///
+/// Statically resolved from the manifest and the context, so it shows what will be
+/// embedded without needing the wallet the signature comes from — a nostr event's id and
+/// signature are only known once it is built, and neither is what a signer is reading for.
+fn rangeproof_note(output: &Output, ctx: &ExecutionContext) -> Option<String> {
+    use crate::manifest::RangeproofEmbed;
+
+    Some(match output.rangeproof_embed.as_ref()? {
+        RangeproofEmbed::Message(text) => {
+            let resolved = eval::eval_text(text, ctx);
+            format!("rangeproof message ({} bytes): {}", resolved.len(), quoted(&resolved))
+        }
+        RangeproofEmbed::Data(_) => "rangeproof message (raw bytes)".to_string(),
+        RangeproofEmbed::Nostr(nostr) => format!(
+            "signed nostr event (kind {}) as your \"{}\" key: {}",
+            nostr.kind.unwrap_or(1),
+            eval::eval_text(nostr.sign_with.as_deref().unwrap_or("wallet"), ctx),
+            quoted(&eval::eval_text(&nostr.content, ctx)),
+        ),
+    })
+}
+
+/// A quoted, single-line, length-capped rendering of author text.
+fn quoted(text: &str) -> String {
+    let one_line: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let trimmed = one_line.trim();
+    if trimmed.chars().count() > 60 {
+        let head: String = trimmed.chars().take(60).collect();
+        format!("\"{head}…\"")
+    } else {
+        format!("\"{trimmed}\"")
+    }
+}
+
 fn short(s: &str) -> String {
     if s.len() > 16 {
         format!("{}…{}", &s[..8], &s[s.len() - 4..])
@@ -702,6 +749,44 @@ mod tests {
             .and_then(|c| c.get("lending_contract"))
             .and_then(|c| c.actions.get("CreateOffer"))
             .expect("CreateOffer method")
+    }
+
+    /// A rangeproof message is content the signer is publishing, so it has to be legible
+    /// on the detailed-effect screen — resolved, not shown as the reference it was written
+    /// as, and capped so a 3000-byte note cannot push the amounts off screen.
+    #[test]
+    fn a_rangeproof_message_reads_on_the_detailed_screen() {
+        let src = include_str!("../../examples/rangeproof_message/txmanifest.json");
+        let manifest = Manifest::from_json_str(src).expect("parse the example manifest");
+        let mut ctx = ExecutionContext::new();
+        ctx.set_param("content", "hello from inside a rangeproof");
+        ctx.set_param("sign_with", "oracle");
+        ctx.set_param("amount_sat", "1000");
+
+        let post = manifest.actions.get("Post").expect("Post action");
+        let carrier = post.outputs.as_ref().unwrap().iter().find(|o| o.id == "carrier_out").unwrap();
+        let note = rangeproof_note(carrier, &ctx).expect("the carrier output carries a note");
+        assert!(note.contains("signed nostr event (kind 1)"), "{note}");
+        assert!(note.contains("your \"oracle\" key"), "the signing key must be resolved: {note}");
+        assert!(note.contains("hello from inside a rangeproof"), "{note}");
+
+        // The change output alongside it has nothing to say.
+        let change = post.outputs.as_ref().unwrap().iter().find(|o| o.id == "change_out").unwrap();
+        assert!(rangeproof_note(change, &ctx).is_none());
+
+        // A plain message renders as its resolved text and its byte count.
+        let send = manifest.actions.get("Send").expect("Send action");
+        let out = send.outputs.as_ref().unwrap().iter().find(|o| o.id == "recipient_out").unwrap();
+        ctx.set_param("message", "meet me at the usual place");
+        let note = rangeproof_note(out, &ctx).unwrap();
+        assert_eq!(note, "rangeproof message (26 bytes): \"meet me at the usual place\"");
+
+        // Long text is truncated, and newlines never break the line layout.
+        ctx.set_param("message", format!("first line\nsecond line{}", "!".repeat(200)));
+        let note = rangeproof_note(out, &ctx).unwrap();
+        assert!(note.ends_with("…\""), "{note}");
+        assert!(!note.contains('\n'), "{note}");
+        assert!(note.len() < 120, "{note}");
     }
 
     /// The role is the machine-readable half of the hint and was declared-but-never-read until

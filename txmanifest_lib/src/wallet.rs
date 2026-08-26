@@ -199,23 +199,127 @@ pub fn explicit_utxos(wallet: &WalletFile, data_dir: &Path) -> Result<Vec<lwk_wo
     wollet.explicit_utxos().map_err(|e| anyhow::anyhow!("Failed to read explicit UTXOs: {e}"))
 }
 
+/// One wallet-owned confidential output, as seen by a rangeproof-message scan.
+pub struct ScannedOutput {
+    pub txid: lwk_wollet::elements::Txid,
+    pub vout: u32,
+    pub value: u64,
+    pub asset: lwk_wollet::elements::AssetId,
+    /// The height the transaction confirmed at; `None` while it is still in the mempool.
+    pub height: Option<u32>,
+    /// `Ok(None)` — the output rewound cleanly and carries no message (the common case).
+    /// `Err` — a frame is there but malformed, which is worth showing rather than hiding.
+    pub message: Result<Option<Vec<u8>>>,
+}
+
+/// Read rangeproof messages out of the wallet's own confidential outputs.
+///
+/// Works off persisted state, so it needs a prior `sync` and no network call. Only
+/// wallet-owned outputs are visible: rewinding a rangeproof needs the output's blinding
+/// key, which is exactly the gate that makes an embedded message private in the first
+/// place. `only` narrows the scan to a single outpoint.
+pub fn scan_rangeproof_messages(
+    wallet: &WalletFile,
+    data_dir: &Path,
+    only: Option<(lwk_wollet::elements::Txid, u32)>,
+) -> Result<Vec<ScannedOutput>> {
+    let network = elements_network(wallet);
+    let desc = descriptor(wallet)?;
+    let wollet = lwk_wollet::Wollet::with_fs_persist(network, desc, data_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to open wallet: {e}"))?;
+    let descriptor = wollet.descriptor();
+    let txs = wollet
+        .transactions()
+        .map_err(|e| anyhow::anyhow!("Failed to read wallet transactions: {e}"))?;
+
+    let mut found = Vec::new();
+    for wtx in txs {
+        if only.is_some_and(|(txid, _)| txid != wtx.txid) {
+            continue;
+        }
+        for (vout, owned) in wtx.outputs.iter().enumerate() {
+            let Some(owned) = owned else { continue };
+            if only.is_some_and(|(_, v)| v != vout as u32) {
+                continue;
+            }
+            let txout = &wtx.tx.output[vout];
+            // An explicit output has no rangeproof at all; skip rather than report an
+            // error on every fee and OP_RETURN leg in the wallet's history.
+            if !txout.value.is_confidential() {
+                continue;
+            }
+            let Some(blinding_sk) =
+                lwk_common::derive_blinding_key(descriptor, &txout.script_pubkey)
+            else {
+                continue;
+            };
+            found.push(ScannedOutput {
+                txid: wtx.txid,
+                vout: vout as u32,
+                value: owned.unblinded.value,
+                asset: owned.unblinded.asset,
+                height: wtx.height,
+                message: crate::rangeproof::extract_message(
+                    &lwk_wollet::EC,
+                    txout,
+                    &blinding_sk,
+                ),
+            });
+        }
+    }
+    found.sort_by_key(|o| (std::cmp::Reverse(o.height.unwrap_or(u32::MAX)), o.vout));
+    Ok(found)
+}
+
 pub struct SyncResult {
     pub tip: u32,
     pub utxos: Vec<lwk_wollet::WalletTxOut>,
     pub explicit_utxos: Vec<lwk_wollet::ExternalUtxo>,
 }
 
-/// Sign a 32-byte hash with BIP340 Schnorr using the wallet key that matches `pubkey_hex`.
-///
-/// Tries the wallet signing key path and oracle key path. Errors if neither matches.
-pub fn sign_schnorr_for_pubkey(
-    wallet: &WalletFile,
-    pubkey_hex: &str,
-    hash: &[u8; 32],
-) -> Result<[u8; 64]> {
-    use elements_miniscript::bitcoin::secp256k1::{Keypair, Message, Secp256k1};
+/// The wallet's general signing key path for this network.
+pub fn wallet_key_path(wallet: &WalletFile) -> &'static str {
+    if wallet.is_mainnet() { WALLET_KEY_PATH_MAINNET } else { WALLET_KEY_PATH_TESTNET }
+}
 
-    let path_str = find_path_for_pubkey(wallet, pubkey_hex)?;
+/// The wallet's oracle key path for this network.
+pub fn oracle_key_path(wallet: &WalletFile) -> &'static str {
+    if wallet.is_mainnet() { ORACLE_PATH_MAINNET } else { ORACLE_PATH_TESTNET }
+}
+
+/// Resolve a key specification to a BIP32 derivation path.
+///
+/// Accepts the two named keys this wallet publishes (`"wallet"`, `"oracle"`) or a
+/// literal path (`"m/86h/1h/7h/0/0"`). Aliases exist so a manifest does not have to
+/// hard-code a path that differs between mainnet and testnet.
+pub fn resolve_key_path(wallet: &WalletFile, spec: &str) -> Result<String> {
+    let spec = spec.trim();
+    match spec {
+        "wallet" => Ok(wallet_key_path(wallet).to_string()),
+        "oracle" => Ok(oracle_key_path(wallet).to_string()),
+        _ if spec.starts_with("m/") || spec.starts_with("M/") => {
+            DerivationPath::from_str(spec)
+                .map_err(|e| anyhow::anyhow!("Invalid derivation path '{spec}': {e}"))?;
+            Ok(spec.to_string())
+        }
+        _ => anyhow::bail!(
+            "Unknown key '{spec}'. Expected \"wallet\", \"oracle\", or a BIP32 path \
+             starting with \"m/\" (e.g. \"{}\").",
+            wallet_key_path(wallet)
+        ),
+    }
+}
+
+/// Derive the secp256k1 secret key at `path` from `wallet`.
+///
+/// The counterpart to [`derive_schnorr_pubkey`]: what that returns as an x-only pubkey,
+/// this returns as the key that produces it.
+pub fn derive_secret_key(
+    wallet: &WalletFile,
+    path_str: &str,
+) -> Result<elements_miniscript::bitcoin::secp256k1::SecretKey> {
+    use elements_miniscript::bitcoin::secp256k1::Secp256k1;
+
     let secp = Secp256k1::new();
     let mnemonic: bip39::Mnemonic = wallet.mnemonic.parse()
         .map_err(|e| anyhow::anyhow!("Failed to parse mnemonic: {e}"))?;
@@ -231,7 +335,23 @@ pub fn sign_schnorr_for_pubkey(
         .map_err(|e| anyhow::anyhow!("Invalid derivation path '{path_str}': {e}"))?;
     let child = root.derive_priv(&secp, &path)
         .with_context(|| format!("Key derivation failed at '{path_str}'"))?;
-    let keypair = Keypair::from_secret_key(&secp, &child.private_key);
+    Ok(child.private_key)
+}
+
+/// Sign a 32-byte hash with BIP340 Schnorr using the wallet key that matches `pubkey_hex`.
+///
+/// Tries the wallet signing key path and oracle key path. Errors if neither matches.
+pub fn sign_schnorr_for_pubkey(
+    wallet: &WalletFile,
+    pubkey_hex: &str,
+    hash: &[u8; 32],
+) -> Result<[u8; 64]> {
+    use elements_miniscript::bitcoin::secp256k1::{Keypair, Message, Secp256k1};
+
+    let path_str = find_path_for_pubkey(wallet, pubkey_hex)?;
+    let secp = Secp256k1::new();
+    let sk = derive_secret_key(wallet, path_str)?;
+    let keypair = Keypair::from_secret_key(&secp, &sk);
     let msg = Message::from_digest(*hash);
     let sig = secp.sign_schnorr(&msg, &keypair);
     Ok(sig.serialize())
