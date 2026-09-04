@@ -13,6 +13,7 @@ pub mod params;
 pub mod prepare;
 pub mod preview;
 pub mod prompt;
+pub mod psbt_builder;
 pub mod pset_builder;
 pub mod schema;
 pub mod state;

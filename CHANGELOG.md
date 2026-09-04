@@ -72,6 +72,24 @@ the aliases `liquid` and `btc`. It was a free-form string that nothing read;
   are written, and counting it as multi-asset marked `p2pk` and `last_will`
   unportable when they are the two that port most cleanly.
 
+- **`psbt_builder` — Bitcoin transaction construction.** The counterpart to
+  `pset_builder`, as a separate module rather than a generic one: the two chains
+  share the shape of the job and almost none of its substance, and roughly two
+  thirds of `pset_builder` is machinery for things Bitcoin does not have. What is
+  genuinely common — the input/output vocabulary and the two-pass fee loop — is
+  mirrored under the same names, including the guarantee that a declared output's
+  index in the request is its index in the transaction.
+
+  The difference that reaches furthest is that **the fee is not an output**.
+  Elements places a fee `TxOut` and the transaction balances by construction;
+  Bitcoin defines the fee as inputs minus outputs, so nothing writes it down. A
+  slip that would produce a visibly wrong fee output on Elements produces a
+  silently overpaid fee here, so the balance is asserted rather than assumed and
+  `BuildPsbtResult::fee` reports what was actually left over. Change below the
+  dust threshold folds into the fee, and the reported number says so.
+
+  Not yet wired into `lifecycle` — see below.
+
 - **`capabilities` command and `Manifest::supported_by` — the support check
   `requires` exists for.** A third-party wallet answers "do I handle this file"
   by passing what it implements and reading a verdict, instead of reimplementing
