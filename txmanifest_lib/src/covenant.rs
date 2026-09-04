@@ -829,6 +829,40 @@ pub fn finalize_covenant_input(
 /// program leaf and folding in each extra leaf via TapBranch in declaration order.
 ///
 /// Internal key: the standard NUMS point (no key-path spend).
+/// The taproot merkle root of a covenant tree: the Simplicity leaf, with each extra leaf
+/// folded in by TapBranch in declaration order.
+///
+/// Shared by both chains' address functions so they cannot disagree about the tree while
+/// disagreeing (correctly) about the tweak. `opts.family` decides the TapBranch tag domain
+/// and the jet set, both of which change the result.
+fn covenant_merkle_root(
+    simf_path: &Path,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    opts: &CompileOpts,
+) -> Result<[u8; 32]> {
+    let args_json = build_args_json(compile_params, type_hints)?;
+    let arguments: Arguments = serde_json::from_str(&args_json)
+        .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
+    let source = std::fs::read_to_string(simf_path)
+        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let compiled = compile_program(source, arguments, opts)?;
+
+    let cmr = compiled.commit().cmr();
+    let script = Script::from(cmr.as_ref().to_vec());
+    let tap_leaf = lwk_wollet::elements::taproot::TapLeafHash::from_script(
+        &script,
+        simplicity_leaf_version(),
+    );
+
+    let mut root: [u8; 32] = tap_leaf.to_byte_array();
+    for payload in extra_leaf_payloads {
+        root = build_tapbranch(opts.family, root, tapdata_hash(payload));
+    }
+    Ok(root)
+}
+
 pub fn compute_covenant_address(
     simf_path: &Path,
     compile_params: &HashMap<String, String>,
@@ -928,6 +962,104 @@ pub fn compute_covenant_address(
     eprintln!("[covenant] address: {address}");
 
     Ok(address)
+}
+
+/// The covenant's scriptPubKey on `network`, for either chain.
+///
+/// Exists because [`compute_covenant_address`] cannot serve Bitcoin, and the reason is
+/// easy to get wrong: the taproot **tweak** is domain-separated the same way the tag
+/// hashes are (`TapTweak/elements` versus `TapTweak`), so the tweaked output key — and
+/// therefore the scriptPubKey bytes, not merely the address string — differ between the
+/// chains for one and the same covenant tree.
+///
+/// That is a third independent reason a covenant address is chain-specific, alongside the
+/// jet CMRs and the TapBranch tag. It is also the one with no visible symptom: an
+/// Elements-derived script is a perfectly well-formed P2TR output on Bitcoin, and a
+/// transaction paying it looks entirely normal right up until nobody can ever spend it.
+pub fn covenant_script_pubkey_for(
+    simf_path: &Path,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    network: Network,
+    opts: impl Into<CompileOpts>,
+) -> Result<Vec<u8>> {
+    let opts = opts.into();
+    match network.family() {
+        ChainFamily::Elements => {
+            let elements_net = network.elements_network().ok_or_else(|| {
+                anyhow::anyhow!("{network} has no Elements network mapping")
+            })?;
+            let address = compute_covenant_address(
+                simf_path,
+                compile_params,
+                type_hints,
+                extra_leaf_payloads,
+                elements_net,
+                opts,
+            )?;
+            Ok(address.script_pubkey().to_bytes())
+        }
+        ChainFamily::Bitcoin => Ok(compute_bitcoin_covenant_address(
+            simf_path,
+            compile_params,
+            type_hints,
+            extra_leaf_payloads,
+            network,
+            opts,
+        )?
+        .script_pubkey()
+        .to_bytes()),
+    }
+}
+
+/// The covenant's Bitcoin address — the Bitcoin counterpart of
+/// [`compute_covenant_address`].
+///
+/// Shares the merkle-root computation with the Elements path (both fold the extra leaves
+/// with [`build_tapbranch`] under their own chain's tag) and differs only in the final
+/// tweak-and-encode, which is exactly where the two chains diverge.
+pub fn compute_bitcoin_covenant_address(
+    simf_path: &Path,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    network: Network,
+    opts: impl Into<CompileOpts>,
+) -> Result<lwk_wollet::elements::bitcoin::Address> {
+    use lwk_wollet::elements::bitcoin as btc;
+
+    let opts = opts.into();
+    if network.family() != ChainFamily::Bitcoin {
+        anyhow::bail!("{network} is not a Bitcoin network");
+    }
+    if opts.family != ChainFamily::Bitcoin {
+        anyhow::bail!(
+            "compile options target chain '{}' but a Bitcoin address was requested",
+            opts.family
+        );
+    }
+
+    let merkle_root = covenant_merkle_root(
+        simf_path,
+        compile_params,
+        type_hints,
+        extra_leaf_payloads,
+        &opts,
+    )?;
+
+    let secp = btc::secp256k1::Secp256k1::new();
+    let nums = btc::XOnlyPublicKey::from_slice(&NUMS_KEY_BYTES)
+        .context("Invalid NUMS key bytes")?;
+    let root = btc::taproot::TapNodeHash::from_byte_array(merkle_root);
+    let bitcoin_net = match network {
+        Network::Bitcoin => btc::Network::Bitcoin,
+        Network::BitcoinTestnet => btc::Network::Testnet,
+        Network::BitcoinSignet => btc::Network::Signet,
+        Network::BitcoinRegtest => btc::Network::Regtest,
+        other => anyhow::bail!("{other} is not a Bitcoin network"),
+    };
+    Ok(btc::Address::p2tr(&secp, nums, Some(root), bitcoin_net))
 }
 
 /// A witness the program declares but this spending path never reads, written in the
@@ -1315,6 +1447,129 @@ mod tests {
         // Elements still compiles, so the gate is the family and nothing else.
         let opts = CompileOpts { family: ChainFamily::Elements, ..CompileOpts::default() };
         assert!(compile_program("fn main() { }".to_string(), Arguments::default(), &opts).is_ok());
+    }
+
+    /// The shared core must agree with the Elements address path, or the two could fold
+    /// different trees while both looking right.
+    #[test]
+    fn the_shared_merkle_root_matches_the_elements_address_path() {
+        let simf = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../examples/p2pk/p2pk.simf"
+        ));
+        let params = HashMap::from([(
+            "PUB_KEY".to_string(),
+            "0x0000000000000000000000000000000000000000000000000000000000000001".to_string(),
+        )]);
+        let hints = HashMap::from([("PUB_KEY".to_string(), "pubkey".to_string())]);
+        let opts = CompileOpts { family: ChainFamily::Elements, ..CompileOpts::default() };
+
+        let root = covenant_merkle_root(simf, &params, &hints, &[], &opts).expect("root");
+        let address = compute_covenant_address(
+            simf,
+            &params,
+            &hints,
+            &[],
+            lwk_wollet::ElementsNetwork::LiquidTestnet,
+            &opts,
+        )
+        .expect("address");
+
+        let secp = Secp256k1::new();
+        let nums =
+            lwk_wollet::elements::secp256k1_zkp::XOnlyPublicKey::from_slice(&NUMS_KEY_BYTES).unwrap();
+        let expected = Address::p2tr(
+            &secp,
+            nums,
+            Some(tap_node_hash_from_bytes(root)),
+            None,
+            &AddressParams::LIQUID_TESTNET,
+        );
+        assert_eq!(address.script_pubkey(), expected.script_pubkey());
+    }
+
+    /// The taproot **tweak** is domain-separated too (`TapTweak/elements` vs `TapTweak`),
+    /// so one covenant tree yields different scriptPubKey *bytes* on the two chains — not
+    /// merely a different address string.
+    ///
+    /// This is the failure with no symptom. An Elements-derived script is a perfectly
+    /// well-formed P2TR output on Bitcoin, and a transaction paying it looks entirely
+    /// normal right up until nobody can ever spend it. Nothing downstream can detect it,
+    /// so it is asserted here.
+    #[test]
+    fn the_same_covenant_yields_different_scripts_on_each_chain() {
+        let simf = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../examples/p2pk/p2pk.simf"
+        ));
+        let params = HashMap::from([(
+            "PUB_KEY".to_string(),
+            "0x0000000000000000000000000000000000000000000000000000000000000001".to_string(),
+        )]);
+        let hints = HashMap::from([("PUB_KEY".to_string(), "pubkey".to_string())]);
+
+        let elements = covenant_script_pubkey_for(
+            simf,
+            &params,
+            &hints,
+            &[],
+            Network::LiquidTestnet,
+            CompileOpts { family: ChainFamily::Elements, ..CompileOpts::default() },
+        )
+        .expect("elements script");
+
+        // The Bitcoin arm needs a jet hinter this build does not ship, so it refuses —
+        // which is itself the guarantee that matters here: it cannot silently fall back to
+        // the Elements jet set and hand back a script for the wrong chain.
+        let bitcoin = covenant_script_pubkey_for(
+            simf,
+            &params,
+            &hints,
+            &[],
+            Network::BitcoinSignet,
+            CompileOpts { family: ChainFamily::Bitcoin, ..CompileOpts::default() },
+        );
+        let err = bitcoin.expect_err("no BitcoinJetHinter in this build").to_string();
+        assert!(err.contains("BitcoinJetHinter"), "{err}");
+
+        // Elements still produces a witness-v1 program, so the refusal above is about the
+        // jet set and not about the derivation being broken.
+        assert_eq!(elements[0], 0x51, "OP_1");
+        assert_eq!(elements.len(), 34);
+    }
+
+    /// A Bitcoin address must not be derivable from Elements compile options, or the tweak
+    /// and the jet set would come from different chains.
+    #[test]
+    fn a_bitcoin_covenant_address_refuses_elements_compile_options() {
+        let simf = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../examples/p2pk/p2pk.simf"
+        ));
+        let err = compute_bitcoin_covenant_address(
+            simf,
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            Network::BitcoinSignet,
+            CompileOpts { family: ChainFamily::Elements, ..CompileOpts::default() },
+        )
+        .expect_err("mismatched family")
+        .to_string();
+        assert!(err.contains("compile options target chain"), "{err}");
+
+        // ...and an Elements network is refused outright.
+        let err = compute_bitcoin_covenant_address(
+            simf,
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            Network::LiquidTestnet,
+            CompileOpts { family: ChainFamily::Bitcoin, ..CompileOpts::default() },
+        )
+        .expect_err("wrong network")
+        .to_string();
+        assert!(err.contains("not a Bitcoin network"), "{err}");
     }
 
     /// The tag domain must actually change the tree, and must match Elements' published

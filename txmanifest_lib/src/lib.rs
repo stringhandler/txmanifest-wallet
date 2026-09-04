@@ -1,4 +1,5 @@
 pub mod manifest;
+pub mod assembly;
 pub mod backend;
 pub mod bitcoin_backend;
 pub mod bitcoin_wallet;

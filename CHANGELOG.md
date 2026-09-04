@@ -72,6 +72,63 @@ the aliases `liquid` and `btc`. It was a free-form string that nothing read;
   are written, and counting it as multi-asset marked `p2pk` and `last_will`
   unportable when they are the two that port most cleanly.
 
+- **Bitcoin runs are dispatched from `lifecycle::run`.** A Bitcoin manifest now
+  loads a `BitcoinWallet`, scans Esplora for UTXOs, runs the shared assembly, and
+  then builds, signs and broadcasts a PSBT. Elements is untouched.
+
+  The two paths diverge at the build, not before: Elements carries on to the
+  separate signing, covenant dry-run and finalize steps, because a PSET passes
+  through three stages that can each fail in a way worth reporting. Bitcoin does
+  all three at once — covenant execution needs the upstream jet FFI, so the only
+  transactions reachable there are plain payments, and splitting three mechanical
+  operations across three steps would invent places to stop. A covenant input on
+  a Bitcoin run is refused with that explanation rather than silently skipped.
+
+  Bitcoin UTXOs are presented to input selection in LWK's `WalletTxOut` shape by
+  `assembly::bitcoin_spendable_utxos` — the input-side counterpart of the
+  synthetic policy asset, and safe for the same reason: the outpoint, value and
+  scriptPubKey are real, the asset and blinding factors are synthetic, and the
+  narrowing checks and drops the synthetic ones. Doing it this way keeps input
+  selection — several hundred lines of amount and asset matching — off the list
+  of things being rewritten, which matters because that code is in the path funds
+  move along. A test carries a UTXO through the assembly's vocabulary and back
+  out through the narrowing to confirm the real fields survive.
+
+  `BitcoinRun` carries its own `Network` rather than deriving one from
+  `network_for_asset`, which is an `ElementsNetwork` computed from the wallet
+  file's mainnet flag and is meaningless on Bitcoin — taking it from there would
+  hand the covenant derivation the wrong chain.
+
+- **`assembly` — the seam between the shared lifecycle and the chain under it.**
+  `lifecycle::run`'s input/output assembly is ~800 lines of destination
+  resolution, covenant address derivation, amount evaluation and state metadata.
+  It turns out to need exactly **six** things from the chain: a covenant's
+  scriptPubKey, an asset label resolved to an id, a change address, the next
+  receive address, the policy asset, and whether outputs are confidential by
+  default. `AssemblyContext` is those six, with `ElementsContext` over LWK and
+  `BitcoinContext` over `BitcoinWallet`.
+
+  One assembly path rather than two: a duplicate would agree on the day it was
+  written and drift by the next release, in ways only a funded transaction would
+  reveal. The lifecycle rewiring is a pure refactor — the existing tests are what
+  say so.
+
+  The assembly still speaks the Elements vocabulary on both chains: outputs carry
+  an `AssetId` and an optional blinding key, and on Bitcoin the asset is a single
+  synthetic constant and the blinding key is always `None`. That is a deliberate
+  leak. The alternative — a neutral vocabulary both chains widen from — means
+  rewriting all 800 lines against it, which is the risk the seam exists to avoid.
+  The synthetic asset is not a fiction that has to hold together on its own:
+  `psbt_builder::from_pset_request` refuses any second asset or blinding key, so
+  the narrowing enforces the invariant rather than this module being trusted to
+  maintain it.
+
+  `AddressInfo` carries both the script and its encoding, because the assembly
+  genuinely uses both — the script goes into the transaction, the encoding into
+  the line a user reads to check where their money went. Deriving one from the
+  other at the call site would mean the shared assembly picking an encoding,
+  which is exactly what it must not do.
+
 - **Esplora defaults follow the configured network** across both chains, rather
   than choosing between two Liquid URLs on `is_mainnet`. An explicit
   `default_esplora` still wins; pointing a Bitcoin wallet at a Liquid instance
@@ -221,6 +278,23 @@ the aliases `liquid` and `btc`. It was a free-form string that nothing read;
   wrong tag yields a well-formed address that no script path can ever satisfy,
   so it is now pinned by a test that cross-checks the Elements branch against
   `rust-elements`' own tag.
+
+- **Covenant scriptPubKeys are derived per chain, not just addresses.** The
+  taproot *tweak* is domain-separated the same way the tag hashes are
+  (`TapTweak/elements` versus `TapTweak`), so one covenant tree yields different
+  scriptPubKey **bytes** on the two chains — not merely a different address
+  string. That is a third independent reason a covenant address is chain-specific,
+  alongside the jet CMRs and the TapBranch tag, and the only one with no visible
+  symptom: an Elements-derived script is a perfectly well-formed P2TR output on
+  Bitcoin, and a transaction paying it looks entirely normal right up until nobody
+  can ever spend it.
+
+  `covenant_script_pubkey_for` dispatches on the network and
+  `compute_bitcoin_covenant_address` is its Bitcoin half; both share one
+  merkle-root computation so they cannot fold different trees while disagreeing
+  (correctly) about the tweak. A Bitcoin address built from Elements compile
+  options is refused, so the tweak and the jet set cannot come from different
+  chains.
 
 - **The Simplicity leaf version comes from one constant for both chains.**
   `simplicity::leaf_version()` returns an `elements::taproot::LeafVersion`,

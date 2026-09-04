@@ -398,12 +398,54 @@ pub fn run(
         None
     };
 
-    // Load UTXOs from persisted wallet state for auto-selection.
-    let available_utxos: Vec<lwk_wollet::WalletTxOut> = match &loaded_wallet {
-        Some(w) if data_dir.exists() => {
-            wallet::utxos(w, data_dir).unwrap_or_else(|_| vec![])
-        }
-        _ => vec![],
+    // The Bitcoin counterpart of `wollet_opt`. Built before UTXO loading because input
+    // selection needs the scan's results, and its
+    // absence there is fatal rather than a warning: the Elements path can still do useful
+    // work without a wallet (resolving, previewing), but a Bitcoin run that reached this
+    // point has already passed the capability gate and has nothing to fall back to.
+    let bitcoin_run: Option<BitcoinRun> = if manifest.chain_family() == crate::chain::ChainFamily::Bitcoin {
+        let w = loaded_wallet
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no wallet loaded; a Bitcoin run needs one to sign"))?;
+        let cfg = crate::config::load();
+        let target = network.unwrap_or(&cfg.default_network).parse::<crate::chain::Network>()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let btc_wallet = crate::bitcoin_wallet::BitcoinWallet::from_mnemonic(&w.mnemonic, target)?;
+        let client = crate::bitcoin_backend::EsploraClient::new(cfg.esplora_url());
+
+        println!("  {} Scanning {} for wallet UTXOs…", style("·").dim(), target);
+        let utxos = client
+            .scan(&btc_wallet, crate::bitcoin_backend::DEFAULT_GAP_LIMIT)
+            .context("Cannot scan for wallet UTXOs")?;
+        let total: u64 = utxos.iter().map(|u| u.value).sum();
+        println!(
+            "  {} {} UTXO(s), {} sat",
+            style("✓").green(),
+            utxos.len(),
+            style(total).yellow()
+        );
+
+        // Change and receive both go to the first unused index on their branch, so a run
+        // does not reuse an address that already has history.
+        let (_, change_index) =
+            client.next_unused(&btc_wallet, crate::bitcoin_wallet::Branch::Change)?;
+        let (_, receive_start) =
+            client.next_unused(&btc_wallet, crate::bitcoin_wallet::Branch::Receive)?;
+
+        Some(BitcoinRun { network: target, wallet: btc_wallet, client, utxos, change_index, receive_start })
+    } else {
+        None
+    };
+
+    // Load UTXOs for auto-selection: from persisted LWK state on Elements, from the scan
+    // above on Bitcoin. Both arrive in the same shape so input selection is shared — see
+    // `assembly::bitcoin_spendable_utxos` for what is real and what is synthesized.
+    let available_utxos: Vec<lwk_wollet::WalletTxOut> = match &bitcoin_run {
+        Some(r) => crate::assembly::bitcoin_spendable_utxos(&r.utxos)?,
+        None => match &loaded_wallet {
+            Some(w) if data_dir.exists() => wallet::utxos(w, data_dir).unwrap_or_else(|_| vec![]),
+            _ => vec![],
+        },
     };
     let available_explicit: Vec<lwk_wollet::ExternalUtxo> = match &loaded_wallet {
         Some(w) if data_dir.exists() => {
@@ -1114,7 +1156,25 @@ pub fn run(
         m
     };
 
+    // The assembly runs when either chain has what it needs. `network_for_asset` is still
+    // required on both, because the Elements arm below reads it directly; on Bitcoin it is
+    // vestigial and the context never consults it.
     if let (Some(wollet), Some(net)) = (&wollet_opt, network_for_asset) {
+        // Everything chain-specific this block needs goes through here. See
+        // `crate::assembly`: the assembly itself is shared, and only these seven
+        // operations differ between Elements and Bitcoin.
+        let elements_ctx = crate::assembly::ElementsContext { wollet, network: net };
+        let bitcoin_ctx = bitcoin_run.as_ref().map(|r| crate::assembly::BitcoinContext {
+            wallet: &r.wallet,
+            network: r.network,
+            receive_start: r.receive_start,
+            change_index: r.change_index,
+            utxos: r.utxos.clone(),
+        });
+        let actx: &dyn crate::assembly::AssemblyContext = match &bitcoin_ctx {
+            Some(b) => b,
+            None => &elements_ctx,
+        };
 
         // ---- Populate input attrs for issuance inputs (needed by output asset resolution) ----
         for inp in action.inputs.as_deref().unwrap_or_default() {
@@ -1288,7 +1348,7 @@ pub fn run(
                     .and_then(|s| s.source.as_deref())
                     .map(|src| manifest_file.parent().unwrap_or(std::path::Path::new(".")).join(src))
                     .unwrap_or_else(|| simf_path.clone());
-                let script_pubkey = match pset_builder::covenant_script_pubkey(&inp_simf_path, &inp_params, &inp_hints, &leaf_payloads, net, &compile_opts) {
+                let script_pubkey = match actx.covenant_script_pubkey(&inp_simf_path, &inp_params, &inp_hints, &leaf_payloads, &compile_opts) {
                     Ok(s) => s,
                     Err(e) => {
                         println!("  {} Covenant address failed (input '{}'):", style("[error]").red(), inp.id);
@@ -1312,7 +1372,7 @@ pub fn run(
                 // resolution above). Outputs have always gone through `resolve_asset_id`;
                 // this branch parsed the raw string, so a covenant input on L-BTC —
                 // `"asset": "lbtc"`, the obvious spelling — died with "failed to parse hex".
-                let asset_id = match resolve_asset_id(&resolved.asset, net) {
+                let asset_id = match actx.resolve_asset(&resolved.asset) {
                     Ok(a) => a,
                     Err(e) => {
                         println!("  {} Input '{}' asset parse failed: {e}", style("[error]").red(), inp.id);
@@ -1464,7 +1524,7 @@ pub fn run(
                     },
                 };
 
-                let asset_id = match resolve_asset_id(&asset_label, net) {
+                let asset_id = match actx.resolve_asset(&asset_label) {
                     Ok(id) => id,
                     Err(e) => {
                         if output.optional.unwrap_or(false) {
@@ -1580,7 +1640,7 @@ pub fn run(
                             .and_then(|s| s.source.as_deref())
                             .map(|src| manifest_file.parent().unwrap_or(std::path::Path::new(".")).join(src))
                             .unwrap_or_else(|| simf_path.clone());
-                        let script_pubkey = match pset_builder::covenant_script_pubkey(&out_simf_path, &out_params, &out_hints, &leaf_payloads, net, &compile_opts) {
+                        let script_pubkey = match actx.covenant_script_pubkey(&out_simf_path, &out_params, &out_hints, &leaf_payloads, &compile_opts) {
                             Ok(s) => s,
                             Err(e) => {
                                 println!("  {} Covenant address failed (output '{}'):", style("[error]").red(), output.id);
@@ -1597,8 +1657,8 @@ pub fn run(
                         // covenant reads are published in the manifest anyway; the key
                         // buys the builder a way to reopen its own output, nothing more.
                         let blinding_key = if confidential {
-                            let change_addr = match wollet.change(None) {
-                                Ok(a) => a.address().clone(),
+                            let change_addr = match actx.change_address() {
+                                Ok(a) => a,
                                 Err(e) => {
                                     println!("  {} Output '{}' cannot derive a blinding key: {e}", style("[error]").red(), output.id);
                                     collect_outputs_ok = false;
@@ -1606,7 +1666,7 @@ pub fn run(
                                 }
                             };
                             match change_addr.blinding_pubkey {
-                                Some(pk) => Some(lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true }),
+                                Some(pk) => Some(pk),
                                 None => {
                                     println!(
                                         "  {} Output '{}' is confidential but the wallet has no blinding key — not a CT descriptor.",
@@ -1645,24 +1705,19 @@ pub fn run(
                         });
                     }
                     serde_json::Value::String(dest) if dest == "wallet" => {
-                        let addr_result = match wollet.address(next_wallet_addr_idx) {
+                        let addr_result = match actx.receive_address(next_wallet_addr_idx) {
                             Ok(a) => a,
                             Err(e) => {
                                 println!("  {} Output '{}' wallet address failed: {e}", style("[warn]").yellow(), output.id);
                                 continue;
                             }
                         };
-                        next_wallet_addr_idx = Some(addr_result.index() + 1);
-                        let addr = addr_result.address().clone();
+                        next_wallet_addr_idx = Some(addr_result.index);
                         // Resolution order: per-output → chain default.
                         // Bitcoin does not support confidential outputs; Liquid defaults to confidential.
-                        let chain_default = matches!(net, ElementsNetwork::Liquid | ElementsNetwork::LiquidTestnet);
+                        let chain_default = actx.confidential_by_default();
                         let is_confidential = output.confidential.unwrap_or(chain_default);
-                        let bpk = if is_confidential {
-                            addr.blinding_pubkey.map(|pk| lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true })
-                        } else {
-                            None
-                        };
+                        let bpk = if is_confidential { addr_result.blinding_pubkey } else { None };
                         if pinned_blinding.is_some() && bpk.is_none() {
                             println!(
                                 "  {} Output '{}' pins blinding factors but is explicit (confidential: false) — there is nothing to blind.",
@@ -1671,7 +1726,7 @@ pub fn run(
                             collect_outputs_ok = false;
                             break;
                         }
-                        let addr_str = addr.to_string();
+                        let addr_str = addr_result.display.clone();
                         println!(
                             "  {} Output '{}': {} sat {} → wallet ({}…){}",
                             style("+").green(), output.id, style(amount).yellow(), asset_label,
@@ -1679,7 +1734,7 @@ pub fn run(
                             if pinned_blinding.is_some() { ", pinned blinding factors" } else { "" }
                         );
                         pset_outputs.push(pset_builder::PsetOutputSpec {
-                            script_pubkey: addr.script_pubkey(), amount, asset: asset_id, blinding_key: bpk,
+                            script_pubkey: addr_result.script_pubkey, amount, asset: asset_id, blinding_key: bpk,
                             blinding: pinned_blinding,
                         });
                     }
@@ -1787,7 +1842,7 @@ pub fn run(
             match action.allow_change {
                 crate::manifest::AllowChange::None => {}
                 crate::manifest::AllowChange::LbtcOnly => {
-                    change_assets.insert(net.policy_asset());
+                    change_assets.insert(actx.policy_asset());
                 }
                 crate::manifest::AllowChange::Any => {
                     for i in &pset_inputs {
@@ -1795,14 +1850,14 @@ pub fn run(
                             change_assets.insert(utxo.unblinded.asset);
                         }
                     }
-                    change_assets.insert(net.policy_asset());
+                    change_assets.insert(actx.policy_asset());
                 }
             }
             let mut req = pset_builder::BuildPsetRequest {
                 inputs: pset_inputs,
                 outputs: pset_outputs,
                 fee_rate: fee_rate as f32,
-                policy_asset: net.policy_asset(),
+                policy_asset: actx.policy_asset(),
                 change_assets: change_assets.clone(),
             };
 
@@ -1851,6 +1906,24 @@ pub fn run(
             println!();
             println!("  {} Building PSET ({} inputs, {} outputs)…",
                 style("·").dim(), req.inputs.len(), req.outputs.len());
+
+            // The chains part company here. Everything above is shared; below, Elements
+            // builds a PSET and carries on to the signing and covenant steps, while
+            // Bitcoin builds, signs and broadcasts a PSBT in one go — it has no covenant
+            // path to run through yet, and nothing downstream would know what to do with a
+            // PSBT.
+            if actx.family() == crate::chain::ChainFamily::Bitcoin {
+                match run_bitcoin_build(&req, &bitcoin_run, export_pset_path) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        println!("  {} Bitcoin build failed:", style("[error]").red());
+                        for (i, cause) in e.chain().enumerate() {
+                            println!("    {i}: {cause}");
+                        }
+                    }
+                }
+                return Ok(());
+            }
 
             match pset_builder::build_pset(wollet, net, &req) {
                 Err(e) => {
@@ -2750,7 +2823,7 @@ fn network_genesis_hash(network: ElementsNetwork) -> lwk_wollet::elements::Block
     }
 }
 
-fn resolve_asset_id(
+pub(crate) fn resolve_asset_id(
     label: &str,
     network: ElementsNetwork,
 ) -> Result<lwk_wollet::elements::AssetId> {
@@ -5068,4 +5141,105 @@ fn check_target_capabilities(manifest: &Manifest, network: Option<&str>) -> Resu
         );
     }
     anyhow::bail!(msg)
+}
+
+
+/// What a Bitcoin run needs beyond the shared assembly: a wallet to sign with and a node
+/// to broadcast to.
+pub(crate) struct BitcoinRun {
+    /// The Bitcoin network this run targets.
+    ///
+    /// Carried rather than derived from `network_for_asset`, which is an `ElementsNetwork`
+    /// computed from the wallet file's mainnet flag and is meaningless here. Taking it from
+    /// there would hand the covenant derivation the wrong chain.
+    pub network: crate::chain::Network,
+    pub wallet: crate::bitcoin_wallet::BitcoinWallet,
+    pub client: crate::bitcoin_backend::EsploraClient,
+    pub utxos: Vec<crate::bitcoin_backend::Utxo>,
+    pub change_index: u32,
+    pub receive_start: u32,
+}
+
+/// Build, sign and broadcast a Bitcoin transaction from the assembled request.
+///
+/// The Elements path spreads these across several interactive steps because a PSET passes
+/// through a signer, a covenant dry-run and a finalizer, each of which can fail in a way
+/// worth reporting on its own. None of that applies yet on Bitcoin: covenant execution
+/// needs the upstream jet FFI, so the only transactions reachable here are plain payments,
+/// and splitting three mechanical operations across three steps would only invent places
+/// to stop.
+fn run_bitcoin_build(
+    req: &pset_builder::BuildPsetRequest,
+    run: &Option<BitcoinRun>,
+    export_path: Option<&Path>,
+) -> Result<()> {
+    use crate::psbt_builder;
+
+    let run = run
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("no Bitcoin wallet loaded for this run"))?;
+
+    let change_script = run
+        .wallet
+        .script_pubkey(crate::bitcoin_wallet::Branch::Change, run.change_index)?;
+    // Narrowing, not translating: anything Elements-only that reached the request is
+    // refused here rather than dropped. See `psbt_builder::from_pset_request`.
+    let psbt_req = psbt_builder::from_pset_request(req, Some(change_script))?;
+
+    let mut built = psbt_builder::build_psbt(&psbt_req)?;
+    println!(
+        "  {} PSBT constructed ({} inputs, {} outputs, fee {} sat).",
+        style("✓").green(),
+        built.psbt.unsigned_tx.input.len(),
+        built.psbt.unsigned_tx.output.len(),
+        style(built.fee).yellow(),
+    );
+    if let Some(idx) = built.change_index {
+        println!("    Change at output #{idx}");
+    }
+
+    // Which wallet key signs which input. A covenant input has no entry: it is satisfied
+    // by a Simplicity witness, which this build cannot produce yet.
+    let mut plan = Vec::new();
+    for (index, input) in psbt_req.inputs.iter().enumerate() {
+        let psbt_builder::PsbtInput::Wallet { outpoint, .. } = input else {
+            anyhow::bail!(
+                "input '{}' is a covenant input; Bitcoin covenant spending needs a \
+                 SimplicityHL build with Bitcoin jets, which this crate does not yet pin",
+                input.input_id()
+            );
+        };
+        let utxo = run
+            .utxos
+            .iter()
+            .find(|u| u.outpoint == *outpoint)
+            .ok_or_else(|| {
+                anyhow::anyhow!("input '{}' spends {outpoint}, which is not a wallet UTXO", input.input_id())
+            })?;
+        plan.push(psbt_builder::KeyPathSigner {
+            input_index: index,
+            branch: utxo.branch,
+            index: utxo.index,
+        });
+    }
+
+    psbt_builder::sign_key_path_inputs(&mut built.psbt, &run.wallet, &plan)?;
+    psbt_builder::finalize_key_path_inputs(&mut built.psbt)?;
+    let tx = psbt_builder::extract_tx(built.psbt)?;
+    println!("  {} Signed {} input(s).", style("✓").green(), plan.len());
+
+    // Exporting is not a lesser form of broadcasting: it is what a caller asks for when
+    // something else will relay the transaction, so it must not also send it.
+    if let Some(path) = export_path {
+        let hex = lwk_wollet::elements::bitcoin::consensus::encode::serialize_hex(&tx);
+        let doc = serde_json::json!({ "txid": tx.compute_txid().to_string(), "tx_hex": hex });
+        std::fs::write(path, serde_json::to_string_pretty(&doc)?)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        println!("  {} Wrote signed transaction to {}", style("✓").green(), path.display());
+        return Ok(());
+    }
+
+    let txid = run.client.broadcast(&tx)?;
+    println!("  {} Broadcast: {}", style("✓").green(), style(txid.to_string()).yellow());
+    Ok(())
 }

@@ -1078,10 +1078,17 @@ pub fn from_pset_request(
     })
 }
 
-/// An Elements script and a Bitcoin script are the same bytes.
+/// Copy a script across, byte for byte.
 ///
-/// Only the *address* encodings differ — a P2TR scriptPubKey is `OP_1 <32 bytes>` on both
-/// chains — so the conversion is a byte copy rather than a re-derivation.
+/// **This does not re-derive anything.** A P2TR scriptPubKey has the same *shape* on both
+/// chains, but the tweaked key inside it does not: the taproot tweak is domain-separated
+/// (`TapTweak/elements` versus `TapTweak`), so one covenant tree yields different script
+/// bytes per chain. See `covenant::covenant_script_pubkey_for`.
+///
+/// So this is only correct for a script already derived for the target chain — which is
+/// the caller's responsibility, and the reason `from_pset_request` exists as a narrowing
+/// rather than a general translation. An Elements-derived covenant script copied here
+/// would be a well-formed P2TR output on Bitcoin that nobody can ever spend.
 fn convert_script(script: &lwk_wollet::elements::Script) -> ScriptBuf {
     ScriptBuf::from_bytes(script.as_bytes().to_vec())
 }
