@@ -72,6 +72,59 @@ the aliases `liquid` and `btc`. It was a free-form string that nothing read;
   are written, and counting it as multi-asset marked `p2pk` and `last_will`
   unportable when they are the two that port most cleanly.
 
+- **`capabilities` command and `Manifest::supported_by` — the support check
+  `requires` exists for.** A third-party wallet answers "do I handle this file"
+  by passing what it implements and reading a verdict, instead of reimplementing
+  this crate's inference over the manifest body:
+
+  ```
+  $ tx-manifest-wallet capabilities m.json                    # the contract
+  chain    : elements
+  requires : simplicity
+
+  $ tx-manifest-wallet capabilities m.json --supports simplicity
+  ✓ supported                                                 # exit 0
+
+  $ tx-manifest-wallet capabilities m.json --supports "" --json
+  { "supported": false, "missing": ["simplicity"], ... }      # exit 1
+  ```
+
+  `--supports` sets the exit code so it can gate CI. Without it the command
+  reports the contract and stops, rather than answering a question about a
+  wallet nobody named — exiting 0 there would read as a passing check. The chain
+  is checked alongside the capabilities and reported differently, because the two
+  mean different things to an implementor: a capability gap is closable by
+  implementing something, a wrong chain is not.
+
+  Scope worth stating: a `supported` verdict certifies the *ledger* requirements
+  only. OP_RETURN outputs, relative timelocks and similar transaction shapes are
+  not in the capability vocabulary, so an implementor still reads the manifest
+  body for those.
+
+- **The jet set is chosen from the chain, and `requires` is enforced at run time.**
+  `CompileOpts` gained a `family`, so the SimplicityHL jet hinter follows the
+  manifest's `chain` the way `debug_symbols` already did — it belongs there for
+  the same reason, since a jet's CMR depends on its position in its jet set and
+  therefore moves every covenant address. Verified against the Bitcoin-enabled
+  forks: `p2pk.simf` compiles unchanged under both jet sets and yields two
+  different CMRs, so a covenant address differs per chain for two independent
+  reasons (jet CMRs and the taproot tag domain).
+
+  This build still pins upstream SimplicityHL, which ships no `BitcoinJetHinter`,
+  so a Bitcoin covenant is refused with an error naming the fork that works
+  rather than being silently compiled against the Elements jet set — which would
+  succeed for any program using only shared jets and produce an address on the
+  wrong chain.
+
+- **`config.json` gained `simplicity_activated` and `extra_capabilities`,** and
+  `lifecycle::run` now refuses before deriving, signing or broadcasting anything
+  if the target cannot provide what `requires` declares. `validate` cannot do
+  this: it is offline, and Simplicity on Bitcoin is a property of the node rather
+  than of the chain. Also refuses when the manifest's `chain` and the wallet's
+  network disagree — caught at the gate, where the message can be about the
+  mistake, rather than deep in address derivation, where it would be about
+  taproot tags.
+
 ### Changed
 
 - **Taproot tag domains are derived from the chain rather than hardcoded.**

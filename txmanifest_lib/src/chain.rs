@@ -81,7 +81,7 @@ impl ChainFamily {
     ///
     /// False on Bitcoin, which has exactly one asset. This is the fact that makes a
     /// per-output `asset` field, an issuance input, or `allow_change: "any"` meaningless
-    /// there — see `Manifest::elements_only_uses`.
+    /// there — see `Manifest::chain_mismatches`.
     pub fn has_native_assets(self) -> bool {
         matches!(self, ChainFamily::Elements)
     }
@@ -924,6 +924,28 @@ mod tests {
         // ...and a covenant manifest does not.
         let covenant = Capabilities::from_iter([Capability::SIMPLICITY]);
         assert_eq!(covenant.missing_from(&stock), vec![Capability::SIMPLICITY]);
+    }
+
+    /// The gate `lifecycle::check_target_capabilities` enforces, at the level this module
+    /// owns: a covenant manifest is refused on a stock Bitcoin node and accepted on a
+    /// patched one, with nothing else changing.
+    #[test]
+    fn a_covenant_manifest_is_gated_on_bitcoin_activation() {
+        let requires = Capabilities::from_iter([Capability::SIMPLICITY]);
+
+        let stock = Network::BitcoinSignet
+            .capabilities(&Activation::default_for(Network::BitcoinSignet));
+        assert_eq!(
+            requires.missing_from(&stock),
+            vec![Capability::SIMPLICITY],
+            "the default for a Bitcoin network must be off — no public network has activated it"
+        );
+
+        let patched = Network::BitcoinSignet.capabilities(&Activation {
+            simplicity: true,
+            extensions: Capabilities::none(),
+        });
+        assert!(requires.missing_from(&patched).is_empty());
     }
 
     #[test]

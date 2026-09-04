@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::BackendKind;
+use crate::chain::{Activation, Capabilities, Capability, Network};
 use crate::wallet::default_data_dir;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -20,6 +21,22 @@ pub struct Config {
     /// is "electrum". If None, a network-appropriate Blockstream default is chosen.
     #[serde(default)]
     pub default_electrum: Option<String>,
+    /// Whether the node this wallet talks to executes Simplicity tapleaves.
+    ///
+    /// Only consulted on Bitcoin networks; Elements has Simplicity live regardless. `None`
+    /// means "take the network's default", which is off for Bitcoin — no public Bitcoin
+    /// network has activated the BINANA 2026-0003 soft fork, so a user running a patched
+    /// node opts in rather than every other user opting out.
+    ///
+    /// Configuration, not discovery: nothing probes the node. Setting it wrongly costs a
+    /// rejected broadcast, not a coin.
+    #[serde(default)]
+    pub simplicity_activated: Option<bool>,
+    /// Namespaced capabilities (`custom::my-feature`) the operator asserts this target
+    /// provides. The only thing that can satisfy a third-party `requires` entry, since
+    /// this crate has no way to verify one.
+    #[serde(default)]
+    pub extra_capabilities: Vec<String>,
 }
 
 impl Default for Config {
@@ -29,6 +46,8 @@ impl Default for Config {
             default_esplora: None,
             default_backend: None,
             default_electrum: None,
+            simplicity_activated: None,
+            extra_capabilities: Vec::new(),
         }
     }
 }
@@ -77,6 +96,36 @@ impl Config {
     }
 }
 
+impl Config {
+    /// The configured network, or an error naming the accepted spellings.
+    pub fn network(&self) -> Result<Network> {
+        self.default_network
+            .parse::<Network>()
+            .map_err(|e| anyhow::anyhow!("{e} (in default_network)"))
+    }
+
+    /// What the configured target provides, for checking a manifest's `requires` against.
+    ///
+    /// Unparseable `extra_capabilities` entries are an error rather than a skip: an
+    /// operator who misspells one is asserting a capability that then silently fails to
+    /// satisfy anything, and the resulting message would blame the manifest.
+    pub fn activation(&self, network: Network) -> Result<Activation> {
+        let mut extensions = Capabilities::none();
+        for raw in &self.extra_capabilities {
+            let cap: Capability = raw
+                .parse()
+                .with_context(|| format!("bad entry in extra_capabilities: {raw:?}"))?;
+            extensions.insert(cap);
+        }
+        Ok(Activation {
+            simplicity: self
+                .simplicity_activated
+                .unwrap_or_else(|| Activation::default_for(network).simplicity),
+            extensions,
+        })
+    }
+}
+
 pub fn config_path() -> PathBuf {
     default_data_dir().join("config.json")
 }
@@ -102,4 +151,74 @@ pub fn save(config: &Config) -> Result<()> {
     let raw = serde_json::to_string_pretty(config)?;
     std::fs::write(&path, raw)
         .with_context(|| format!("Cannot write config: {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(network: &str) -> Config {
+        Config { default_network: network.to_string(), ..Config::default() }
+    }
+
+    /// A config file written before these fields existed must keep parsing, and must mean
+    /// what it meant then: Liquid testnet, Simplicity live.
+    #[test]
+    fn a_pre_existing_config_keeps_its_meaning() {
+        let old = r#"{"default_network": "testnet", "default_esplora": null}"#;
+        let parsed: Config = serde_json::from_str(old).expect("old config still parses");
+        let net = parsed.network().expect("testnet resolves");
+        assert_eq!(net, Network::LiquidTestnet);
+        assert!(parsed.activation(net).unwrap().simplicity);
+    }
+
+    /// Simplicity defaults off on Bitcoin and on for Elements, and an explicit setting wins
+    /// only where it is meaningful.
+    #[test]
+    fn simplicity_activation_defaults_per_family() {
+        let c = cfg("bitcoin-signet");
+        let net = c.network().unwrap();
+        assert!(!c.activation(net).unwrap().simplicity, "must default off on Bitcoin");
+
+        let opted_in = Config { simplicity_activated: Some(true), ..cfg("bitcoin-signet") };
+        assert!(opted_in.activation(net).unwrap().simplicity);
+
+        // Elements has it live regardless, so the capability set carries it either way.
+        let c = cfg("liquid");
+        let net = c.network().unwrap();
+        let off = Config { simplicity_activated: Some(false), ..cfg("liquid") };
+        assert!(net
+            .capabilities(&off.activation(net).unwrap())
+            .contains(&Capability::SIMPLICITY));
+        assert!(net.capabilities(&c.activation(net).unwrap()).contains(&Capability::SIMPLICITY));
+    }
+
+    #[test]
+    fn extra_capabilities_are_parsed_and_asserted() {
+        let c = Config {
+            extra_capabilities: vec!["custom::my-feature".to_string()],
+            ..cfg("bitcoin-signet")
+        };
+        let net = c.network().unwrap();
+        let want = Capabilities::from_iter(["custom::my-feature".parse().unwrap()]);
+        assert!(want.missing_from(&net.capabilities(&c.activation(net).unwrap())).is_empty());
+    }
+
+    /// A misspelled entry is an error, not a skip: it would otherwise satisfy nothing and
+    /// the resulting failure would blame the manifest rather than the config.
+    #[test]
+    fn a_malformed_extra_capability_is_an_error() {
+        let c = Config {
+            extra_capabilities: vec!["not a capability".to_string()],
+            ..cfg("liquid")
+        };
+        let err = c.activation(c.network().unwrap()).unwrap_err().to_string();
+        assert!(err.contains("extra_capabilities"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_network_names_the_accepted_spellings() {
+        let err = cfg("liquid-signet").network().unwrap_err().to_string();
+        assert!(err.contains("default_network") && err.contains("bitcoin-signet"), "{err}");
+    }
 }

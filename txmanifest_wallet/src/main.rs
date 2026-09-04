@@ -124,6 +124,25 @@ enum Commands {
         manifest_file: PathBuf,
     },
 
+    /// Report what a wallet must support to execute a manifest, or check a given wallet
+    /// against it
+    Capabilities {
+        /// Path to the manifest (txmanifest.json) file
+        manifest_file: PathBuf,
+        /// Comma-separated capabilities your wallet implements, e.g.
+        /// `simplicity,custom::my-feature`. With this, the command exits non-zero when the
+        /// manifest is unsupported, so it can gate CI.
+        #[arg(long, value_name = "LIST")]
+        supports: Option<String>,
+        /// Chain your wallet implements. Defaults to the manifest's own `chain`, which
+        /// makes `--supports` a pure capability check.
+        #[arg(long, value_name = "CHAIN")]
+        chain: Option<String>,
+        /// Emit JSON instead of prose.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Interactively explore a manifest file's contract_templates and actions
     Describe {
         /// Path to the manifest (txmanifest.json) file
@@ -718,6 +737,9 @@ fn main() -> Result<()> {
         }
 
         Commands::Validate { manifest_file } => cmd_validate(&manifest_file),
+        Commands::Capabilities { manifest_file, supports, chain, json } => {
+            cmd_capabilities(&manifest_file, supports.as_deref(), chain.as_deref(), json)
+        }
         Commands::Describe { manifest_file, action_name } => {
             cmd_describe(&manifest_file, action_name.as_deref())
         }
@@ -730,5 +752,95 @@ fn main() -> Result<()> {
         Commands::GetBalance { wallet, data_dir } => cmd_get_balance(&wallet, data_dir.as_deref()),
         Commands::Split { count, asset, amount_each, wallet, esplora, data_dir } =>
             cmd_split(count, &asset, amount_each, &wallet, esplora.as_deref(), data_dir.as_deref()),
+    }
+}
+
+
+/// Report a manifest's support contract, and optionally check a wallet against it.
+///
+/// This is the consumer `requires` is for: a wallet implementor asking "do I handle this
+/// file". Without `--supports` it prints the contract; with it, the exit code is the
+/// answer, so it can gate CI without parsing output.
+fn cmd_capabilities(
+    manifest_file: &Path,
+    supports: Option<&str>,
+    chain: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    use tx_manifest_lib::chain::{Capabilities, Capability, ChainFamily};
+    use tx_manifest_lib::manifest::{Manifest, Support};
+
+    let raw = std::fs::read_to_string(manifest_file)
+        .with_context(|| format!("Failed to read manifest file: {}", manifest_file.display()))?;
+    let manifest = Manifest::from_json_str(&raw)
+        .with_context(|| format!("Failed to parse manifest file: {}", manifest_file.display()))?;
+
+    // No `--supports` is a question about the manifest, not about a wallet: print the
+    // contract and stop. Reporting "supported" against an unstated wallet would be
+    // meaningless, and exiting 0 would read as a passing check.
+    let Some(supports) = supports else {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "chain": manifest.chain_family().as_str(),
+                    "requires": manifest.requires.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                }))?
+            );
+        } else {
+            println!("chain    : {}", manifest.chain_family());
+            println!("requires : {}", manifest.requires.describe());
+            println!(
+                "\nA wallet supporting {} on {} can execute this manifest's ledger \
+                 requirements.\nCheck yours with: --supports <comma-separated list>",
+                manifest.requires.describe(),
+                manifest.chain_family(),
+            );
+        }
+        return Ok(());
+    };
+
+    let mut wallet_caps = Capabilities::none();
+    for entry in supports.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let cap: Capability = entry
+            .parse()
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .with_context(|| format!("bad --supports entry {entry:?}"))?;
+        wallet_caps.insert(cap);
+    }
+    let wallet_chain = match chain {
+        Some(c) => c.parse::<ChainFamily>().map_err(|e| anyhow::anyhow!("{e}"))?,
+        None => manifest.chain_family(),
+    };
+
+    let verdict = manifest.supported_by(wallet_chain, &wallet_caps);
+    if json {
+        let missing = match &verdict {
+            Support::Missing(caps) => caps.iter().map(|c| c.to_string()).collect(),
+            _ => Vec::<String>::new(),
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "supported": verdict.is_supported(),
+                "verdict": verdict.describe(),
+                "chain": manifest.chain_family().as_str(),
+                "requires": manifest.requires.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                "missing": missing,
+            }))?
+        );
+    } else {
+        match &verdict {
+            Support::Yes => println!("{} {}", console::style("✓").green(), verdict.describe()),
+            _ => println!("{} {}", console::style("✗").red(), verdict.describe()),
+        }
+    }
+
+    if verdict.is_supported() {
+        Ok(())
+    } else {
+        // A non-zero exit is the whole point of `--supports`; the message is already
+        // printed, so keep the error itself terse.
+        std::process::exit(1);
     }
 }

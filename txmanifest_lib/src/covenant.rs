@@ -53,6 +53,15 @@ pub struct CompileOpts {
     /// Unstable compiler features the program may use (`simc -Z <name>`). Purely a gate:
     /// enabling a feature never changes generated code, so it never moves an address.
     pub unstable_features: UnstableFeatures,
+    /// Which jet set the program is compiled against.
+    ///
+    /// Belongs here for the same reason `debug_symbols` does: it changes the CMR, and
+    /// therefore every covenant address. A jet's CMR depends on its position in its jet
+    /// set, so a program touching a single jet commits to a different CMR under Bitcoin
+    /// than under Elements — `p2pk.simf` compiles unchanged on both and yields two
+    /// different addresses. Applying it on some paths and forgetting it on others is the
+    /// failure this struct exists to prevent.
+    pub family: ChainFamily,
 }
 
 impl Default for CompileOpts {
@@ -60,6 +69,7 @@ impl Default for CompileOpts {
         Self {
             debug_symbols: false,
             unstable_features: UnstableFeatures::none(),
+            family: ChainFamily::DEFAULT,
         }
     }
 }
@@ -94,9 +104,37 @@ fn compile_program(
         &opts.unstable_features,
         arguments,
         opts.debug_symbols,
-        Box::new(ElementsJetHinter::new()),
+        jet_hinter(opts.family)?,
     )
     .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))
+}
+
+/// The jet set to compile against, as a SimplicityHL hinter.
+///
+/// The chain's jet sets are genuinely different vocabularies, not dialects: `output_value`
+/// exists only for Bitcoin, `output_asset` and `genesis_block_hash` only for Elements, and
+/// a program naming the wrong one fails to compile rather than misbehaving. That much is
+/// already the right behaviour.
+///
+/// What is missing is the Bitcoin hinter itself. Upstream SimplicityHL ships
+/// `ElementsJetHinter` and `CoreJetHinter` only; `BitcoinJetHinter` exists on the
+/// Bitcoin-enabled fork this crate does not yet pin. So this returns an error naming the
+/// fork rather than silently compiling a Bitcoin manifest against the Elements jet set —
+/// which would succeed for any program using only shared jets, and produce an address on
+/// the wrong chain.
+fn jet_hinter(family: ChainFamily) -> Result<Box<dyn simplicityhl::ast::JetHinter>> {
+    match family {
+        ChainFamily::Elements => Ok(Box::new(ElementsJetHinter::new())),
+        ChainFamily::Bitcoin => Err(anyhow::anyhow!(
+            "this build cannot compile covenants for Bitcoin: SimplicityHL's \
+             `BitcoinJetHinter` is not in the pinned version. It exists on \
+             https://github.com/delta1/SimplicityHL branch `bitcoin` (with \
+             https://github.com/delta1/rust-simplicity branch `2025-12/update-libsimplicity`), \
+             where compilation, address derivation and Bit Machine execution against a \
+             `BitcoinEnv` all work. Until this crate pins those, a manifest with \
+             `\"chain\": \"bitcoin\"` may not declare covenant `utxo_types`."
+        )),
+    }
 }
 
 /// Compile a `.simf` file and return the Simplicity tapleaf hash (32 bytes, natural byte order).
@@ -800,7 +838,22 @@ pub fn compute_covenant_address(
     opts: impl Into<CompileOpts>,
 ) -> Result<Address> {
     let opts = opts.into();
-    let family = Network::from(network).family();
+    // The taproot tag domain and the jet set must come from one place. They enter by
+    // different doors — the tag from the network the wallet is pointed at, the jet set from
+    // the manifest's `chain` — and if those disagree the result is an address that is wrong
+    // in a way nothing downstream can detect: a well-formed p2tr output built from one
+    // chain's tag over another chain's CMR, spendable by nothing. So take the manifest's
+    // family as the single source and refuse outright when the network contradicts it.
+    let family = opts.family;
+    let network_family = Network::from(network).family();
+    if family != network_family {
+        anyhow::bail!(
+            "manifest targets chain '{family}' but the wallet is on {network_family} network \
+             '{}': refusing to derive a covenant address, because the taproot tag domain and \
+             the jet set would come from different chains",
+            Network::from(network),
+        );
+    }
     eprintln!(
         "[covenant] compute_covenant_address: {} extra leaf(s), simf={}",
         extra_leaf_payloads.len(),
@@ -1243,6 +1296,26 @@ fn network_to_params(network: lwk_wollet::ElementsNetwork) -> &'static AddressPa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Bitcoin covenant must fail with something actionable, not by silently compiling
+    /// against the Elements jet set.
+    ///
+    /// The silent path is the dangerous one: `p2pk.simf` uses only jets present in both
+    /// sets, so it would compile clean under the wrong hinter and yield an address on the
+    /// wrong chain. The error has to name the fork that does work.
+    #[test]
+    fn bitcoin_covenants_are_refused_with_a_pointer_to_the_fork() {
+        let opts = CompileOpts { family: ChainFamily::Bitcoin, ..CompileOpts::default() };
+        let err = compile_program("fn main() { }".to_string(), Arguments::default(), &opts)
+            .expect_err("Bitcoin has no jet hinter in the pinned SimplicityHL")
+            .to_string();
+        assert!(err.contains("BitcoinJetHinter"), "{err}");
+        assert!(err.contains("delta1/SimplicityHL"), "{err}");
+
+        // Elements still compiles, so the gate is the family and nothing else.
+        let opts = CompileOpts { family: ChainFamily::Elements, ..CompileOpts::default() };
+        assert!(compile_program("fn main() { }".to_string(), Arguments::default(), &opts).is_ok());
+    }
 
     /// The tag domain must actually change the tree, and must match Elements' published
     /// tag on the chain this engine already ships against.

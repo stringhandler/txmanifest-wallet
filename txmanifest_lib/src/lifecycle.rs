@@ -332,6 +332,11 @@ pub fn run(
     let manifest: Manifest = Manifest::from_json_str(&raw).with_context(|| {
         format!("Failed to parse manifest file: {}", manifest_file.display())
     })?;
+    // Refuse before anything is derived, signed or broadcast if the target cannot run
+    // this manifest. `validate` cannot do this: it is offline and has no idea which node
+    // the wallet points at, and Simplicity on Bitcoin is a property of the node.
+    check_target_capabilities(&manifest, network)?;
+
     // How every `.simf` in this run compiles: debug symbols (which affect every CMR and
     // address, so interop targets like simplicity-lending can be matched without
     // hardcoding) and any unstable `-Z` features the programs need. Sourced from the
@@ -4990,4 +4995,66 @@ mod tests {
              'whatever sits in this UTXO, for AMOUNT_B of ASSET_B'"
         );
     }
+}
+
+
+/// Refuse a run whose target cannot provide what the manifest declares in `requires`.
+///
+/// The counterpart to `validate`'s static check. That one asks "could this manifest ever
+/// run on this chain"; this one asks "will it run here, now, against this node" — a
+/// question only the wallet's configuration can answer, since Simplicity on Bitcoin is a
+/// soft fork some nodes honour and most do not.
+///
+/// Placed before any address derivation, signing or broadcast. A capability gap discovered
+/// later shows up as a rejected transaction, by which point a covenant address may already
+/// hold funds that nothing on that chain can spend.
+fn check_target_capabilities(manifest: &Manifest, network: Option<&str>) -> Result<()> {
+    let cfg = crate::config::load();
+    let network_name = network.unwrap_or(&cfg.default_network);
+    let target: crate::chain::Network = network_name
+        .parse()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // The manifest declares a family; the wallet points at a network. Disagreement is
+    // caught here rather than deep in address derivation, where the message would be about
+    // taproot tags instead of about the mistake the user made.
+    let declared = manifest.chain_family();
+    if declared != target.family() {
+        anyhow::bail!(
+            "manifest targets chain '{declared}' but this run is on network '{target}' \
+             ({}). Point the wallet at a {declared} network, or change the manifest's \
+             `chain`.",
+            target.family(),
+        );
+    }
+
+    let activation = cfg.activation(target)?;
+    let provided = target.capabilities(&activation);
+    let missing = manifest.requires.missing_from(&provided);
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut msg = format!(
+        "network '{target}' cannot provide what this manifest requires ({}):",
+        manifest.requires.describe()
+    );
+    for cap in &missing {
+        msg.push_str(&format!("\n  - {cap}: {}", cap.unsupported_hint()));
+    }
+    // Say how to proceed, but only where proceeding is a configuration question rather
+    // than a fact about the chain.
+    if missing.iter().any(|c| *c == crate::chain::Capability::SIMPLICITY) {
+        msg.push_str(
+            "\n\nIf this node does run Simplicity, set `simplicity_activated: true` in the \
+             wallet config.",
+        );
+    }
+    if missing.iter().any(|c| !c.is_core()) {
+        msg.push_str(
+            "\n\nNamespaced capabilities are satisfied only by listing them in the wallet \
+             config's `extra_capabilities`.",
+        );
+    }
+    anyhow::bail!(msg)
 }

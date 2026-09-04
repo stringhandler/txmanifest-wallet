@@ -1670,6 +1670,38 @@ impl Manifest {
         out
     }
 
+    /// Can a wallet supporting `chain` and `capabilities` execute this manifest?
+    ///
+    /// The support check `requires` exists for. A third-party wallet answers "do I handle
+    /// this file" by passing what it implements and reading the verdict, rather than
+    /// reimplementing this crate's inference over the manifest body.
+    ///
+    /// Both halves are checked because both can disqualify a wallet, and for different
+    /// reasons. A capability gap is about the wallet: it could be closed by implementing
+    /// something. A chain mismatch is about the file: an Elements manifest is not going to
+    /// become executable by a Bitcoin wallet.
+    ///
+    /// Note the contract this honours and the one it does not. If the verdict is
+    /// [`Support::Yes`], a wallet implementing `capabilities` on `chain` has everything the
+    /// *ledger* must provide. It does not certify that the wallet can construct every
+    /// transaction shape the manifest asks for — OP_RETURN outputs, relative timelocks and
+    /// the like are not in the capability vocabulary, so an implementor still reads the
+    /// manifest body for those.
+    pub fn supported_by(&self, chain: ChainFamily, capabilities: &Capabilities) -> Support {
+        if self.chain_family() != chain {
+            return Support::WrongChain {
+                manifest: self.chain_family(),
+                wallet: chain,
+            };
+        }
+        let missing = self.requires.missing_from(capabilities);
+        if missing.is_empty() {
+            Support::Yes
+        } else {
+            Support::Missing(missing)
+        }
+    }
+
     /// Whether covenants should be compiled with SimplicityHL debug symbols included.
     /// Defaults to `false`; see [`SimplicityHl::debug_symbols`].
     pub fn include_debug_symbols(&self) -> bool {
@@ -1693,6 +1725,7 @@ impl Manifest {
         crate::covenant::CompileOpts {
             debug_symbols: self.include_debug_symbols(),
             unstable_features: self.unstable_features(),
+            family: self.chain_family(),
         }
     }
 
@@ -1707,6 +1740,58 @@ impl Manifest {
 
 #[cfg(test)]
 mod tests {
+
+    /// The support check `requires` exists for: a wallet passes what it implements and
+    /// gets a verdict, without reimplementing this crate's inference over the body.
+    #[test]
+    fn supported_by_answers_a_wallets_question() {
+        use crate::chain::{Capabilities, Capability, ChainFamily};
+
+        let covenant = Manifest::from_json_str(
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "chain": "bitcoin",
+                 "requires": ["simplicity"],
+                 "utxo_types": { "v": { "description": "d",
+                   "script": { "type": "simplicity", "source": "./x.simf" } } },
+                 "actions": { "A": { "outputs": [ { "id": "o0", "amount_sat": "1",
+                   "destination": { "utxo_type": "v" } } ] } } }"#,
+        )
+        .expect("manifest parses");
+
+        let none = Capabilities::none();
+        let simplicity = Capabilities::from_iter([Capability::SIMPLICITY]);
+
+        assert_eq!(
+            covenant.supported_by(ChainFamily::Bitcoin, &none),
+            Support::Missing(vec![Capability::SIMPLICITY])
+        );
+        assert!(covenant
+            .supported_by(ChainFamily::Bitcoin, &simplicity)
+            .is_supported());
+
+        // The chain disqualifies a wallet on its own, and says so differently: a capability
+        // gap is closable by implementing something, a wrong chain is not.
+        assert_eq!(
+            covenant.supported_by(ChainFamily::Elements, &simplicity),
+            Support::WrongChain { manifest: ChainFamily::Bitcoin, wallet: ChainFamily::Elements }
+        );
+    }
+
+    /// A manifest needing nothing is supported by a wallet implementing nothing — the case
+    /// that makes an empty `requires` meaningful rather than degenerate.
+    #[test]
+    fn a_plain_manifest_is_supported_by_a_plain_wallet() {
+        use crate::chain::{Capabilities, ChainFamily};
+        let plain = Manifest::from_json_str(
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "chain": "bitcoin",
+                 "requires": [],
+                 "actions": { "Pay": { "outputs": [ { "id": "o0", "amount_sat": "1000",
+                   "destination": "wallet" } ] } } }"#,
+        )
+        .expect("manifest parses");
+        assert!(plain
+            .supported_by(ChainFamily::Bitcoin, &Capabilities::none())
+            .is_supported());
+    }
     use super::*;
 
     /// The version this build implements must read, and every other 0.x line must not.
@@ -2454,6 +2539,37 @@ mod tests {
         // `type` is canonical; a stray `lang` must not override it.
         let fv = parse_field_value(r#"{ "type": "expr", "lang": "tapleaf", "expr": "1 + 1" }"#);
         assert!(matches!(fv, ComputeSpec::Compute(ParamCompute::Expr { .. })));
+    }
+}
+
+/// The verdict from [`Manifest::supported_by`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Support {
+    /// The wallet provides everything this manifest declares.
+    Yes,
+    /// Capabilities the manifest declares that the wallet did not.
+    Missing(Vec<Capability>),
+    /// The manifest is for a different ledger entirely.
+    WrongChain { manifest: ChainFamily, wallet: ChainFamily },
+}
+
+impl Support {
+    pub fn is_supported(&self) -> bool {
+        matches!(self, Support::Yes)
+    }
+
+    /// One line explaining the verdict, suitable for printing to a user.
+    pub fn describe(&self) -> String {
+        match self {
+            Support::Yes => "supported".to_string(),
+            Support::Missing(caps) => format!(
+                "unsupported: missing {}",
+                caps.iter().map(Capability::to_string).collect::<Vec<_>>().join(", ")
+            ),
+            Support::WrongChain { manifest, wallet } => {
+                format!("unsupported: manifest targets {manifest}, wallet supports {wallet}")
+            }
+        }
     }
 }
 
