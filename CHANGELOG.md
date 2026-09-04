@@ -72,6 +72,53 @@ the aliases `liquid` and `btc`. It was a free-form string that nothing read;
   are written, and counting it as multi-asset marked `p2pk` and `last_will`
   unportable when they are the two that port most cleanly.
 
+- **Esplora defaults follow the configured network** across both chains, rather
+  than choosing between two Liquid URLs on `is_mainnet`. An explicit
+  `default_esplora` still wins; pointing a Bitcoin wallet at a Liquid instance
+  would otherwise surface as confusing decode failures rather than an obvious
+  misconfiguration.
+
+- **`bitcoin_backend` — Esplora chain access for Bitcoin.** Esplora serves
+  Bitcoin and Liquid from the same REST shape, so only the base URL differs
+  (`/api` vs `/liquid/api`) — but `lwk_wollet`'s client decodes Elements
+  transactions, whose outputs carry asset ids and commitments no Bitcoin response
+  has. Built on `ureq`, which this crate already used to POST transactions.
+
+  Response decoding is split from fetching, as free functions over `&str`: the
+  HTTP calls cannot be unit-tested, and the decoding is where the mistakes live —
+  an amount read as a float, a txid byte order flipped, a missing field defaulted
+  to zero. The fixtures include a response captured verbatim from
+  `blockstream.info/signet/api`, so the decoder is checked against what Esplora
+  actually sends rather than against a fixture written from the same assumptions
+  as the code.
+
+  Scanning ends on a gap of unused addresses measured by transaction *history*,
+  not by the presence of UTXOs. The distinction is not hypothetical: the BIP86
+  test mnemonic's first signet address has 153 transactions and an empty UTXO
+  set, and a scan keyed on UTXOs would call it unused and stop early. Regtest has
+  no default URL, so an operator configures one rather than being pointed at
+  somebody else's chain.
+
+- **`bitcoin_wallet` — BIP86 key derivation, addresses and signing** on
+  `rust-bitcoin` directly rather than on a wallet framework. What this engine
+  asks of a wallet is small: derive a key, produce an address, sign a hash, know
+  which UTXOs are ours. Covenant inputs are self-describing and the descriptor is
+  single-key, so a framework would mostly contribute a descriptor language,
+  persistence model and coin-selection policy that none of this uses.
+
+  Addresses are single-key P2TR with no script tree, checked against the vectors
+  published in BIP86 rather than against this implementation's own output — a
+  wrong derivation still produces valid-looking addresses the wallet will hand
+  out and watch and then be unable to spend from, and nothing catches that except
+  an external reference.
+
+  Key-path and covenant signing are separate methods because they are not
+  interchangeable: a key-path spend must be signed with the *tweaked* key the
+  output commits to, while a Simplicity program checks against the *untweaked*
+  key baked into it. Both directions are tested, including that each signature
+  fails to verify against the other key. `Debug` is written by hand and redacts
+  the root key, since `Xpriv`'s own `Debug` prints spendable material.
+
 - **`psbt_builder` — Bitcoin transaction construction.** The counterpart to
   `pset_builder`, as a separate module rather than a generic one: the two chains
   share the shape of the job and almost none of its substance, and roughly two
@@ -88,7 +135,28 @@ the aliases `liquid` and `btc`. It was a free-form string that nothing read;
   `BuildPsbtResult::fee` reports what was actually left over. Change below the
   dust threshold folds into the fee, and the reported number says so.
 
-  Not yet wired into `lifecycle` — see below.
+  Also carries the Bitcoin **signing** path: BIP341 key-path sighashes,
+  signatures stored as `tap_key_sig`, and a finalizer that turns each into a
+  one-element witness. Only the inputs a caller names are touched, so a
+  transaction mixing wallet and covenant inputs can be signed here and have its
+  covenant inputs finalized by `covenant` without either clobbering the other.
+  Computing a sighash requires *every* input's prevout — a taproot sighash
+  commits to all spent outputs, so one missing `witness_utxo` would silently
+  change every signature — and a missing one is refused rather than worked
+  around.
+
+  `from_pset_request` narrows the Elements request the lifecycle already
+  assembles into a Bitcoin one. That assembly is ~800 lines of destination
+  resolution, covenant address derivation and state metadata, almost none of it
+  chain-specific, so there is one assembly path and the chains part company at
+  the build boundary rather than in two copies that drift. The conversion is a
+  narrowing, not a translation: assets, issuance, blinding and confidential
+  outputs are **refused rather than dropped**. `validate` already rejects those
+  on a Bitcoin manifest, so anything arriving here with them set got past a check
+  that should have caught it, and silently ignoring it would turn a bug in that
+  check into a transaction meaning something other than the manifest said.
+
+  Not yet dispatched from `lifecycle` — that remains the last integration step.
 
 - **`capabilities` command and `Manifest::supported_by` — the support check
   `requires` exists for.** A third-party wallet answers "do I handle this file"

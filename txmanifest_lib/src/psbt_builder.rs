@@ -24,13 +24,18 @@
 
 use std::collections::HashMap;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context as _, Result};
 use lwk_wollet::elements::bitcoin::{
     absolute::LockTime,
+    hashes::Hash as _,
     psbt::{Input as PsbtInputData, Output as PsbtOutputData, Psbt},
+    sighash::{Prevouts, SighashCache, TapSighashType},
+    taproot::Signature as TaprootSignature,
     transaction::Version,
     Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
+
+use crate::bitcoin_wallet::{BitcoinWallet, Branch};
 
 /// Weight units per virtual byte.
 const WU_PER_VBYTE: usize = 4;
@@ -53,6 +58,7 @@ const KEYSPEND_WITNESS_WU: usize = 66;
 // ---------------------------------------------------------------------------
 
 /// One input to spend. Mirrors `pset_builder::PsetInput` minus the Elements-only arms.
+#[derive(Debug)]
 pub enum PsbtInput {
     /// A wallet-owned UTXO, spent by key path.
     Wallet {
@@ -128,11 +134,13 @@ impl PsbtInput {
 }
 
 /// One declared output.
+#[derive(Debug)]
 pub struct PsbtOutputSpec {
     pub script_pubkey: ScriptBuf,
     pub amount: u64,
 }
 
+#[derive(Debug)]
 pub struct BuildPsbtRequest {
     pub inputs: Vec<PsbtInput>,
     pub outputs: Vec<PsbtOutputSpec>,
@@ -396,7 +404,6 @@ pub fn input_indices(req: &BuildPsbtRequest) -> HashMap<String, usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lwk_wollet::elements::bitcoin::hashes::Hash as _;
 
     fn outpoint(n: u8) -> OutPoint {
         OutPoint {
@@ -602,6 +609,247 @@ mod tests {
         assert!(covenant > keyspend, "covenant {covenant} should cost more than keyspend {keyspend}");
     }
 
+    // -- narrowing from the Elements request -------------------------------
+
+    fn policy() -> lwk_wollet::elements::AssetId {
+        lwk_wollet::elements::AssetId::from_slice(&[1u8; 32]).unwrap()
+    }
+
+    fn other_asset() -> lwk_wollet::elements::AssetId {
+        lwk_wollet::elements::AssetId::from_slice(&[2u8; 32]).unwrap()
+    }
+
+    fn el_script() -> lwk_wollet::elements::Script {
+        let mut v = vec![0x51, 0x20];
+        v.extend_from_slice(&[0xcd; 32]);
+        lwk_wollet::elements::Script::from(v)
+    }
+
+    fn el_outpoint() -> lwk_wollet::elements::OutPoint {
+        lwk_wollet::elements::OutPoint {
+            txid: lwk_wollet::elements::Txid::from_slice(&[3u8; 32]).unwrap(),
+            vout: 2,
+        }
+    }
+
+    fn covenant_pset_request(asset: lwk_wollet::elements::AssetId) -> crate::pset_builder::BuildPsetRequest {
+        crate::pset_builder::BuildPsetRequest {
+            inputs: vec![crate::pset_builder::PsetInput::Covenant {
+                input_id: "cov".to_string(),
+                outpoint: el_outpoint(),
+                script_pubkey: el_script(),
+                asset,
+                amount: 100_000,
+                issuance: None,
+                sequence: Some(144),
+                blinding: None,
+            }],
+            outputs: vec![crate::pset_builder::PsetOutputSpec {
+                script_pubkey: el_script(),
+                amount: 60_000,
+                asset,
+                blinding_key: None,
+                blinding: None,
+            }],
+            fee_rate: 2.0,
+            policy_asset: policy(),
+            change_assets: std::collections::HashSet::from([policy()]),
+        }
+    }
+
+    /// Scripts and outpoints carry across unchanged — an Elements and a Bitcoin P2TR
+    /// scriptPubKey are the same bytes, and only the address encoding differs.
+    #[test]
+    fn narrowing_preserves_scripts_outpoints_and_sequences() {
+        let pset = covenant_pset_request(policy());
+        let psbt = from_pset_request(&pset, Some(p2tr(7))).expect("narrows");
+
+        assert_eq!(psbt.inputs.len(), 1);
+        assert_eq!(psbt.inputs[0].amount(), 100_000);
+        let PsbtInput::Covenant { script_pubkey, outpoint: op, .. } = &psbt.inputs[0] else {
+            panic!("covenant input should stay a covenant input");
+        };
+        assert_eq!(script_pubkey.as_bytes(), el_script().as_bytes());
+        assert_eq!(op.vout, 2);
+        assert_eq!(op.txid.to_string(), el_outpoint().txid.to_string());
+
+        assert_eq!(psbt.outputs[0].amount, 60_000);
+        assert_eq!(psbt.outputs[0].script_pubkey.as_bytes(), el_script().as_bytes());
+        assert_eq!(psbt.fee_rate, 2.0);
+        assert_eq!(psbt.change_script, Some(p2tr(7)));
+    }
+
+    /// Change is emitted only where the action declared it, matching the Elements rule
+    /// that an undeclared surplus is an error rather than an invented output.
+    #[test]
+    fn change_is_dropped_when_the_action_declared_none() {
+        let mut pset = covenant_pset_request(policy());
+        pset.change_assets.clear();
+        let psbt = from_pset_request(&pset, Some(p2tr(7))).expect("narrows");
+        assert_eq!(psbt.change_script, None);
+    }
+
+    /// The refusals are the point of this function. Each of these got past `validate`,
+    /// which should have caught it — so dropping the field silently would turn a bug in
+    /// that check into a transaction meaning something other than the manifest said.
+    #[test]
+    fn anything_bitcoin_cannot_express_is_refused_rather_than_dropped() {
+        // A second asset, on an input.
+        let mut pset = covenant_pset_request(other_asset());
+        pset.outputs[0].asset = policy();
+        let err = from_pset_request(&pset, None).expect_err("second asset").to_string();
+        assert!(err.contains("only one asset"), "{err}");
+
+        // A second asset, on an output.
+        let mut pset = covenant_pset_request(policy());
+        pset.outputs[0].asset = other_asset();
+        let err = from_pset_request(&pset, None).expect_err("second asset").to_string();
+        assert!(err.contains("only one asset"), "{err}");
+
+        // A confidential output.
+        let mut pset = covenant_pset_request(policy());
+        pset.outputs[0].blinding_key = Some(lwk_wollet::elements::bitcoin::PublicKey::from_slice(
+            &[
+                2, 0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35,
+                0xe9, 0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf,
+                0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
+            ],
+        ).unwrap());
+        let err = from_pset_request(&pset, None).expect_err("confidential").to_string();
+        assert!(err.contains("always explicit"), "{err}");
+
+        // Pinned blinding factors on a covenant input.
+        let mut pset = covenant_pset_request(policy());
+        if let crate::pset_builder::PsetInput::Covenant { blinding, .. } = &mut pset.inputs[0] {
+            *blinding = Some(crate::pset_builder::PinnedBlinding::default());
+        }
+        let err = from_pset_request(&pset, None).expect_err("blinding").to_string();
+        assert!(err.contains("always explicit"), "{err}");
+
+        // Change declared in a non-policy asset.
+        let mut pset = covenant_pset_request(policy());
+        pset.change_assets.insert(other_asset());
+        let err = from_pset_request(&pset, None).expect_err("change asset").to_string();
+        assert!(err.contains("only one asset"), "{err}");
+    }
+
+    /// A narrowed request must build, so the two halves actually compose.
+    #[test]
+    fn a_narrowed_request_builds() {
+        let pset = covenant_pset_request(policy());
+        let psbt_req = from_pset_request(&pset, Some(p2tr(7))).expect("narrows");
+        let built = build_psbt(&psbt_req).expect("builds");
+        assert_eq!(built.psbt.unsigned_tx.input[0].sequence.to_consensus_u32(), 144);
+        let total_out: u64 = built.psbt.unsigned_tx.output.iter().map(|o| o.value.to_sat()).sum();
+        assert_eq!(100_000 - total_out, built.fee);
+    }
+
+    // -- signing ----------------------------------------------------------
+
+    const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
+                            abandon abandon abandon about";
+
+    fn signing_wallet() -> BitcoinWallet {
+        BitcoinWallet::from_mnemonic(MNEMONIC, crate::chain::Network::BitcoinSignet).unwrap()
+    }
+
+    /// A request spending one wallet-owned output, so the prevout's scriptPubKey really is
+    /// the one the signing key controls.
+    fn owned_request(w: &BitcoinWallet) -> BuildPsbtRequest {
+        BuildPsbtRequest {
+            inputs: vec![PsbtInput::Wallet {
+                input_id: "i0".to_string(),
+                outpoint: outpoint(1),
+                witness_utxo: TxOut {
+                    value: Amount::from_sat(100_000),
+                    script_pubkey: w.script_pubkey(Branch::Receive, 0).unwrap(),
+                },
+                sequence: None,
+            }],
+            outputs: vec![PsbtOutputSpec { script_pubkey: p2tr(1), amount: 60_000 }],
+            fee_rate: 1.0,
+            change_script: Some(w.script_pubkey(Branch::Change, 0).unwrap()),
+            lock_time: None,
+        }
+    }
+
+    /// The signature must verify against the output key the spent output actually commits
+    /// to — the tweaked one. Nothing else in this pipeline checks that, and a signature
+    /// over the wrong key is well-formed and simply never spends.
+    #[test]
+    fn key_path_signatures_verify_against_the_spent_output() {
+        use lwk_wollet::elements::bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
+        use lwk_wollet::elements::bitcoin::key::TapTweak;
+
+        let w = signing_wallet();
+        let mut built = build_psbt(&owned_request(&w)).expect("builds");
+        let plan = [KeyPathSigner { input_index: 0, branch: Branch::Receive, index: 0 }];
+
+        let sighash = key_path_sighash(&built.psbt, 0).expect("sighash");
+        sign_key_path_inputs(&mut built.psbt, &w, &plan).expect("signs");
+
+        let sig = built.psbt.inputs[0].tap_key_sig.expect("signature stored");
+        let secp = Secp256k1::new();
+        let internal = w.internal_key(Branch::Receive, 0).unwrap();
+        let output_key = internal.tap_tweak(&secp, None).0.to_x_only_public_key();
+        assert!(secp
+            .verify_schnorr(&sig.signature, &Message::from_digest(sighash), &output_key)
+            .is_ok());
+        let _: Signature = sig.signature;
+    }
+
+    /// A taproot sighash commits to every spent output, so one missing prevout would
+    /// silently change every signature in the transaction. Refuse rather than sign.
+    #[test]
+    fn a_missing_prevout_blocks_signing_of_every_input() {
+        let w = signing_wallet();
+        let mut built = build_psbt(&owned_request(&w)).expect("builds");
+        built.psbt.inputs[0].witness_utxo = None;
+        let err = key_path_sighash(&built.psbt, 0).expect_err("must refuse").to_string();
+        assert!(err.contains("commits to every spent output"), "{err}");
+    }
+
+    /// Only the planned inputs are signed, so a mixed transaction can be signed here and
+    /// have its covenant inputs finalized elsewhere without either clobbering the other.
+    #[test]
+    fn covenant_inputs_are_left_for_the_covenant_finalizer() {
+        let w = signing_wallet();
+        let mut r = owned_request(&w);
+        r.inputs.push(PsbtInput::Covenant {
+            input_id: "cov".to_string(),
+            outpoint: outpoint(5),
+            script_pubkey: p2tr(4),
+            amount: 50_000,
+            sequence: None,
+        });
+        r.outputs[0].amount = 140_000;
+
+        let mut built = build_psbt(&r).expect("builds");
+        sign_key_path_inputs(
+            &mut built.psbt,
+            &w,
+            &[KeyPathSigner { input_index: 0, branch: Branch::Receive, index: 0 }],
+        )
+        .expect("signs");
+
+        assert!(built.psbt.inputs[0].tap_key_sig.is_some());
+        assert!(built.psbt.inputs[1].tap_key_sig.is_none(), "covenant input must be untouched");
+
+        finalize_key_path_inputs(&mut built.psbt).expect("finalizes");
+        let wit = built.psbt.inputs[0].final_script_witness.as_ref().expect("witness built");
+        // A SIGHASH_DEFAULT key-path witness is exactly one 64-byte signature.
+        assert_eq!(wit.len(), 1);
+        assert_eq!(wit.iter().next().unwrap().len(), 64);
+        assert!(built.psbt.inputs[1].final_script_witness.is_none());
+    }
+
+    #[test]
+    fn signing_an_out_of_range_input_is_refused() {
+        let w = signing_wallet();
+        let built = build_psbt(&owned_request(&w)).expect("builds");
+        assert!(key_path_sighash(&built.psbt, 7).is_err());
+    }
+
     #[test]
     fn input_indices_track_request_order() {
         let r = req(
@@ -611,5 +859,240 @@ mod tests {
         let idx = input_indices(&r);
         assert_eq!(idx["first"], 0);
         assert_eq!(idx["second"], 1);
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Signing
+// ---------------------------------------------------------------------------
+
+/// Which wallet key signs one input, for callers assembling a signing plan.
+///
+/// Covenant inputs are absent by construction: they are satisfied by a Simplicity witness,
+/// not by a wallet signature, and `covenant::finalize_covenant_input` handles them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyPathSigner {
+    pub input_index: usize,
+    pub branch: Branch,
+    pub index: u32,
+}
+
+/// The BIP341 sighash for a key-path spend of `input_index`.
+///
+/// `SIGHASH_DEFAULT` — the taproot default, committing to every input and output. The
+/// sighash commits to *all* spent outputs, not just this one, which is why every input's
+/// `witness_utxo` must be present before any of them can be signed: one missing prevout
+/// silently changes every signature in the transaction.
+pub fn key_path_sighash(psbt: &Psbt, input_index: usize) -> Result<[u8; 32]> {
+    let prevouts: Vec<TxOut> = psbt
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(i, inp)| {
+            inp.witness_utxo.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "input {i} has no witness_utxo, so no input in this transaction can be \
+                     signed: a taproot sighash commits to every spent output"
+                )
+            })
+        })
+        .collect::<Result<_>>()?;
+
+    if input_index >= prevouts.len() {
+        bail!("input {input_index} is out of range for a transaction with {} inputs", prevouts.len());
+    }
+
+    let mut cache = SighashCache::new(&psbt.unsigned_tx);
+    let sighash = cache
+        .taproot_key_spend_signature_hash(
+            input_index,
+            &Prevouts::All(&prevouts),
+            TapSighashType::Default,
+        )
+        .map_err(|e| anyhow::anyhow!("cannot compute taproot sighash: {e}"))?;
+    Ok(sighash.to_byte_array())
+}
+
+/// Sign the listed key-path inputs in place, filling each one's `tap_key_sig`.
+///
+/// Only the inputs named in `plan` are touched, so a transaction mixing wallet and
+/// covenant inputs can be signed here and finalized elsewhere without either step
+/// clobbering the other's work.
+pub fn sign_key_path_inputs(
+    psbt: &mut Psbt,
+    wallet: &BitcoinWallet,
+    plan: &[KeyPathSigner],
+) -> Result<()> {
+    for entry in plan {
+        let sighash = key_path_sighash(psbt, entry.input_index)?;
+        let raw = wallet
+            .sign_key_path(entry.branch, entry.index, &sighash)
+            .with_context(|| format!("cannot sign input {}", entry.input_index))?;
+        let signature = lwk_wollet::elements::bitcoin::secp256k1::schnorr::Signature::from_slice(&raw)
+            .map_err(|e| anyhow::anyhow!("wallet produced an invalid signature: {e}"))?;
+        psbt.inputs[entry.input_index].tap_key_sig = Some(TaprootSignature {
+            signature,
+            // Must match the sighash type the signature was computed over. Storing a
+            // different one produces a witness the network rejects for a reason that
+            // points nowhere near the mistake.
+            sighash_type: TapSighashType::Default,
+        });
+    }
+    Ok(())
+}
+
+/// Move each signed key-path input's signature into its final witness.
+///
+/// A `SIGHASH_DEFAULT` key-path witness is exactly one 64-byte signature. Inputs with no
+/// `tap_key_sig` are left alone — those are the covenant inputs, whose witness is built by
+/// `covenant::finalize_covenant_input`.
+pub fn finalize_key_path_inputs(psbt: &mut Psbt) -> Result<()> {
+    for (i, input) in psbt.inputs.iter_mut().enumerate() {
+        let Some(sig) = input.tap_key_sig.take() else { continue };
+        if !input.final_script_witness.as_ref().is_none_or(Witness::is_empty) {
+            bail!("input {i} already has a final witness");
+        }
+        let mut witness = Witness::new();
+        witness.push(sig.to_vec());
+        input.final_script_witness = Some(witness);
+    }
+    Ok(())
+}
+
+/// Extract the signed transaction, ready to broadcast.
+pub fn extract_tx(psbt: Psbt) -> Result<Transaction> {
+    psbt.extract_tx()
+        .map_err(|e| anyhow::anyhow!("cannot extract transaction from PSBT: {e}"))
+}
+
+
+// ---------------------------------------------------------------------------
+// Narrowing from the Elements request
+// ---------------------------------------------------------------------------
+
+/// Build a Bitcoin request from the Elements one the lifecycle already assembles.
+///
+/// The lifecycle's input/output assembly is ~800 lines that resolve destinations, derive
+/// covenant addresses, evaluate amounts and record state metadata. Almost none of that is
+/// chain-specific, and duplicating it for Bitcoin would produce two copies that drift.
+/// So there is one assembly path, and the chains part company here.
+///
+/// This is a **narrowing**, not a translation: the Elements request is strictly richer,
+/// and every field Bitcoin cannot express is refused rather than dropped. That matters
+/// more than the convenience. `validate` already rejects a Bitcoin manifest that uses
+/// assets, issuance or blinding, so anything reaching this function with those set got
+/// past a check that should have caught it — and silently ignoring it would turn a bug in
+/// that check into a transaction that quietly means something other than the manifest
+/// said. Refusing keeps the failure loud and local.
+///
+/// `change_script` is supplied by the caller because the Elements request carries a set of
+/// change *assets* rather than a script; the Elements builder derives the address from the
+/// wallet at build time, and the Bitcoin builder cannot see a wallet.
+pub fn from_pset_request(
+    pset: &crate::pset_builder::BuildPsetRequest,
+    change_script: Option<ScriptBuf>,
+) -> Result<BuildPsbtRequest> {
+    use crate::pset_builder::PsetInput as EIn;
+
+    let policy = pset.policy_asset;
+
+    let mut inputs = Vec::with_capacity(pset.inputs.len());
+    for input in &pset.inputs {
+        let id = input.input_id();
+        match input {
+            EIn::Wallet { utxo, issuance, sequence, .. } => {
+                if issuance.is_some() {
+                    bail!("input '{id}' carries an asset issuance, which Bitcoin has no way to express");
+                }
+                if utxo.unblinded.asset != policy {
+                    bail!(
+                        "input '{id}' holds asset {}, but Bitcoin has only one asset",
+                        utxo.unblinded.asset
+                    );
+                }
+                inputs.push(PsbtInput::Wallet {
+                    input_id: id.to_string(),
+                    outpoint: convert_outpoint(utxo.outpoint),
+                    witness_utxo: TxOut {
+                        value: Amount::from_sat(utxo.unblinded.value),
+                        script_pubkey: convert_script(&utxo.script_pubkey),
+                    },
+                    sequence: *sequence,
+                });
+            }
+            EIn::Covenant { outpoint, script_pubkey, asset, amount, issuance, sequence, blinding, .. } => {
+                if issuance.is_some() {
+                    bail!("input '{id}' carries a reissuance, which Bitcoin has no way to express");
+                }
+                if blinding.is_some() {
+                    bail!("input '{id}' has blinding factors, but Bitcoin amounts are always explicit");
+                }
+                if *asset != policy {
+                    bail!("input '{id}' holds asset {asset}, but Bitcoin has only one asset");
+                }
+                inputs.push(PsbtInput::Covenant {
+                    input_id: id.to_string(),
+                    outpoint: convert_outpoint(*outpoint),
+                    script_pubkey: convert_script(script_pubkey),
+                    amount: *amount,
+                    sequence: *sequence,
+                });
+            }
+        }
+    }
+
+    let mut outputs = Vec::with_capacity(pset.outputs.len());
+    for (i, out) in pset.outputs.iter().enumerate() {
+        if out.blinding_key.is_some() {
+            bail!("output #{i} is confidential, but Bitcoin amounts are always explicit");
+        }
+        if out.blinding.is_some() {
+            bail!("output #{i} pins blinding factors, which Bitcoin has no way to express");
+        }
+        if out.asset != policy {
+            bail!("output #{i} pays asset {}, but Bitcoin has only one asset", out.asset);
+        }
+        outputs.push(PsbtOutputSpec {
+            script_pubkey: convert_script(&out.script_pubkey),
+            amount: out.amount,
+        });
+    }
+
+    for asset in &pset.change_assets {
+        if *asset != policy {
+            bail!("change was declared in asset {asset}, but Bitcoin has only one asset");
+        }
+    }
+
+    Ok(BuildPsbtRequest {
+        inputs,
+        outputs,
+        fee_rate: pset.fee_rate,
+        // A change output is emitted only where the action declared one, which on Bitcoin
+        // means the policy asset appeared in `change_assets`.
+        change_script: change_script.filter(|_| pset.change_assets.contains(&policy)),
+        // The Elements request has no transaction-level locktime; absolute timelocks reach
+        // a covenant through its own `check_lock_height` rather than through the builder.
+        lock_time: None,
+    })
+}
+
+/// An Elements script and a Bitcoin script are the same bytes.
+///
+/// Only the *address* encodings differ — a P2TR scriptPubKey is `OP_1 <32 bytes>` on both
+/// chains — so the conversion is a byte copy rather than a re-derivation.
+fn convert_script(script: &lwk_wollet::elements::Script) -> ScriptBuf {
+    ScriptBuf::from_bytes(script.as_bytes().to_vec())
+}
+
+/// Outpoints differ only in the txid's type; the bytes and display order match.
+fn convert_outpoint(outpoint: lwk_wollet::elements::OutPoint) -> OutPoint {
+    use lwk_wollet::elements::bitcoin::hashes::Hash as _;
+    OutPoint {
+        txid: lwk_wollet::elements::bitcoin::Txid::from_byte_array(
+            outpoint.txid.to_byte_array(),
+        ),
+        vout: outpoint.vout,
     }
 }

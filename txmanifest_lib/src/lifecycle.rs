@@ -1833,7 +1833,18 @@ pub fn run(
                             }
                         }
                     }
-                    Err(e) => println!("  {} Fee estimation failed (`fee` stays 0): {e}", style("[warn]").yellow()),
+                    // A formula that reads `fee` has no sane value to fall back on. The
+                    // old behaviour left `fee` at 0 and carried on, which turns "estimation
+                    // failed" into "every output computed as if the transaction were free" —
+                    // an amount that is wrong by exactly the fee. On Elements that surfaces
+                    // later as a build failure; on Bitcoin, where the fee is a leftover
+                    // rather than an output, it surfaces as a transaction that overpays by
+                    // whatever the outputs left behind. Neither is worth reaching by
+                    // default, so stop where the cause is still legible.
+                    Err(e) => return Err(e.context(
+                        "cannot resolve the `fee` keyword: an output amount depends on it, \
+                         so there is no safe value to continue with",
+                    )),
                 }
             }
 

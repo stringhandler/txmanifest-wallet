@@ -58,14 +58,29 @@ impl Config {
     }
 
     /// Return the Esplora URL: explicit override > network-appropriate default.
+    ///
+    /// The default follows the configured network across both chains — Esplora serves
+    /// Bitcoin and Liquid from the same REST shape at different base paths. A network this
+    /// build does not recognize keeps the historical Liquid default rather than erroring,
+    /// because this accessor has no way to report one and every config that reaches it
+    /// today is an Elements config.
     pub fn esplora_url(&self) -> &str {
-        self.default_esplora.as_deref().unwrap_or_else(|| {
-            if self.is_mainnet() {
-                "https://blockstream.info/liquid/api"
-            } else {
-                "https://blockstream.info/liquidtestnet/api"
-            }
-        })
+        if let Some(explicit) = self.default_esplora.as_deref() {
+            return explicit;
+        }
+        match self.network() {
+            Ok(net) => match net {
+                Network::Liquid => "https://blockstream.info/liquid/api",
+                Network::LiquidTestnet => "https://blockstream.info/liquidtestnet/api",
+                // No public Elements or Bitcoin regtest instance exists, so there is
+                // nothing honest to default to; the caller gets the testnet URL and will
+                // fail loudly against it rather than being pointed somewhere plausible.
+                Network::ElementsRegtest => "https://blockstream.info/liquidtestnet/api",
+                bitcoin_net => crate::bitcoin_backend::default_esplora_url(bitcoin_net)
+                    .unwrap_or("https://blockstream.info/signet/api"),
+            },
+            Err(_) => "https://blockstream.info/liquidtestnet/api",
+        }
     }
 
     /// Resolve the configured backend kind (defaults to Esplora).
@@ -214,6 +229,27 @@ mod tests {
         };
         let err = c.activation(c.network().unwrap()).unwrap_err().to_string();
         assert!(err.contains("extra_capabilities"), "{err}");
+    }
+
+    /// The Esplora default must follow the configured network across both chains, and an
+    /// explicit override must always win — pointing a Bitcoin wallet at a Liquid instance
+    /// would produce confusing decode failures rather than an obvious misconfiguration.
+    #[test]
+    fn esplora_defaults_follow_the_network() {
+        assert_eq!(cfg("liquid").esplora_url(), "https://blockstream.info/liquid/api");
+        assert_eq!(cfg("testnet").esplora_url(), "https://blockstream.info/liquidtestnet/api");
+        assert_eq!(cfg("bitcoin").esplora_url(), "https://blockstream.info/api");
+        assert_eq!(cfg("bitcoin-signet").esplora_url(), "https://blockstream.info/signet/api");
+        assert_eq!(
+            cfg("bitcoin-testnet").esplora_url(),
+            "https://blockstream.info/testnet/api"
+        );
+
+        let overridden = Config {
+            default_esplora: Some("http://localhost:3000".to_string()),
+            ..cfg("bitcoin-signet")
+        };
+        assert_eq!(overridden.esplora_url(), "http://localhost:3000");
     }
 
     #[test]

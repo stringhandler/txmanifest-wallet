@@ -1,5 +1,7 @@
 pub mod manifest;
 pub mod backend;
+pub mod bitcoin_backend;
+pub mod bitcoin_wallet;
 pub mod chain;
 pub mod canonical;
 pub mod config;
