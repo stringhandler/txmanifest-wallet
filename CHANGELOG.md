@@ -8,6 +8,94 @@ released together.
 
 No changelog was kept before 0.2.0; for 0.1.x see the git history.
 
+## [Unreleased]
+
+**Breaking:** `manifest_version` must now read `"0.3.0"`. The changes below make
+a `0.2.0` file read wrongly rather than fail, so the version moves. Every
+example was updated.
+
+**Breaking:** a manifest with covenant `utxo_types` must now declare
+`"requires": ["simplicity"]`, or `validate` fails.
+
+**Breaking:** `chain` is now a closed vocabulary — `elements`, `bitcoin`, and
+the aliases `liquid` and `btc`. It was a free-form string that nothing read;
+`cross-chain` was previously accepted with a warning and is now refused.
+
+### Added
+
+- **`chain` module — the seam between this engine and the ledger it targets.**
+  Everything here was written against Elements, where a great deal is assumed:
+  outputs carry an asset id, amounts may be blinded, the fee is its own `TxOut`,
+  taproot tags are domain-separated with `/elements`, and a Simplicity tapleaf
+  will be executed. None of that holds on Bitcoin. The module sorts those
+  assumptions by who settles them: `ChainFamily` properties follow from the
+  ledger, `Capability` is what a manifest must state because the chain does not
+  settle it, and `Activation` is what the specific node provides.
+
+- **`requires`: the features a manifest needs that `chain` does not already
+  imply.** Deliberately one core capability, `simplicity` — because it is the
+  only one the chain does not answer. It is live on Elements and a proposed soft
+  fork on Bitcoin (BINANA 2026-0003, leaf version `0xbe`, not activated on any
+  public network), so whether a Bitcoin node honours it is a property of that
+  node.
+
+  `validate` checks it both ways: a covenant manifest omitting `simplicity` is
+  an error, since `requires` is what a target gets checked against before a
+  build; declaring what nothing uses is a warning only, because the inference
+  reads field presence rather than semantics and must not block a run on its own
+  guess.
+
+  The empty list is the point of the field, not a degenerate case. A manifest
+  that declares nothing needs nothing a stock node lacks — which is exactly the
+  manifest that can target Bitcoin today.
+
+- **Namespaced capabilities.** A bare name is defined by this format and comes
+  from a closed set, so a typo is an error rather than a silently-ignored
+  request. A name containing `::` (`custom::my-feature`, `mosaik::tessera`)
+  belongs to whoever owns the namespace: this crate parses it, round-trips it
+  verbatim, and judges it in neither direction — never inferred, never reported
+  unused. A target satisfies one only by naming it in `Activation::extensions`.
+  Core names normalize `_` to `-`; namespaced ones do not, since rewriting them
+  would make two spellings this crate treats as equal and their owner may not.
+
+- **`Manifest::chain_mismatches`** reports, per field, where a manifest uses
+  something its chain lacks — an issuance input or a blinded output on Bitcoin.
+  This replaced the `multi-asset` / `asset-issuance` / `confidential-amounts`
+  capabilities: the check was worth keeping, but making an author *declare* them
+  was not, because `chain: "bitcoin"` already says there are no native assets. A
+  restatement is something that can disagree with itself. The rule now reads the
+  chain directly, and reports the dot-path of each site rather than one verdict —
+  an author porting a protocol needs the list, not the answer.
+
+  An `asset` naming the policy asset outright (`"lbtc"`) is single-asset
+  behaviour and stays clean on Bitcoin. That is how the portable examples here
+  are written, and counting it as multi-asset marked `p2pk` and `last_will`
+  unportable when they are the two that port most cleanly.
+
+### Changed
+
+- **Taproot tag domains are derived from the chain rather than hardcoded.**
+  `build_tapbranch` took the `TapBranch/elements` tag as a constant; it now takes
+  a `ChainFamily`, as do `dry_run_covenant` and `finalize_covenant_input`.
+  `compute_covenant_address` derives it from the network it already receives, so
+  no caller changed. This is the one change here that cannot fail loudly: the
+  wrong tag yields a well-formed address that no script path can ever satisfy,
+  so it is now pinned by a test that cross-checks the Elements branch against
+  `rust-elements`' own tag.
+
+- **The Simplicity leaf version comes from one constant for both chains.**
+  `simplicity::leaf_version()` returns an `elements::taproot::LeafVersion`,
+  which is the wrong type the moment a Bitcoin tree is built. The byte is the
+  same either way (`0xbe`, matching `TAPROOT_LEAF_TAPSIMPLICITY` in the Bitcoin
+  proposal), so it is now `chain::SIMPLICITY_LEAF_VERSION`.
+
+- **The generated JSON Schema matches the parser exactly** for the two new
+  types. The `schemars` derive emits only canonical spellings, which would make
+  an editor flag `"chain": "liquid"` in files this engine reads happily —
+  including every example here. `Capability`'s schema is an `anyOf` of the
+  closed core list and a namespace pattern, since an `enum` cannot express a set
+  that is closed at one end and open at the other.
+
 ## [0.2.0] - 2026-08-20
 
 **Breaking:** a manifest that sets `utxo_type.confidential` no longer parses.

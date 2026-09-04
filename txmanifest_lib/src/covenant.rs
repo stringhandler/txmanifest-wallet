@@ -9,6 +9,7 @@ use lwk_wollet::elements::{
     taproot::{ControlBlock, LeafVersion, TaprootMerkleBranch, TaprootSpendInfo},
     Address, AddressParams, BlockHash, Script, Transaction, TxOut,
 };
+use crate::chain::{ChainFamily, Network, TaprootTag, SIMPLICITY_LEAF_VERSION};
 use simplicityhl::ast::ElementsJetHinter;
 use simplicityhl::simplicity::bit_machine::{ExecTracker, FrameIter, NodeOutput};
 use simplicityhl::simplicity::jet::elements::{ElementsEnv, ElementsUtxo};
@@ -20,9 +21,14 @@ use simplicityhl::{
 /// Signs `(key_label, kind, sighash)` and returns a 64-byte Schnorr signature.
 type SigSigner = dyn Fn(&str, &str, &[u8; 32]) -> Result<[u8; 64]>;
 
-/// Simplicity leaf version for Elements/Liquid.
+/// Taproot leaf version for a Simplicity tapleaf.
+///
+/// Sourced from [`SIMPLICITY_LEAF_VERSION`] rather than `simplicity::leaf_version()` so
+/// that one constant governs both chains. The upstream helper returns an
+/// `elements::taproot::LeafVersion` specifically, which is the wrong return type the
+/// moment a Bitcoin tree is being built — the byte itself is the same on both.
 fn simplicity_leaf_version() -> LeafVersion {
-    simplicity::leaf_version()
+    LeafVersion::from_u8(SIMPLICITY_LEAF_VERSION).expect("constant leaf version")
 }
 
 /// The NUMS (Nothing-Up-My-Sleeve) internal key for covenant Taproot outputs.
@@ -374,6 +380,8 @@ pub fn dry_run_covenant(
     witness_utxos: &[TxOut],
     input_index: u32,
     genesis_hash: BlockHash,
+    // Chain whose taproot tag domain the tree is built under; see `build_tapbranch`.
+    family: ChainFamily,
     debug_jets: bool,
     opts: impl Into<CompileOpts>,
 ) -> Result<()> {
@@ -486,7 +494,7 @@ pub fn dry_run_covenant(
     for payload in extra_leaf_payloads {
         let extra = tapdata_hash(payload);
         sibling_hashes.push(sha256::Hash::from_byte_array(extra));
-        merkle_root_bytes = build_tapbranch(merkle_root_bytes, extra);
+        merkle_root_bytes = build_tapbranch(family, merkle_root_bytes, extra);
     }
 
     let tap_node = tap_node_hash_from_bytes(merkle_root_bytes);
@@ -679,6 +687,8 @@ pub fn finalize_covenant_input(
     witness_utxos: &[TxOut],
     input_index: u32,
     genesis_hash: BlockHash,
+    // Chain whose taproot tag domain the tree is built under; see `build_tapbranch`.
+    family: ChainFamily,
     pset_input: &mut lwk_wollet::elements::pset::Input,
     opts: impl Into<CompileOpts>,
 ) -> Result<()> {
@@ -713,7 +723,7 @@ pub fn finalize_covenant_input(
     for payload in extra_leaf_payloads {
         let extra = tapdata_hash(payload);
         sibling_hashes.push(sha256::Hash::from_byte_array(extra));
-        merkle_root_bytes = build_tapbranch(merkle_root_bytes, extra);
+        merkle_root_bytes = build_tapbranch(family, merkle_root_bytes, extra);
     }
 
     let tap_node = tap_node_hash_from_bytes(merkle_root_bytes);
@@ -790,6 +800,7 @@ pub fn compute_covenant_address(
     opts: impl Into<CompileOpts>,
 ) -> Result<Address> {
     let opts = opts.into();
+    let family = Network::from(network).family();
     eprintln!(
         "[covenant] compute_covenant_address: {} extra leaf(s), simf={}",
         extra_leaf_payloads.len(),
@@ -850,7 +861,7 @@ pub fn compute_covenant_address(
                 hex_bytes(payload),
                 hex_bytes(&extra)
             );
-            root = build_tapbranch(root, extra);
+            root = build_tapbranch(family, root, extra);
         }
         root
     };
@@ -1198,9 +1209,14 @@ fn tapdata_hash(data: &[u8]) -> [u8; 32] {
     sha256::Hash::from_engine(engine).to_byte_array()
 }
 
-/// TapBranch hash (Elements variant): SHA256(SHA256(tag) || SHA256(tag) || min(a,b) || max(a,b)).
-fn build_tapbranch(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
-    let tag_hash = sha256::Hash::hash(b"TapBranch/elements");
+/// TapBranch hash: SHA256(SHA256(tag) || SHA256(tag) || min(a,b) || max(a,b)).
+///
+/// The tag is domain-separated per chain (`TapBranch/elements` vs `TapBranch`), which is
+/// why `family` is a parameter and not a constant: the same covenant tree yields a
+/// different merkle root, and therefore a different address, on each chain. Getting this
+/// wrong produces a valid-looking address that nothing can ever spend.
+fn build_tapbranch(family: ChainFamily, a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
+    let tag_hash = sha256::Hash::hash(family.taproot_tag(TaprootTag::Branch).as_bytes());
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
     let mut engine = sha256::HashEngine::default();
     engine.input(&tag_hash[..]);
@@ -1227,6 +1243,46 @@ fn network_to_params(network: lwk_wollet::ElementsNetwork) -> &'static AddressPa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tag domain must actually change the tree, and must match Elements' published
+    /// tag on the chain this engine already ships against.
+    ///
+    /// A wrong tag here is the worst class of bug this module can have: it yields a
+    /// perfectly well-formed address that no script path can ever satisfy, and the funds
+    /// sent to it are unrecoverable. Nothing downstream would catch it — an address is a
+    /// hash, and a wrong hash looks exactly like a right one.
+    #[test]
+    fn tapbranch_is_domain_separated_per_chain() {
+        let a = [0x11u8; 32];
+        let b = [0x22u8; 32];
+
+        let elements = build_tapbranch(ChainFamily::Elements, a, b);
+        let bitcoin = build_tapbranch(ChainFamily::Bitcoin, a, b);
+        assert_ne!(
+            elements, bitcoin,
+            "the two chains must not produce the same merkle root"
+        );
+
+        // Cross-check the Elements branch against rust-elements' own TapBranch tag, so a
+        // typo in our tag string cannot pass by agreeing with itself.
+        let expected = {
+            use lwk_wollet::elements::taproot::TapNodeHash;
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            let mut engine = TapNodeHash::engine();
+            engine.input(&lo);
+            engine.input(&hi);
+            TapNodeHash::from_engine(engine).to_byte_array()
+        };
+        assert_eq!(elements, expected, "Elements TapBranch tag disagrees with rust-elements");
+    }
+
+    /// Both chains reserve the same leaf version for Simplicity, so this is a constant
+    /// rather than a per-chain value. Pinned because the whole tapleaf hash depends on it.
+    #[test]
+    fn simplicity_leaf_version_is_0xbe() {
+        assert_eq!(simplicity_leaf_version().as_u8(), 0xbe);
+        assert_eq!(simplicity_leaf_version(), simplicity::leaf_version());
+    }
 
     /// Build a `WitnessTypes` the way a compiled program hands one over.
     fn witness_types(entries: &[(&str, simplicityhl::ResolvedType)]) -> WitnessTypes {
@@ -1361,7 +1417,7 @@ mod tests {
     #[test]
     fn unstable_features_gate_a_program_that_uses_enums() {
         let manifest = crate::manifest::Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "simplicity_hl": { "unstable_features": ["enums"] } }"#,
         )
         .expect("manifest should parse");

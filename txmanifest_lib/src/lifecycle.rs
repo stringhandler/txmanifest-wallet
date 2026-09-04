@@ -2004,6 +2004,7 @@ pub fn run(
                                 let utxos: Vec<lwk_wollet::elements::TxOut> =
                                     witness_utxos.into_iter().flatten().collect();
                                 let genesis_hash = network_genesis_hash(net_for_hash);
+                                let chain_family = crate::chain::Network::from(net_for_hash).family();
 
                                 let action_inputs = action.inputs.as_deref().unwrap_or_default();
                                 let mut exec_all_ok = true;
@@ -2082,6 +2083,7 @@ pub fn run(
                                         &utxos,
                                         pset_idx as u32,
                                         genesis_hash,
+                                        chain_family,
                                         debug_jets,
                                         &compile_opts,
                                     ) {
@@ -2164,6 +2166,7 @@ pub fn run(
                             
                             let tx = Arc::new(tx);
                             let genesis_hash = network_genesis_hash(net_for_hash);
+                            let chain_family = crate::chain::Network::from(net_for_hash).family();
                             let action_inputs = action.inputs.as_deref().unwrap_or_default();
                             let mut all_finalized = true;
 
@@ -2248,6 +2251,7 @@ pub fn run(
                                     &utxos,
                                     pset_idx as u32,
                                     genesis_hash,
+                                    chain_family,
                                     &mut pset.inputs_mut()[pset_idx],
                                     &compile_opts,
                                 ) {
@@ -3878,7 +3882,7 @@ mod tests {
                     None => String::new(),
                 };
                 Manifest::from_json_str(&format!(
-                    r#"{{ "manifest_version": "0.2.0", "protocol": "t", "actions": {{ "A": {{ "outputs": [
+                    r#"{{ "manifest_version": "0.3.0", "protocol": "t", "actions": {{ "A": {{ "outputs": [
                          {{ "id": "o0", "amount_sat": "1", "destination": "params.a"{extra} }} ] }} }} }}"#
                 ))
                 .expect("manifest should parse")
@@ -3918,7 +3922,7 @@ mod tests {
     #[test]
     fn closed_utxo_type_resolves_each_site_independently() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "actions": { "A": { "params": { "claim": { "type": "bytes32" } } } },
                  "utxo_types": { "prize": {
                    "description": "d",
@@ -3966,7 +3970,7 @@ mod tests {
     #[test]
     fn closed_utxo_type_cannot_read_action_scope() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "actions": { "A": { "params": { "claim": { "type": "bytes32" } } } },
                  "utxo_types": {
                    "leaky_leaf": {
@@ -4035,7 +4039,7 @@ mod tests {
     #[test]
     fn declared_inputs_that_never_reach_the_pset_are_detected() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": { "inputs": [
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "actions": { "A": { "inputs": [
                  { "id": "contest_in", "utxo_source": "prize_covenant" },
                  { "id": "fees_in",    "utxo_source": "wallet" } ] } } }"#,
         )
@@ -4087,7 +4091,7 @@ mod tests {
     #[test]
     fn change_outputs_are_never_skipped_for_a_missing_amount() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": { "outputs": [
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "actions": { "A": { "outputs": [
                  { "id": "change_out",   "asset": "lbtc", "destination": "change" },
                  { "id": "opt_change",   "asset": "lbtc", "destination": "change", "optional": true },
                  { "id": "opt_wallet",   "asset": "lbtc", "destination": "wallet", "optional": true },

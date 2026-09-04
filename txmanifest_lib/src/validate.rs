@@ -195,15 +195,7 @@ pub fn validate(manifest: &Manifest) -> Report {
     if manifest.protocol.trim().is_empty() {
         report.warn("protocol", "protocol identifier is empty");
     }
-    if let Some(chain) = &manifest.chain {
-        let c = chain.to_lowercase();
-        if !matches!(c.as_str(), "bitcoin" | "elements" | "liquid" | "cross-chain") {
-            report.warn(
-                "chain",
-                format!("unrecognized chain '{chain}' (expected bitcoin, liquid/elements, or cross-chain)"),
-            );
-        }
-    }
+    check_capabilities(&mut report, manifest);
     if actions.is_empty() {
         report.warn("actions", "no actions or class methods are defined");
     }
@@ -897,13 +889,164 @@ mod tests {
     use super::*;
     use crate::manifest::Manifest;
 
+    /// Build a minimal manifest with the given `chain`/`requires` and one covenant type.
+    fn caps_manifest(chain: &str, requires: &str, extra_out: &str) -> Manifest {
+        Manifest::from_json_str(&format!(
+            r#"{{ "manifest_version": "0.3.0", "protocol": "t",
+                  "chain": "{chain}", "requires": {requires},
+                  "utxo_types": {{ "v": {{ "description": "d",
+                    "script": {{ "type": "simplicity", "source": "./x.simf" }} }} }},
+                  "actions": {{ "A": {{ "outputs": [ {{ "id": "o0", "amount_sat": "1",
+                    "destination": {{ "utxo_type": "v" }}{extra_out} }} ] }} }} }}"#
+        ))
+        .expect("manifest should parse")
+    }
+
+    fn messages(report: &Report) -> String {
+        report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn a_covenant_manifest_must_declare_simplicity() {
+        let report = validate(&caps_manifest("elements", r#"[]"#, ""));
+        assert!(!report.is_ok(), "undeclared capability must be an error");
+        assert!(
+            messages(&report).contains("uses 'simplicity' but does not declare it"),
+            "{}",
+            messages(&report)
+        );
+
+        let report = validate(&caps_manifest("elements", r#"["simplicity"]"#, ""));
+        assert!(report.is_ok(), "{:?}", report.issues);
+    }
+
+    /// Simplicity is legal to *declare* on Bitcoin — it is a specified soft fork, and
+    /// whether a given node honours it is settled by the target, not by `validate`.
+    #[test]
+    fn declaring_simplicity_on_bitcoin_is_not_a_static_error() {
+        let report = validate(&caps_manifest("bitcoin", r#"["simplicity"]"#, ""));
+        assert!(report.is_ok(), "{:?}", report.issues);
+    }
+
+    /// The check that replaced the `multi-asset` capability. It reads `chain` directly, so
+    /// there is nothing the author could add to `requires` to satisfy it — and the finding
+    /// points at the field, not at the manifest.
+    #[test]
+    fn a_non_policy_asset_on_bitcoin_is_flagged_at_the_field() {
+        let report = validate(&caps_manifest(
+            "bitcoin",
+            r#"["simplicity"]"#,
+            r#", "asset": "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5""#,
+        ));
+        assert!(!report.is_ok());
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.message.contains("native assets"))
+            .expect("asset mismatch must be reported");
+        assert_eq!(issue.location, "actions.A.outputs.o0.asset");
+        assert!(issue.message.contains("chain 'bitcoin' has no native assets"), "{}", issue.message);
+        // Nothing suggests adding a capability, because no capability would help.
+        assert!(!messages(&report).contains("to `requires`"), "{}", messages(&report));
+    }
+
+    /// Naming the policy asset is single-asset behaviour and stays clean on Bitcoin — this
+    /// is how the portable examples in this repo are written.
+    #[test]
+    fn naming_the_policy_asset_is_fine_on_bitcoin() {
+        let report = validate(&caps_manifest("bitcoin", r#"["simplicity"]"#, r#", "asset": "lbtc""#));
+        assert!(report.is_ok(), "{:?}", report.issues);
+    }
+
+    #[test]
+    fn issuance_and_blinding_on_bitcoin_are_flagged() {
+        let m = Manifest::from_json_str(
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "chain": "bitcoin",
+                 "requires": [],
+                 "actions": { "A": { "inputs": [ { "id": "i0", "utxo_source": "wallet",
+                   "issuance": { "kind": "new", "asset_amount_sat": "1",
+                                 "inflation_amount_sat": "0" } } ],
+                   "outputs": [ { "id": "o0", "amount_sat": "1", "destination": "wallet",
+                                  "confidential": true } ] } } }"#,
+        )
+        .expect("manifest should parse");
+        let report = validate(&m);
+        let msg = messages(&report);
+        assert!(msg.contains("has no asset issuance"), "{msg}");
+        assert!(msg.contains("has no confidential amounts"), "{msg}");
+        // ...and all of it is clean on Elements, with no `requires` entries needed.
+        let elements = Manifest::from_json_str(
+            &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../examples/deadcat_v3/txmanifest.json"))
+                .expect("read deadcat_v3"),
+        )
+        .expect("deadcat_v3 parses");
+        assert!(elements.chain_mismatches().is_empty(), "{:?}", elements.chain_mismatches());
+    }
+
+    #[test]
+    fn declaring_more_than_you_use_is_only_a_warning() {
+        // No covenant types, but `simplicity` declared.
+        let m = Manifest::from_json_str(
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "chain": "bitcoin",
+                 "requires": ["simplicity"],
+                 "actions": { "Pay": { "outputs": [ { "id": "o0", "amount_sat": "1000",
+                   "destination": "wallet" } ] } } }"#,
+        )
+        .expect("manifest should parse");
+        let report = validate(&m);
+        assert!(report.is_ok(), "overdeclaring must not block a run: {:?}", report.issues);
+        assert!(
+            messages(&report).contains("declares 'simplicity' but nothing"),
+            "{}",
+            messages(&report)
+        );
+    }
+
+    /// A namespaced capability is judged in neither direction: never inferred, never
+    /// reported unused. This crate does not know what it means, and guessing either way
+    /// would be worse than silence.
+    #[test]
+    fn a_namespaced_capability_is_carried_without_judgement() {
+        let report = validate(&caps_manifest(
+            "elements",
+            r#"["simplicity", "custom::my-feature"]"#,
+            "",
+        ));
+        assert!(report.is_ok(), "{:?}", report.issues);
+        assert!(
+            !messages(&report).contains("custom::my-feature"),
+            "an unknown-but-valid namespace must not be second-guessed: {}",
+            messages(&report)
+        );
+    }
+
+    /// A manifest that declares nothing and uses nothing is portable to stock Bitcoin —
+    /// the case that motivates `requires` having a meaningful empty value.
+    #[test]
+    fn a_plain_manifest_validates_on_bitcoin() {
+        let m = Manifest::from_json_str(
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "chain": "bitcoin",
+                 "requires": [],
+                 "actions": { "Pay": { "outputs": [ { "id": "o0", "amount_sat": "1000",
+                   "destination": "wallet", "asset": "lbtc" } ] } } }"#,
+        )
+        .expect("manifest should parse");
+        let report = validate(&m);
+        assert!(
+            report.is_ok() && !messages(&report).contains("requires"),
+            "a plain payment manifest must raise no capability findings: {}",
+            messages(&report)
+        );
+    }
+
     /// Every site that names a closed `utxo_type` must bind what that type requires —
     /// statically, before a run derives an address from a value nobody supplied.
     #[test]
     fn sites_must_bind_a_closed_utxo_types_required_params() {
         let validate_site = |dest: &str| {
             let manifest = Manifest::from_json_str(&format!(
-                r#"{{ "manifest_version": "0.2.0", "protocol": "t",
+                r#"{{ "manifest_version": "0.3.0", "protocol": "t",
+                      "requires": ["simplicity"],
                       "actions": {{ "A": {{
                         "params": {{ "claim": {{ "type": "bytes32" }} }},
                         "outputs": [ {{ "id": "o0", "amount_sat": "1", "destination": {dest} }} ] }} }},
@@ -936,7 +1079,7 @@ mod tests {
 
         // `args` against a type with no interface binds nothing — say so.
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "actions": { "A": { "outputs": [ { "id": "o0", "amount_sat": "1",
                    "destination": { "utxo_type": "plain", "args": { "X": "1" } } } ] } },
                  "utxo_types": { "plain": { "description": "d",
@@ -952,7 +1095,7 @@ mod tests {
     /// given `witnesses` JSON, then validate it.
     fn validate_with_input_witnesses(witnesses: Value) -> Report {
         let manifest: Manifest = serde_json::from_value(serde_json::json!({
-            "manifest_version": "0.2.0",
+            "manifest_version": "0.3.0",
             "protocol": "test",
             "actions": {
                 "A": {
@@ -1134,7 +1277,7 @@ mod tests {
     /// with `PRINCIPAL_ASSET_ID` (an asset) and `AMOUNT` (a u64) declared as fields.
     fn validate_with_ui(intent: Option<&str>, legs: Value) -> Report {
         let manifest: Manifest = Manifest::from_json_str(&serde_json::json!({
-            "manifest_version": "0.2.0",
+            "manifest_version": "0.3.0",
             "protocol": "test",
             "contract_templates": { "T": {
                 "fields": {
@@ -1233,7 +1376,7 @@ mod tests {
         // A standalone action has no enclosing template, so there is nothing for it
         // to construct — and the old `create_instance.template` let it name any.
         let manifest: Manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "actions": { "A": { "create_instance": { "fields": {} } } } }"#,
         )
         .expect("test manifest should parse");
@@ -1250,7 +1393,7 @@ mod tests {
     #[test]
     fn create_instance_inside_a_template_is_accepted() {
         let manifest: Manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "contract_templates": { "T": { "fields": {},
                    "actions": { "A": { "create_instance": { "fields": {} } } } } } }"#,
         )
@@ -1274,7 +1417,7 @@ mod tests {
     fn validate_with_hook_and_params(set: Value, params: Value) -> Report {
         let manifest: Manifest = Manifest::from_json_str(
             &serde_json::json!({
-                "manifest_version": "0.2.0",
+                "manifest_version": "0.3.0",
                 "protocol": "test",
                 "actions": { "A": { "params": params, "on_pre_broadcast": { "set": set } } }
             })
@@ -1389,7 +1532,7 @@ mod tests {
     fn on_resolved_hooks_are_checked_too() {
         // The input hook and the action hook are one type now, so one rule covers both.
         let manifest: Manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": { "inputs": [
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "actions": { "A": { "inputs": [
                  { "id": "in0", "utxo_source": "wallet", "on_resolved": { "set": {
                    "instance.K": { "type": "wallet", "wallet": "key" } } } } ] } } }"#,
         )
@@ -1399,6 +1542,61 @@ mod tests {
             !errors_at(&report, "actions.A.inputs.in0.on_resolved.set.instance.K").is_empty(),
             "expected the input hook to be checked, got: {:?}",
             report.issues
+        );
+    }
+}
+
+/// Cross-check `requires` against what the manifest uses, and the manifest against its chain.
+///
+/// Two independent checks, because they fail for different reasons and need different
+/// fixes:
+///
+/// 1. **`requires` vs. contents** — a covenant manifest that does not declare
+///    `simplicity`. An error: `requires` is what a target gets checked against before a
+///    build, so a gap here means the check passes and the broadcast fails. The reverse —
+///    declaring what nothing uses — is a warning only, because inference reads field
+///    presence rather than semantics and must not block a run on its own guess.
+/// 2. **Contents vs. `chain`** — an issuance input on a Bitcoin manifest. An error, and
+///    not expressible through `requires` at all: `chain: "bitcoin"` already says there is
+///    no issuance, so there is nothing an author could add to `requires` to make it work.
+///    The fix is to change the manifest or change the chain.
+///
+/// Namespaced capabilities are checked in neither direction. This crate cannot know what
+/// `custom::my-feature` means, so it will not claim the manifest needs it, and will not
+/// claim it does not.
+fn check_capabilities(report: &mut Report, manifest: &Manifest) {
+    let family = manifest.chain_family();
+    let declared = &manifest.requires;
+    let inferred = manifest.inferred_capabilities();
+
+    for used in inferred.iter() {
+        if !declared.contains(used) {
+            report.error(
+                "requires",
+                format!("manifest uses '{used}' but does not declare it; add \"{used}\" to `requires`"),
+            );
+        }
+    }
+
+    for extra in declared.iter() {
+        // Only core capabilities can be judged unused — a namespaced one is satisfied by
+        // machinery this crate has never seen, so silence is the only honest answer.
+        if !extra.is_core() || inferred.contains(extra) {
+            continue;
+        }
+        report.warn(
+            "requires",
+            format!("declares '{extra}' but nothing in this manifest appears to use it"),
+        );
+    }
+
+    for m in manifest.chain_mismatches() {
+        report.error(
+            m.location.clone(),
+            format!(
+                "uses {} but chain '{family}' has no {}",
+                m.uses, m.missing
+            ),
         );
     }
 }

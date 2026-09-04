@@ -138,6 +138,33 @@
       },
       "type": "object"
     },
+    "Capability": {
+      "anyOf": [
+        {
+          "description": "A capability defined by this format.",
+          "enum": [
+            "simplicity"
+          ]
+        },
+        {
+          "description": "A third-party capability, 'namespace::name'. This format does not define its meaning; a target provides it by listing it as an extension.",
+          "pattern": "^[a-z0-9][a-z0-9_-]*::[a-z0-9][a-z0-9_-]*$",
+          "type": "string"
+        }
+      ],
+      "description": "A ledger feature this manifest depends on that the 'chain' field does not already settle. Bare names are defined by this format; anything containing '::' belongs to the named namespace.",
+      "type": "string"
+    },
+    "ChainFamily": {
+      "description": "Ledger this manifest targets. 'liquid' is an accepted alias for 'elements', and 'btc' for 'bitcoin'. Defaults to 'elements' when absent.",
+      "enum": [
+        "elements",
+        "liquid",
+        "bitcoin",
+        "btc"
+      ],
+      "type": "string"
+    },
     "ComputeSpec": {
       "anyOf": [
         {
@@ -1113,10 +1140,15 @@
       "type": "object"
     },
     "chain": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ChainFamily"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Which ledger this protocol is written for: `\"elements\"` (or its alias `\"liquid\"`) or `\"bitcoin\"`. Defaults to [`ChainFamily::DEFAULT`] when absent.\n\nDeclares the *family*, not the network — a protocol that works on Liquid works on Liquid testnet, and pinning one here would be wrong. The wallet's config picks the concrete [`crate::chain::Network`]."
     },
     "contract_templates": {
       "additionalProperties": {
@@ -1140,6 +1172,14 @@
     },
     "protocol": {
       "type": "string"
+    },
+    "requires": {
+      "description": "Ledger features this manifest depends on that [`Manifest::chain`] does not already settle, e.g. `[\"simplicity\"]` or `[\"simplicity\", \"custom::my-feature\"]`.\n\nDeliberately narrow. Whether outputs carry an asset id, whether amounts can be blinded, whether issuance exists — all of that follows from `chain`, so listing it here would be a restatement that can disagree with itself. What is left is the residue the chain does not answer: `simplicity`, which is live on Elements but a soft fork on Bitcoin, and namespaced third-party features this crate cannot know about. See [`crate::chain`].\n\n`validate` checks it both ways — a covenant manifest that omits `simplicity` is an error, and declaring what nothing uses is a warning — because both mistakes are real: the first passes a target check and then fails at broadcast, and the second makes a manifest look less portable than it is.\n\nThe empty default is the honest one and the useful one. A manifest that declares nothing is claiming to need nothing a stock node lacks — which is exactly the manifest that can target Bitcoin today, with no Simplicity activation.",
+      "items": {
+        "$ref": "#/definitions/Capability"
+      },
+      "type": "array",
+      "uniqueItems": true
     },
     "simplicity_hl": {
       "anyOf": [

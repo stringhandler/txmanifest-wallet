@@ -1,5 +1,6 @@
 pub mod manifest;
 pub mod backend;
+pub mod chain;
 pub mod canonical;
 pub mod config;
 pub mod describe;
