@@ -480,6 +480,26 @@ fn check_action(
         }
     }
 
+    // --- Change and fee balance -------------------------------------------
+    // Only for an action that actually builds a transaction. One with no inputs or no
+    // outputs fails earlier, for a different reason, and would only collect a second
+    // error saying the same thing twice.
+    if action.inputs.iter().flatten().next().is_some()
+        && action.outputs.iter().flatten().next().is_some()
+        && !lbtc_surplus_has_a_home(action)
+    {
+        report.error(
+            loc,
+            "nowhere for an L-BTC surplus to go: no output declares \"destination\": \
+             \"change\", \"allow_change\" is \"none\", and no amount_sat is sized with the \
+             `fee` keyword. The inputs would then have to equal the outputs plus a fee that \
+             is only known once the transaction is built, so the build stops rather than \
+             handing the difference to a miner. Set \"allow_change\": \"lbtc_only\" (what a \
+             wallet-funded action usually wants), declare a change output, or size an output \
+             with `fee`.",
+        );
+    }
+
     // --- Hooks ------------------------------------------------------------
     for (field, hook) in [
         ("on_pre_broadcast", &action.on_pre_broadcast),
@@ -540,6 +560,37 @@ fn check_action(
             "create_instance is only legal on an action inside a contract template;              the instance created is always of that template",
         );
     }
+}
+
+/// Whether an L-BTC surplus this action produces would have somewhere to go.
+///
+/// Three spellings give it a home, and the builder accepts no others: an output with
+/// `"destination": "change"`, an `allow_change` setting that covers the policy asset, or an
+/// `amount_sat` that references the reserved `fee` keyword — which sizes an output to
+/// consume the inputs exactly, as a recursive covenant does.
+///
+/// With none of the three, the action builds only when its inputs happen to equal its
+/// outputs plus a fee nobody knows until the transaction is sized. Worth catching here
+/// because the failure otherwise arrives after coin selection and covenant compilation —
+/// and because before `allow_change` existed, that same manifest quietly paid the
+/// difference to a miner.
+///
+/// Deliberately lenient in one place: any declared change output counts, whatever asset it
+/// names. An `asset` is usually a reference (`instance.COLLATERAL_ASSET_ID`) that resolves
+/// only against a network, so refusing to guess is what keeps this from erroring on a
+/// manifest that works. An action that declares change for a token but not for L-BTC still
+/// gets caught — by the builder, where the assets are known.
+fn lbtc_surplus_has_a_home(action: &Action) -> bool {
+    if action.allow_change != crate::manifest::AllowChange::None {
+        return true;
+    }
+    action.outputs.iter().flatten().any(|output| {
+        output.destination.as_str() == Some("change")
+            || output
+                .amount_sat
+                .as_ref()
+                .is_some_and(crate::lifecycle::amount_uses_fee_keyword)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1498,6 +1549,117 @@ mod tests {
             !errors_at(&report, "actions.A.inputs.in0.on_resolved.set.instance.K").is_empty(),
             "expected the input hook to be checked, got: {:?}",
             report.issues
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Change / fee balance
+    // -----------------------------------------------------------------------
+
+    /// One action named `Fund`, whose body is spliced in verbatim.
+    fn report_for_action(body: &str) -> Report {
+        let manifest = Manifest::from_json_str(&format!(
+            r#"{{ "manifest_version": "0.2.0", "protocol": "t",
+                  "actions": {{ "Fund": {{ {body} }} }} }}"#
+        ))
+        .expect("manifest should parse");
+        validate(&manifest)
+    }
+
+    /// Only the surplus finding. The fixtures are minimal and trip other checks — an
+    /// asset reference with no template to resolve it, say — which are not what is
+    /// under test here.
+    fn surplus_errors(report: &Report) -> Vec<String> {
+        report
+            .issues
+            .iter()
+            .filter(|i| {
+                i.severity == Severity::Error && i.message.contains("nowhere for an L-BTC surplus")
+            })
+            .map(|i| i.message.clone())
+            .collect()
+    }
+
+    const WALLET_INPUT: &str = r#""inputs": [ { "id": "in0", "utxo_source": "wallet" } ],"#;
+
+    /// The mistake this check exists for: an action funded from a wallet UTXO, with
+    /// fixed-amount outputs and nothing that says where the rest goes. The builder
+    /// refuses it, but only after coin selection and covenant compilation — and before
+    /// `allow_change` existed it handed the difference to a miner without a word. Here it
+    /// is caught by a command that touches no wallet and no network.
+    #[test]
+    fn an_action_with_nowhere_to_put_a_surplus_is_an_error() {
+        let report = report_for_action(&format!(
+            r#"{WALLET_INPUT}
+               "outputs": [ {{ "id": "o0", "destination": "wallet", "amount_sat": "10000" }} ]"#
+        ));
+        let found = surplus_errors(&report);
+        assert_eq!(found.len(), 1, "{:?}", report.issues);
+        assert!(found[0].contains("allow_change"), "{}", found[0]);
+        assert!(found[0].contains("change output"), "{}", found[0]);
+    }
+
+    /// The three spellings that give a surplus a home. None may trip the check.
+    #[test]
+    fn allow_change_a_change_output_and_fee_sizing_each_satisfy_the_check() {
+        let fixed_out = r#"{ "id": "o0", "destination": "wallet", "amount_sat": "10000" }"#;
+        for body in [
+            // `allow_change`, in both spellings that cover the policy asset.
+            format!(r#""allow_change": "lbtc_only", {WALLET_INPUT} "outputs": [ {fixed_out} ]"#),
+            format!(r#""allow_change": "any", {WALLET_INPUT} "outputs": [ {fixed_out} ]"#),
+            // A declared change output. Its asset is a reference that resolves only
+            // against a network, and it counts anyway — see `lbtc_surplus_has_a_home`.
+            format!(
+                r#"{WALLET_INPUT} "outputs": [ {fixed_out},
+                   {{ "id": "chg", "destination": "change", "asset": "instance.COLLATERAL_ASSET_ID" }} ]"#
+            ),
+            // An output sized by the fee consumes the inputs exactly, which is how a
+            // covenant that pins the fee's output index balances without change.
+            format!(
+                r#"{WALLET_INPUT} "outputs": [ {{ "id": "o0", "destination": "wallet",
+                   "amount_sat": "inputs.in0.amount - fee" }} ]"#
+            ),
+        ] {
+            let report = report_for_action(&body);
+            assert!(
+                surplus_errors(&report).is_empty(),
+                "{body}\ngot: {:?}",
+                report.issues
+            );
+        }
+    }
+
+    /// `fee_rate` is not the `fee` keyword — the builder matches whole tokens, and a
+    /// check that read it more loosely would bless a manifest the build then refuses.
+    #[test]
+    fn a_fee_rate_reference_is_not_sizing_by_the_fee() {
+        let report = report_for_action(&format!(
+            r#"{WALLET_INPUT}
+               "outputs": [ {{ "id": "o0", "destination": "wallet",
+                              "amount_sat": "10000 * params.fee_rate" }} ]"#
+        ));
+        assert_eq!(surplus_errors(&report).len(), 1, "{:?}", report.issues);
+    }
+
+    /// An action missing its inputs or its outputs builds no transaction at all, and
+    /// already fails for that reason. A second error saying the same thing twice from a
+    /// different angle helps nobody.
+    #[test]
+    fn an_action_that_builds_no_transaction_is_left_alone() {
+        let outputs_only = report_for_action(
+            r#""outputs": [ { "id": "o0", "destination": "wallet", "amount_sat": "10000" } ]"#,
+        );
+        assert!(
+            surplus_errors(&outputs_only).is_empty(),
+            "{:?}",
+            outputs_only.issues
+        );
+
+        let inputs_only = report_for_action(r#""inputs": [ { "id": "in0", "utxo_source": "wallet" } ]"#);
+        assert!(
+            surplus_errors(&inputs_only).is_empty(),
+            "{:?}",
+            inputs_only.issues
         );
     }
 }

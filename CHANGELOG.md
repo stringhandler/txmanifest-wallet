@@ -20,6 +20,19 @@ every 0.2.0 manifest reads the same way it did.
   beside it that reports but does not yet gate. `--locked` on purpose: the
   `simplicityhl` git dependency is pinned to an exact rev in the lock file, and
   a run that silently updated it would not be testing what a release builds.
+- **`validate` now catches an action with nowhere to put a surplus.** An action
+  that declares no `"change"` output, leaves `allow_change` at `"none"` and sizes
+  no output with the `fee` keyword can only build if its inputs happen to equal
+  its outputs plus a fee that nobody knows until the transaction is sized. The
+  builder has refused that since 0.2.0, but only after coin selection and
+  covenant compilation; `validate` now reports it offline, from the manifest
+  alone. Any declared change output satisfies the check whatever asset it names —
+  an `asset` is usually a reference that resolves only against a network, and
+  guessing there would fail manifests that work.
+
+  This is a new **error**, so a manifest that passed `validate` under 0.2.0 can
+  fail under 0.2.1. That is the point: the shapes it now rejects are the ones the
+  builder was already refusing to build.
 - **Tests for the change/fee split.** The rule that an L-BTC surplus with no
   declared change output and no `allow_change` is an error — the rule that keeps
   an oversized input from being handed to a miner — shipped in 0.2.0 with no
