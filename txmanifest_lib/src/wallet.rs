@@ -20,8 +20,7 @@ const ORACLE_PATH_TESTNET: &str = "m/86h/1h/1h/0/0";
 ///
 /// WARNING: the mnemonic is stored in plaintext. This is intentional for a
 /// demo CLI; production wallets should encrypt at rest.
-#[derive(Debug, Serialize, Deserialize)]
-#[derive(Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WalletFile {
     pub network: String,
     pub mnemonic: String,
@@ -178,7 +177,11 @@ pub fn sync(
         .explicit_utxos()
         .map_err(|e| anyhow::anyhow!("Failed to read explicit UTXOs: {e}"))?;
 
-    Ok(SyncResult { tip, utxos, explicit_utxos })
+    Ok(SyncResult {
+        tip,
+        utxos,
+        explicit_utxos,
+    })
 }
 
 /// Load confidential UTXOs from persisted state (no network call).
@@ -187,16 +190,23 @@ pub fn utxos(wallet: &WalletFile, data_dir: &Path) -> Result<Vec<lwk_wollet::Wal
     let desc = descriptor(wallet)?;
     let wollet = lwk_wollet::Wollet::with_fs_persist(network, desc, data_dir)
         .map_err(|e| anyhow::anyhow!("Failed to open wallet: {e}"))?;
-    wollet.utxos().map_err(|e| anyhow::anyhow!("Failed to read UTXOs: {e}"))
+    wollet
+        .utxos()
+        .map_err(|e| anyhow::anyhow!("Failed to read UTXOs: {e}"))
 }
 
 /// Load explicit (non-confidential) UTXOs from persisted state (no network call).
-pub fn explicit_utxos(wallet: &WalletFile, data_dir: &Path) -> Result<Vec<lwk_wollet::ExternalUtxo>> {
+pub fn explicit_utxos(
+    wallet: &WalletFile,
+    data_dir: &Path,
+) -> Result<Vec<lwk_wollet::ExternalUtxo>> {
     let network = elements_network(wallet);
     let desc = descriptor(wallet)?;
     let wollet = lwk_wollet::Wollet::with_fs_persist(network, desc, data_dir)
         .map_err(|e| anyhow::anyhow!("Failed to open wallet: {e}"))?;
-    wollet.explicit_utxos().map_err(|e| anyhow::anyhow!("Failed to read explicit UTXOs: {e}"))
+    wollet
+        .explicit_utxos()
+        .map_err(|e| anyhow::anyhow!("Failed to read explicit UTXOs: {e}"))
 }
 
 pub struct SyncResult {
@@ -217,7 +227,9 @@ pub fn sign_schnorr_for_pubkey(
 
     let path_str = find_path_for_pubkey(wallet, pubkey_hex)?;
     let secp = Secp256k1::new();
-    let mnemonic: bip39::Mnemonic = wallet.mnemonic.parse()
+    let mnemonic: bip39::Mnemonic = wallet
+        .mnemonic
+        .parse()
         .map_err(|e| anyhow::anyhow!("Failed to parse mnemonic: {e}"))?;
     let seed = mnemonic.to_seed("");
     let network = if wallet.is_mainnet() {
@@ -225,11 +237,12 @@ pub fn sign_schnorr_for_pubkey(
     } else {
         elements_miniscript::bitcoin::Network::Testnet
     };
-    let root = Xpriv::new_master(network, &seed)
-        .context("Failed to derive master xpriv")?;
-    let path: DerivationPath = path_str.parse()
+    let root = Xpriv::new_master(network, &seed).context("Failed to derive master xpriv")?;
+    let path: DerivationPath = path_str
+        .parse()
         .map_err(|e| anyhow::anyhow!("Invalid derivation path '{path_str}': {e}"))?;
-    let child = root.derive_priv(&secp, &path)
+    let child = root
+        .derive_priv(&secp, &path)
         .with_context(|| format!("Key derivation failed at '{path_str}'"))?;
     let keypair = Keypair::from_secret_key(&secp, &child.private_key);
     let msg = Message::from_digest(*hash);
@@ -239,12 +252,20 @@ pub fn sign_schnorr_for_pubkey(
 
 /// Find the derivation path in this wallet that produces `pubkey_hex` (64-char x-only hex).
 fn find_path_for_pubkey(wallet: &WalletFile, pubkey_hex: &str) -> Result<&'static str> {
-    let wallet_path = if wallet.is_mainnet() { WALLET_KEY_PATH_MAINNET } else { WALLET_KEY_PATH_TESTNET };
+    let wallet_path = if wallet.is_mainnet() {
+        WALLET_KEY_PATH_MAINNET
+    } else {
+        WALLET_KEY_PATH_TESTNET
+    };
     let wallet_pub = derive_schnorr_pubkey(wallet, wallet_path)?;
     if wallet_pub == pubkey_hex {
         return Ok(wallet_path);
     }
-    let oracle_path = if wallet.is_mainnet() { ORACLE_PATH_MAINNET } else { ORACLE_PATH_TESTNET };
+    let oracle_path = if wallet.is_mainnet() {
+        ORACLE_PATH_MAINNET
+    } else {
+        ORACLE_PATH_TESTNET
+    };
     let oracle_pub = derive_schnorr_pubkey(wallet, oracle_path)?;
     if oracle_pub == pubkey_hex {
         return Ok(oracle_path);
@@ -346,7 +367,11 @@ pub fn script_hash_of_address(address: &str) -> Result<String> {
         .parse()
         .map_err(|e| anyhow::anyhow!("'{}' is not a valid address: {e}", address.trim()))?;
     let hash = sha256::Hash::hash(address.script_pubkey().as_bytes());
-    Ok(hash.to_byte_array().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hash
+        .to_byte_array()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 pub fn committed_output(wallet: &WalletFile) -> Result<(String, String)> {
@@ -364,14 +389,20 @@ pub fn committed_output(wallet: &WalletFile) -> Result<(String, String)> {
     let explicit = addr.to_unconfidential();
     let spk = explicit.script_pubkey();
     let hash = sha256::Hash::hash(spk.as_bytes());
-    let hash_hex: String = hash.to_byte_array().iter().map(|b| format!("{b:02x}")).collect();
+    let hash_hex: String = hash
+        .to_byte_array()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     Ok((explicit.to_string(), hash_hex))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use elements_miniscript::bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1, XOnlyPublicKey};
+    use elements_miniscript::bitcoin::secp256k1::{
+        schnorr::Signature, Message, Secp256k1, XOnlyPublicKey,
+    };
     use std::str::FromStr;
 
     // BIP39 test vector — all-zeros entropy ("abandon" × 11 + "about").
@@ -379,7 +410,10 @@ mod tests {
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     fn test_wallet() -> WalletFile {
-        WalletFile { network: "testnet".to_string(), mnemonic: TEST_MNEMONIC.to_string() }
+        WalletFile {
+            network: "testnet".to_string(),
+            mnemonic: TEST_MNEMONIC.to_string(),
+        }
     }
 
     #[test]
@@ -393,7 +427,8 @@ mod tests {
         let xonly = XOnlyPublicKey::from_str(&pubkey_hex).unwrap();
         let msg = Message::from_digest(hash);
         let sig = Signature::from_slice(&sig_bytes).unwrap();
-        secp.verify_schnorr(&sig, &msg, &xonly).expect("wallet key signature should verify");
+        secp.verify_schnorr(&sig, &msg, &xonly)
+            .expect("wallet key signature should verify");
     }
 
     #[test]
@@ -407,7 +442,8 @@ mod tests {
         let xonly = XOnlyPublicKey::from_str(&pubkey_hex).unwrap();
         let msg = Message::from_digest(hash);
         let sig = Signature::from_slice(&sig_bytes).unwrap();
-        secp.verify_schnorr(&sig, &msg, &xonly).expect("oracle key signature should verify");
+        secp.verify_schnorr(&sig, &msg, &xonly)
+            .expect("oracle key signature should verify");
     }
 
     #[test]
@@ -432,9 +468,18 @@ mod tests {
         let unknown = "a".repeat(64);
         let err = find_path_for_pubkey(&wallet, &unknown).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("does not match"), "error should mention mismatch: {msg}");
-        assert!(msg.contains("wallet key"), "error should show wallet key path: {msg}");
-        assert!(msg.contains("oracle key"), "error should show oracle key path: {msg}");
+        assert!(
+            msg.contains("does not match"),
+            "error should mention mismatch: {msg}"
+        );
+        assert!(
+            msg.contains("wallet key"),
+            "error should show wallet key path: {msg}"
+        );
+        assert!(
+            msg.contains("oracle key"),
+            "error should show oracle key path: {msg}"
+        );
     }
 
     #[test]
@@ -459,7 +504,10 @@ mod tests {
         // A confidential Liquid testnet address.
         let confidential = "tlq1qq2tmze58e74rl0tw9cx23j47zxk0ddas95gdy0j2wzkcuejxwj8yypv93ju8yay2s3r4y6fwpuw0l322965qvse6u6zdd5mf5";
         let parsed: lwk_wollet::elements::Address = confidential.parse().expect("valid address");
-        assert!(parsed.blinding_pubkey.is_some(), "fixture must be confidential");
+        assert!(
+            parsed.blinding_pubkey.is_some(),
+            "fixture must be confidential"
+        );
 
         let hash = script_hash_of_address(confidential).expect("hash");
         let expected: String = sha256::Hash::hash(parsed.script_pubkey().as_bytes())
@@ -475,7 +523,10 @@ mod tests {
         assert_eq!(script_hash_of_address(&explicit).unwrap(), hash);
 
         // Surrounding whitespace is tolerated; a non-address is an error naming itself.
-        assert_eq!(script_hash_of_address(&format!("  {confidential} ")).unwrap(), hash);
+        assert_eq!(
+            script_hash_of_address(&format!("  {confidential} ")).unwrap(),
+            hash
+        );
         let err = script_hash_of_address("not-an-address").unwrap_err();
         assert!(err.to_string().contains("not-an-address"), "{err}");
     }

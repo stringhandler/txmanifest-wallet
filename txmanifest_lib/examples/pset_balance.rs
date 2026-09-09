@@ -22,8 +22,13 @@ struct Leg {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: pset_balance <pset.hex>");
-    let hex = std::fs::read_to_string(&path).expect("read pset").trim().to_string();
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: pset_balance <pset.hex>");
+    let hex = std::fs::read_to_string(&path)
+        .expect("read pset")
+        .trim()
+        .to_string();
     let bytes: Vec<u8> = (0..hex.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex"))
@@ -81,7 +86,11 @@ fn main() {
         let (asset_id, token_id) = inp.issuance_ids();
         if let Some(v) = inp.issuance_value_amount {
             legs.entry(asset_id.to_string()).or_default().issued += v;
-            let kind = if inp.issuance_blinding_nonce.is_some() { "reissue" } else { "new" };
+            let kind = if inp.issuance_blinding_nonce.is_some() {
+                "reissue"
+            } else {
+                "new"
+            };
             println!("      + issuance ({kind}) {v:>10}  {asset_id}");
         }
         if let Some(v) = inp.issuance_inflation_keys {
@@ -96,11 +105,19 @@ fn main() {
         match (&asset, out.amount) {
             (Some(a), Some(v)) => {
                 legs.entry(a.clone()).or_default().outputs += v;
-                let kind = if out.script_pubkey.is_empty() { " (fee)" } else { "" };
+                let kind = if out.script_pubkey.is_empty() {
+                    " (fee)"
+                } else {
+                    ""
+                };
                 println!("  #{i}  {v:>12}  {a}{kind}");
             }
             _ => {
-                println!("  #{i}  {:>12}  {}", "confidential", asset.clone().unwrap_or_else(|| "?".into()));
+                println!(
+                    "  #{i}  {:>12}  {}",
+                    "confidential",
+                    asset.clone().unwrap_or_else(|| "?".into())
+                );
                 if let Some(a) = asset {
                     legs.entry(a).or_default().blinded_out += 1;
                 }
@@ -119,7 +136,10 @@ fn main() {
         let delta = lhs as i128 - leg.outputs as i128;
         let blinded = leg.blinded_in > 0 || leg.blinded_out > 0;
         let note = if blinded {
-            format!("  <- {} blinded leg(s), delta not meaningful", leg.blinded_in + leg.blinded_out)
+            format!(
+                "  <- {} blinded leg(s), delta not meaningful",
+                leg.blinded_in + leg.blinded_out
+            )
         } else if delta != 0 {
             any_bad = true;
             "  <== DOES NOT BALANCE".to_string()
@@ -143,12 +163,16 @@ fn main() {
     // PSET can add up while the broadcast transaction does not.
     if let Some(tx_path) = std::env::args().nth(2) {
         println!("\n== extracted transaction ==");
-        let hex = std::fs::read_to_string(&tx_path).expect("read tx").trim().to_string();
+        let hex = std::fs::read_to_string(&tx_path)
+            .expect("read tx")
+            .trim()
+            .to_string();
         let bytes: Vec<u8> = (0..hex.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex"))
             .collect();
-        let tx = lwk_wollet::elements::Transaction::consensus_decode(&bytes[..]).expect("decode tx");
+        let tx =
+            lwk_wollet::elements::Transaction::consensus_decode(&bytes[..]).expect("decode tx");
         for (i, inp) in tx.input.iter().enumerate() {
             let iss = &inp.asset_issuance;
             if iss.is_null() {
@@ -182,10 +206,7 @@ fn main() {
 ///
 /// `VerifyAmounts` reports a surjection failure under the same `bad-txns-in-ne-out` string
 /// as an arithmetic imbalance, so this is the remaining way to tell them apart.
-fn verify_surjections(
-    pset: &PartiallySignedTransaction,
-    tx: &lwk_wollet::elements::Transaction,
-) {
+fn verify_surjections(pset: &PartiallySignedTransaction, tx: &lwk_wollet::elements::Transaction) {
     use lwk_wollet::elements::confidential::{Asset, Value};
     use lwk_wollet::elements::secp256k1_zkp::{Generator, Secp256k1, Tag};
 
@@ -216,11 +237,21 @@ fn verify_surjections(
     println!("\n== surjection proofs ==");
     println!("  domain: {} generator(s)", domain.len());
     for (i, out) in tx.output.iter().enumerate() {
-        let Asset::Confidential(out_gen) = out.asset else { continue };
+        let Asset::Confidential(out_gen) = out.asset else {
+            continue;
+        };
         println!(
             "  out #{i}: rangeproof {} bytes, surjection {} bytes",
-            out.witness.rangeproof.as_ref().map(|p| p.serialize().len()).unwrap_or(0),
-            out.witness.surjection_proof.as_ref().map(|p| p.serialize().len()).unwrap_or(0),
+            out.witness
+                .rangeproof
+                .as_ref()
+                .map(|p| p.serialize().len())
+                .unwrap_or(0),
+            out.witness
+                .surjection_proof
+                .as_ref()
+                .map(|p| p.serialize().len())
+                .unwrap_or(0),
         );
         match &out.witness.surjection_proof {
             None => println!("  out #{i}: CONFIDENTIAL BUT NO SURJECTION PROOF"),
@@ -228,7 +259,11 @@ fn verify_surjections(
                 let ok = proof.verify(&secp, out_gen, &domain);
                 println!(
                     "  out #{i}: surjection proof {}",
-                    if ok { "verifies" } else { "FAILS <== this is the rejection" }
+                    if ok {
+                        "verifies"
+                    } else {
+                        "FAILS <== this is the rejection"
+                    }
                 );
             }
         }
@@ -243,10 +278,7 @@ fn verify_surjections(
 /// issuance blinded its amounts (`CalculateReissuanceToken(entropy, fBlinded)`), and this
 /// engine hardcodes `false` when it derives the token. If the chain disagrees, the input is
 /// simply not the token for this entropy and the reissuance is invalid.
-fn verify_reissuances(
-    pset: &PartiallySignedTransaction,
-    tx: &lwk_wollet::elements::Transaction,
-) {
+fn verify_reissuances(pset: &PartiallySignedTransaction, tx: &lwk_wollet::elements::Transaction) {
     use lwk_wollet::elements::confidential::Asset;
     use lwk_wollet::elements::hashes::sha256;
     use lwk_wollet::elements::AssetId;
@@ -274,12 +306,17 @@ fn verify_reissuances(
             let hit = spent_explicit.map(|a| a == token).unwrap_or(false);
             println!(
                 "    token (blinded={confidential:<5})  {token}{}",
-                if hit { "  <== matches the UTXO being spent" } else { "" }
+                if hit {
+                    "  <== matches the UTXO being spent"
+                } else {
+                    ""
+                }
             );
         }
         match spent_explicit {
             Some(a) => {
-                let ok = (0..2).any(|c| AssetId::reissuance_token_from_entropy(entropy, c == 1) == a);
+                let ok =
+                    (0..2).any(|c| AssetId::reissuance_token_from_entropy(entropy, c == 1) == a);
                 println!("    spending           {a}");
                 if !ok {
                     println!(
@@ -312,9 +349,10 @@ fn verify_commitment_balance(
     let secp = Secp256k1::new();
     let gen_for = |asset: &Asset| -> Option<Generator> {
         match asset {
-            Asset::Explicit(a) => {
-                Some(Generator::new_unblinded(&secp, Tag::from(a.into_inner().to_byte_array())))
-            }
+            Asset::Explicit(a) => Some(Generator::new_unblinded(
+                &secp,
+                Tag::from(a.into_inner().to_byte_array()),
+            )),
             Asset::Confidential(g) => Some(*g),
             _ => None,
         }
@@ -332,7 +370,10 @@ fn verify_commitment_balance(
     let mut skipped = 0;
 
     for (i, inp) in pset.inputs().iter().enumerate() {
-        let Some(utxo) = inp.witness_utxo.as_ref() else { skipped += 1; continue };
+        let Some(utxo) = inp.witness_utxo.as_ref() else {
+            skipped += 1;
+            continue;
+        };
         match gen_for(&utxo.asset).and_then(|g| commit(&utxo.value, g)) {
             Some(c) => lhs.push(c),
             None => skipped += 1,
@@ -341,11 +382,13 @@ fn verify_commitment_balance(
         let (asset_id, token_id) = inp.issuance_ids();
         let tx_iss = &tx.input[i].asset_issuance;
         if let Value::Explicit(v) = tx_iss.amount {
-            let g = Generator::new_unblinded(&secp, Tag::from(asset_id.into_inner().to_byte_array()));
+            let g =
+                Generator::new_unblinded(&secp, Tag::from(asset_id.into_inner().to_byte_array()));
             lhs.push(PedersenCommitment::new_unblinded(&secp, v, g));
         }
         if let Value::Explicit(v) = tx_iss.inflation_keys {
-            let g = Generator::new_unblinded(&secp, Tag::from(token_id.into_inner().to_byte_array()));
+            let g =
+                Generator::new_unblinded(&secp, Tag::from(token_id.into_inner().to_byte_array()));
             lhs.push(PedersenCommitment::new_unblinded(&secp, v, g));
         }
     }
@@ -362,7 +405,11 @@ fn verify_commitment_balance(
         "\n== pedersen balance ==\n  {} input+issuance commitments vs {} output commitments{}",
         lhs.len(),
         rhs.len(),
-        if skipped > 0 { format!(" ({skipped} leg(s) skipped)") } else { String::new() }
+        if skipped > 0 {
+            format!(" ({skipped} leg(s) skipped)")
+        } else {
+            String::new()
+        }
     );
     if ok {
         println!("  BALANCES — the commitments sum to equal, so the arithmetic is fine and");
@@ -378,5 +425,9 @@ fn hex_le(b: &[u8; 32]) -> String {
 }
 
 fn short(s: &str) -> String {
-    if s.len() > 44 { format!("{}…", &s[..44]) } else { s.to_string() }
+    if s.len() > 44 {
+        format!("{}…", &s[..44])
+    } else {
+        s.to_string()
+    }
 }

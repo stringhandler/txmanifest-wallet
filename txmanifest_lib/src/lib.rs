@@ -1,13 +1,13 @@
-pub mod manifest;
 pub mod backend;
 pub mod canonical;
 pub mod config;
-pub mod describe;
 pub mod context;
 pub mod covenant;
+pub mod describe;
 pub mod eval;
 pub mod instance;
 pub mod lifecycle;
+pub mod manifest;
 pub mod params;
 pub mod prepare;
 pub mod preview;

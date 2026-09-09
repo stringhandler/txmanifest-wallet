@@ -83,6 +83,10 @@ fn network_params_path(manifest_file: &Path, network: &str) -> PathBuf {
 fn load_params_file(path: &Path) -> Result<BTreeMap<String, String>> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("Cannot read params file: {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("Cannot parse params file (expected flat string→string JSON object): {}", path.display()))
+    serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "Cannot parse params file (expected flat string→string JSON object): {}",
+            path.display()
+        )
+    })
 }

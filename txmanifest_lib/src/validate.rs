@@ -60,12 +60,18 @@ impl Report {
 
     /// Number of error-severity issues.
     pub fn errors(&self) -> usize {
-        self.issues.iter().filter(|i| i.severity == Severity::Error).count()
+        self.issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .count()
     }
 
     /// Number of warning-severity issues.
     pub fn warnings(&self) -> usize {
-        self.issues.iter().filter(|i| i.severity == Severity::Warning).count()
+        self.issues
+            .iter()
+            .filter(|i| i.severity == Severity::Warning)
+            .count()
     }
 
     /// True when there are no errors (warnings are allowed).
@@ -100,12 +106,7 @@ fn param_types(
 /// hook fires at a fixed point in the flow, with no `.simf` path, network or wallet
 /// threaded through it. Rejecting the rest here — rather than at run time — keeps a
 /// manifest from parsing cleanly and then silently skipping an assignment.
-fn check_hook(
-    report: &mut Report,
-    loc: &str,
-    hook: &crate::manifest::HookBlock,
-    action: &Action,
-) {
+fn check_hook(report: &mut Report, loc: &str, hook: &crate::manifest::HookBlock, action: &Action) {
     use crate::manifest::ParamCompute;
     for (target, spec) in &hook.set {
         let tloc = format!("{loc}.set.{target}");
@@ -126,7 +127,9 @@ fn check_hook(
                 );
             }
         }
-        let Some(compute) = spec.as_spec() else { continue }; // bare expression: fine
+        let Some(compute) = spec.as_spec() else {
+            continue;
+        }; // bare expression: fine
         match compute {
             ParamCompute::Expr { .. } => {}
             ParamCompute::Wallet { .. } => report.error(
@@ -152,17 +155,26 @@ pub fn validate(manifest: &Manifest) -> Report {
     let mut report = Report::default();
 
     let no_types = std::collections::BTreeMap::new();
-    let utxo_types: &std::collections::BTreeMap<String, crate::manifest::UtxoType> = manifest
-        .utxo_types
-        .as_ref()
-        .unwrap_or(&no_types);
+    let utxo_types: &std::collections::BTreeMap<String, crate::manifest::UtxoType> =
+        manifest.utxo_types.as_ref().unwrap_or(&no_types);
 
     // Collect every action, whether top-level or a class method, tagged with a
     // dot-path location and its bare name (for lifecycle cross-checks).
-    let mut actions: Vec<(String, String, &Action, std::collections::BTreeMap<String, String>, bool)> =
-        Vec::new();
+    let mut actions: Vec<(
+        String,
+        String,
+        &Action,
+        std::collections::BTreeMap<String, String>,
+        bool,
+    )> = Vec::new();
     for (name, action) in &manifest.actions {
-        actions.push((format!("actions.{name}"), name.clone(), action, param_types(action, None), false));
+        actions.push((
+            format!("actions.{name}"),
+            name.clone(),
+            action,
+            param_types(action, None),
+            false,
+        ));
     }
     if let Some(contract_templates) = &manifest.contract_templates {
         for (cname, cdef) in contract_templates {
@@ -197,7 +209,10 @@ pub fn validate(manifest: &Manifest) -> Report {
     }
     if let Some(chain) = &manifest.chain {
         let c = chain.to_lowercase();
-        if !matches!(c.as_str(), "bitcoin" | "elements" | "liquid" | "cross-chain") {
+        if !matches!(
+            c.as_str(),
+            "bitcoin" | "elements" | "liquid" | "cross-chain"
+        ) {
             report.warn(
                 "chain",
                 format!("unrecognized chain '{chain}' (expected bitcoin, liquid/elements, or cross-chain)"),
@@ -212,7 +227,14 @@ pub fn validate(manifest: &Manifest) -> Report {
     let mut referenced: BTreeSet<String> = BTreeSet::new();
 
     for (loc, _bare, action, field_types, in_template) in &actions {
-        check_action(&mut report, utxo_types, &mut referenced, loc, action, *in_template);
+        check_action(
+            &mut report,
+            utxo_types,
+            &mut referenced,
+            loc,
+            action,
+            *in_template,
+        );
         check_ui(&mut report, loc, action, field_types);
     }
 
@@ -253,8 +275,10 @@ pub fn validate_programs(manifest: &Manifest, base_dir: &std::path::Path) -> Rep
     // Witness list per utxo_type. Several types routinely share one `.simf` (deadcat's four
     // market states are one program under four tapdata leaves), so parse per source path and
     // let the types share the result.
-    let mut by_source: std::collections::BTreeMap<std::path::PathBuf, Result<std::collections::BTreeMap<String, String>, String>> =
-        std::collections::BTreeMap::new();
+    let mut by_source: std::collections::BTreeMap<
+        std::path::PathBuf,
+        Result<std::collections::BTreeMap<String, String>, String>,
+    > = std::collections::BTreeMap::new();
     let mut by_type: std::collections::BTreeMap<&str, &std::collections::BTreeMap<String, String>> =
         std::collections::BTreeMap::new();
 
@@ -276,7 +300,9 @@ pub fn validate_programs(manifest: &Manifest, base_dir: &std::path::Path) -> Rep
         });
     }
     for (name, ut) in utxo_types {
-        let Some(source) = ut.script.as_ref().and_then(|s| s.source.as_ref()) else { continue };
+        let Some(source) = ut.script.as_ref().and_then(|s| s.source.as_ref()) else {
+            continue;
+        };
         match by_source.get(&base_dir.join(source)) {
             Some(Ok(types)) => {
                 by_type.insert(name.as_str(), types);
@@ -307,8 +333,12 @@ pub fn validate_programs(manifest: &Manifest, base_dir: &std::path::Path) -> Rep
 
     for (loc, action) in actions {
         for input in action.inputs.iter().flatten() {
-            let Some(type_name) = input.utxo_type_name() else { continue };
-            let Some(program) = by_type.get(type_name.as_str()) else { continue };
+            let Some(type_name) = input.utxo_type_name() else {
+                continue;
+            };
+            let Some(program) = by_type.get(type_name.as_str()) else {
+                continue;
+            };
             check_witnesses_against_program(
                 &mut report,
                 &format!("{loc}.inputs.{}.witnesses", input.id),
@@ -336,7 +366,10 @@ fn check_witnesses_against_program(
     witnesses: &Option<Value>,
 ) {
     let empty = serde_json::Map::new();
-    let declared = witnesses.as_ref().and_then(Value::as_object).unwrap_or(&empty);
+    let declared = witnesses
+        .as_ref()
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
 
     // `taproot_leaf` selects which leaf to spend; the program never reads it.
     let is_leaf_selector =
@@ -391,23 +424,24 @@ fn check_action(
         let mut input_ids: BTreeSet<&str> = BTreeSet::new();
         for input in inputs {
             if !input_ids.insert(input.id.as_str()) {
-                report.error(format!("{loc}.inputs"), format!("duplicate input id '{}'", input.id));
+                report.error(
+                    format!("{loc}.inputs"),
+                    format!("duplicate input id '{}'", input.id),
+                );
             }
             let iloc = format!("{loc}.inputs.{}", input.id);
             match &input.utxo_source {
                 Value::String(s) if s == "wallet" => {}
-                Value::Object(m) if m.contains_key("utxo_type") => {
-                    match m["utxo_type"].as_str() {
-                        Some(name) => {
-                            referenced.insert(name.to_string());
-                            if !utxo_types.contains_key(name) {
-                                report.error(&iloc, format!("references unknown utxo_type '{name}'"));
-                            }
-                            check_utxo_site(report, utxo_types, &iloc, name, &input.utxo_source);
+                Value::Object(m) if m.contains_key("utxo_type") => match m["utxo_type"].as_str() {
+                    Some(name) => {
+                        referenced.insert(name.to_string());
+                        if !utxo_types.contains_key(name) {
+                            report.error(&iloc, format!("references unknown utxo_type '{name}'"));
                         }
-                        None => report.error(&iloc, "utxo_source.utxo_type is not a string"),
+                        check_utxo_site(report, utxo_types, &iloc, name, &input.utxo_source);
                     }
-                }
+                    None => report.error(&iloc, "utxo_source.utxo_type is not a string"),
+                },
                 Value::Object(m) if m.contains_key("if") => {} // conditional — not checked
                 // An error, not a warning: the engine refuses to build with one of these
                 // (it cannot tell where the UTXO comes from), so a warning would
@@ -431,10 +465,14 @@ fn check_action(
         let mut output_ids: BTreeSet<&str> = BTreeSet::new();
         for output in outputs {
             if !output_ids.insert(output.id.as_str()) {
-                report.error(format!("{loc}.outputs"), format!("duplicate output id '{}'", output.id));
+                report.error(
+                    format!("{loc}.outputs"),
+                    format!("duplicate output id '{}'", output.id),
+                );
             }
             let oloc = format!("{loc}.outputs.{}", output.id);
-            let requires_amount = check_destination(report, utxo_types, referenced, &oloc, &output.destination.0);
+            let requires_amount =
+                check_destination(report, utxo_types, referenced, &oloc, &output.destination.0);
             let optional = output.optional.unwrap_or(false);
             if requires_amount && output.amount_sat.is_none() && !optional {
                 report.error(oloc, "missing amount_sat (required for this destination)");
@@ -453,7 +491,12 @@ fn check_action(
     }
     for input in action.inputs.iter().flatten() {
         if let Some(hook) = &input.on_resolved {
-            check_hook(report, &format!("{loc}.inputs.{}.on_resolved", input.id), hook, action);
+            check_hook(
+                report,
+                &format!("{loc}.inputs.{}.on_resolved", input.id),
+                hook,
+                action,
+            );
         }
     }
 
@@ -464,12 +507,20 @@ fn check_action(
     let hook_targets: BTreeSet<&str> = [&action.on_pre_broadcast, &action.on_post_broadcast]
         .into_iter()
         .flatten()
-        .chain(action.inputs.iter().flatten().filter_map(|i| i.on_resolved.as_ref()))
+        .chain(
+            action
+                .inputs
+                .iter()
+                .flatten()
+                .filter_map(|i| i.on_resolved.as_ref()),
+        )
         .flat_map(|h| h.set.keys())
         .filter_map(|t| t.strip_prefix("params."))
         .collect();
     for (name, def) in action.params.iter().flatten() {
-        if def.compute.as_ref().is_some_and(|c| c.is_hook()) && !hook_targets.contains(name.as_str()) {
+        if def.compute.as_ref().is_some_and(|c| c.is_hook())
+            && !hook_targets.contains(name.as_str())
+        {
             report.error(
                 format!("{loc}.params.{name}"),
                 "declares compute {\"type\": \"hook\"} but no hook in this action sets \
@@ -607,7 +658,10 @@ fn check_ui(
         match modifier {
             Some("symbol") => worst += UI_TOKEN_SYMBOL_WIDTH,
             Some(other) => {
-                report.warn(&uloc, format!("unknown token modifier ':{other}' in '{{{token}}}'"));
+                report.warn(
+                    &uloc,
+                    format!("unknown token modifier ':{other}' in '{{{token}}}'"),
+                );
                 worst += UI_TOKEN_AMOUNT_WIDTH;
             }
             None if is_hashed => {
@@ -719,7 +773,10 @@ fn check_issuance(report: &mut Report, loc: &str, issuance: &Option<Value>) {
 fn check_witnesses(report: &mut Report, loc: &str, witnesses: &Option<Value>) {
     let Some(witnesses) = witnesses else { return };
     let Some(map) = witnesses.as_object() else {
-        report.error(loc.to_string(), "witnesses must be an object (name → definition)");
+        report.error(
+            loc.to_string(),
+            "witnesses must be an object (name → definition)",
+        );
         return;
     };
     for (name, def) in map {
@@ -743,14 +800,21 @@ fn check_witnesses(report: &mut Report, loc: &str, witnesses: &Option<Value>) {
         match obj.get("type").and_then(Value::as_str) {
             None => report.error(
                 wloc,
-                format!("witness '{name}' is missing a string \"type\" and will be ignored at run time"),
+                format!(
+                    "witness '{name}' is missing a string \"type\" and will be ignored at run time"
+                ),
             ),
             Some("simplicityhl") => {
-                let value_ok = obj.get("value").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty());
+                let value_ok = obj
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty());
                 if !value_ok {
                     report.error(
                         wloc,
-                        format!("simplicityhl witness '{name}' is missing a non-empty string \"value\""),
+                        format!(
+                            "simplicityhl witness '{name}' is missing a non-empty string \"value\""
+                        ),
                     );
                 }
             }
@@ -787,7 +851,9 @@ fn check_utxo_site(
     type_name: &str,
     site: &Value,
 ) {
-    let Some(ut) = utxo_types.get(type_name) else { return };
+    let Some(ut) = utxo_types.get(type_name) else {
+        return;
+    };
     let args = site
         .get(crate::manifest::SITE_ARGS_KEY)
         .and_then(Value::as_object);
@@ -798,9 +864,7 @@ fn check_utxo_site(
         if args.is_some() {
             report.error(
                 loc.to_string(),
-                format!(
-                    "'args' has nothing to bind: utxo_type '{type_name}' declares no `params`"
-                ),
+                format!("'args' has nothing to bind: utxo_type '{type_name}' declares no `params`"),
             );
         }
         return;
@@ -864,7 +928,10 @@ fn check_destination(
             if let Some(name) = m.get("utxo_type").and_then(Value::as_str) {
                 referenced.insert(name.to_string());
                 if !utxo_types.contains_key(name) {
-                    report.error(oloc.to_string(), format!("destination references unknown utxo_type '{name}'"));
+                    report.error(
+                        oloc.to_string(),
+                        format!("destination references unknown utxo_type '{name}'"),
+                    );
                 }
                 check_utxo_site(report, utxo_types, oloc, name, destination);
                 true
@@ -874,19 +941,28 @@ fn check_destination(
                 match t {
                     "op_return" | "burn" | "fee" => false,
                     other => {
-                        report.error(oloc.to_string(), format!("unknown destination type '{other}'"));
+                        report.error(
+                            oloc.to_string(),
+                            format!("unknown destination type '{other}'"),
+                        );
                         false
                     }
                 }
             } else if m.contains_key("if") {
                 false // conditional — not checked
             } else {
-                report.error(oloc.to_string(), format!("unrecognized destination: {destination}"));
+                report.error(
+                    oloc.to_string(),
+                    format!("unrecognized destination: {destination}"),
+                );
                 false
             }
         }
         other => {
-            report.error(oloc.to_string(), format!("destination must be a string or object, got {other}"));
+            report.error(
+                oloc.to_string(),
+                format!("destination must be a string or object, got {other}"),
+            );
             false
         }
     }
@@ -919,19 +995,30 @@ mod tests {
 
         // `DEBT` has no default and is not bound.
         let report = validate_site(r#"{ "utxo_type": "vault" }"#);
-        let msg = report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n");
+        let msg = report
+            .issues
+            .iter()
+            .map(|i| i.message.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(!report.is_ok(), "unbound required param must be an error");
         assert!(msg.contains("DEBT"), "{msg}");
         assert!(!msg.contains("STATE"), "STATE has a default: {msg}");
 
         // Bound → clean. `STATE` still takes its default.
-        let report = validate_site(r#"{ "utxo_type": "vault", "args": { "DEBT": "params.claim" } }"#);
+        let report =
+            validate_site(r#"{ "utxo_type": "vault", "args": { "DEBT": "params.claim" } }"#);
         assert!(report.is_ok(), "{:?}", report.issues);
 
         // A misspelled binding is an error, not a silent no-op.
         let report =
             validate_site(r#"{ "utxo_type": "vault", "args": { "DEBT": "1", "STAT": "0x00" } }"#);
-        let msg = report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n");
+        let msg = report
+            .issues
+            .iter()
+            .map(|i| i.message.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(msg.contains("STAT"), "{msg}");
 
         // `args` against a type with no interface binds nothing — say so.
@@ -944,7 +1031,12 @@ mod tests {
         )
         .unwrap();
         let report = validate(&manifest);
-        let msg = report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n");
+        let msg = report
+            .issues
+            .iter()
+            .map(|i| i.message.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(msg.contains("declares no `params`"), "{msg}");
     }
 
@@ -1010,7 +1102,10 @@ mod tests {
         let report = validate_with_input_witnesses(serde_json::json!({
             "ORACLE_SIGNATURE": "unusued"
         }));
-        assert!(has_error_at(&report, "actions.A.inputs.in0.witnesses.ORACLE_SIGNATURE"));
+        assert!(has_error_at(
+            &report,
+            "actions.A.inputs.in0.witnesses.ORACLE_SIGNATURE"
+        ));
     }
 
     /// The witness list a program declares, in the shape `validate_programs` reads it
@@ -1073,7 +1168,11 @@ mod tests {
                 "PTAH": { "type": "simplicityhl", "value": "Left(())" }
             }),
         );
-        assert!(has_error_at(&report, "loc.PTAH"), "got: {:?}", report.issues);
+        assert!(
+            has_error_at(&report, "loc.PTAH"),
+            "got: {:?}",
+            report.issues
+        );
     }
 
     #[test]
@@ -1133,17 +1232,20 @@ mod tests {
     /// Build a one-method contract template whose method carries the given `ui`,
     /// with `PRINCIPAL_ASSET_ID` (an asset) and `AMOUNT` (a u64) declared as fields.
     fn validate_with_ui(intent: Option<&str>, legs: Value) -> Report {
-        let manifest: Manifest = Manifest::from_json_str(&serde_json::json!({
-            "manifest_version": "0.2.0",
-            "protocol": "test",
-            "contract_templates": { "T": {
-                "fields": {
-                    "PRINCIPAL_ASSET_ID": { "type": "liquid.asset_id" },
-                    "AMOUNT": { "type": "u64" }
-                },
-                "actions": { "M": { "intent": intent, "outputs": legs } }
-            }}
-        }).to_string())
+        let manifest: Manifest = Manifest::from_json_str(
+            &serde_json::json!({
+                "manifest_version": "0.2.0",
+                "protocol": "test",
+                "contract_templates": { "T": {
+                    "fields": {
+                        "PRINCIPAL_ASSET_ID": { "type": "liquid.asset_id" },
+                        "AMOUNT": { "type": "u64" }
+                    },
+                    "actions": { "M": { "intent": intent, "outputs": legs } }
+                }}
+            })
+            .to_string(),
+        )
         .expect("test manifest should parse");
         validate(&manifest)
     }
@@ -1216,10 +1318,7 @@ mod tests {
         // Short template, but each bare numeric token can render 21 chars, so the
         // worst case is what must be measured.
         let tokens = "{instance.AMOUNT} ".repeat(8);
-        let report = validate_with_ui(
-            Some(tokens.as_str()),
-            serde_json::json!([]),
-        );
+        let report = validate_with_ui(Some(tokens.as_str()), serde_json::json!([]));
         let errs = errors_at(&report, "contract_templates.T.actions.M.intent");
         assert!(
             errs.iter().any(|m| m.contains("worst-case rendered")),

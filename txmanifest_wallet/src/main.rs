@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tx_manifest_lib::lifecycle::OutpointOverride;
-use tx_manifest_lib::{manifest, config, describe, instance, lifecycle, prepare, validate, wallet};
+use tx_manifest_lib::{config, describe, instance, lifecycle, manifest, prepare, validate, wallet};
 
 /// Build the input-override map from `--input id=txid:vout` flags and an optional
 /// `--inputs-file` JSON. File entries load first; `--input` flags override them.
@@ -248,10 +248,15 @@ fn cmd_prepare(
     let manifest = manifest::Manifest::from_json_str(&raw)
         .with_context(|| format!("Cannot parse manifest file: {}", manifest_path.display()))?;
     let w = wallet::load_wallet(wallet_path)?;
-    let data_dir = data_dir.map(|p| p.to_path_buf()).unwrap_or_else(wallet::default_data_dir);
+    let data_dir = data_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(wallet::default_data_dir);
 
     println!();
-    println!("{}", style(format!("Preparing '{action_name}'…")).bold().cyan());
+    println!(
+        "{}",
+        style(format!("Preparing '{action_name}'…")).bold().cyan()
+    );
     println!("  Manifest : {}", style(manifest_path.display()).dim());
     println!("  Wallet  : {}", style(wallet_path.display()).dim());
     println!();
@@ -339,10 +344,16 @@ fn cmd_create_wallet(out: &Path, mainnet: Option<bool>) -> Result<()> {
     println!("  Network : {}", style(&w.network).cyan());
     println!("  Saved to: {}", style(out.display()).cyan());
     println!();
-    println!("{}", style("MNEMONIC — back this up securely:").bold().yellow());
+    println!(
+        "{}",
+        style("MNEMONIC — back this up securely:").bold().yellow()
+    );
     println!("  {}", style(&w.mnemonic).bold());
     println!();
-    println!("{}", style("WARNING: the mnemonic is stored in plaintext in the wallet file.").red());
+    println!(
+        "{}",
+        style("WARNING: the mnemonic is stored in plaintext in the wallet file.").red()
+    );
     println!("  Run `info` to see your oracle public key.");
     Ok(())
 }
@@ -372,18 +383,28 @@ fn cmd_info(wallet_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_sync(wallet_path: &Path, esplora: Option<&str>, data_dir: Option<&std::path::Path>) -> Result<()> {
+fn cmd_sync(
+    wallet_path: &Path,
+    esplora: Option<&str>,
+    data_dir: Option<&std::path::Path>,
+) -> Result<()> {
     let cfg = config::load();
     let backend_kind = cfg.backend_kind();
     let server_url = esplora.unwrap_or_else(|| cfg.backend_url());
     use console::style;
     let w = wallet::load_wallet(wallet_path)?;
-    let data_dir = data_dir.map(|p| p.to_path_buf()).unwrap_or_else(wallet::default_data_dir);
+    let data_dir = data_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(wallet::default_data_dir);
 
     println!();
     println!("{}", style("Syncing wallet…").bold().cyan());
     println!("  Network  : {}", style(&w.network).cyan());
-    println!("  Backend  : {} {}", style(backend_kind.as_str()).cyan(), style(server_url).dim());
+    println!(
+        "  Backend  : {} {}",
+        style(backend_kind.as_str()).cyan(),
+        style(server_url).dim()
+    );
     println!("  Data dir : {}", style(data_dir.display()).dim());
     println!();
 
@@ -399,7 +420,9 @@ fn cmd_sync(wallet_path: &Path, esplora: Option<&str>, data_dir: Option<&std::pa
 fn cmd_get_balance(wallet_path: &Path, data_dir: Option<&std::path::Path>) -> Result<()> {
     use console::style;
     let w = wallet::load_wallet(wallet_path)?;
-    let data_dir = data_dir.map(|p| p.to_path_buf()).unwrap_or_else(wallet::default_data_dir);
+    let data_dir = data_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(wallet::default_data_dir);
 
     println!();
     println!("{}", style("Balance (last synced state)").bold().cyan());
@@ -474,7 +497,9 @@ fn cmd_split(
     let w = wallet::load_wallet(wallet_path)?;
     let network = wallet::elements_network(&w);
     let desc = wallet::descriptor(&w)?;
-    let data_dir = data_dir.map(|p| p.to_path_buf()).unwrap_or_else(wallet::default_data_dir);
+    let data_dir = data_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(wallet::default_data_dir);
 
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("Cannot create data dir: {}", data_dir.display()))?;
@@ -490,18 +515,21 @@ fn cmd_split(
     // Resolve asset
     let asset_id = match asset_str {
         "lbtc" | "bitcoin" => network.policy_asset(),
-        other => lwk_wollet::elements::AssetId::from_str(other)
-            .with_context(|| format!("Invalid asset '{other}': must be 'lbtc' or a hex asset ID"))?,
+        other => lwk_wollet::elements::AssetId::from_str(other).with_context(|| {
+            format!("Invalid asset '{other}': must be 'lbtc' or a hex asset ID")
+        })?,
     };
 
     // Sum available balance of that asset across confidential + explicit UTXOs
-    let conf_bal: u64 = wollet.utxos()
+    let conf_bal: u64 = wollet
+        .utxos()
         .map_err(|e| anyhow::anyhow!("Cannot read UTXOs: {e}"))?
         .iter()
         .filter(|u| u.unblinded.asset == asset_id)
         .map(|u| u.unblinded.value)
         .sum();
-    let expl_bal: u64 = wollet.explicit_utxos()
+    let expl_bal: u64 = wollet
+        .explicit_utxos()
         .map_err(|e| anyhow::anyhow!("Cannot read explicit UTXOs: {e}"))?
         .iter()
         .filter(|u| u.unblinded.asset == asset_id)
@@ -510,7 +538,11 @@ fn cmd_split(
     let total_bal = conf_bal + expl_bal;
 
     let is_lbtc = asset_id == network.policy_asset();
-    let asset_label = if is_lbtc { "lbtc".to_string() } else { asset_id.to_string() };
+    let asset_label = if is_lbtc {
+        "lbtc".to_string()
+    } else {
+        asset_id.to_string()
+    };
 
     println!();
     println!("{}", style("Split UTXO").bold().cyan());
@@ -545,7 +577,8 @@ fn cmd_split(
             if spendable == 0 {
                 anyhow::bail!(
                     "Balance ({} sat) is too small to cover even the fee buffer ({} sat).",
-                    total_bal, fee_buffer
+                    total_bal,
+                    fee_buffer
                 );
             }
             spendable / count as u64
@@ -553,19 +586,21 @@ fn cmd_split(
     };
 
     if per_utxo == 0 {
-        anyhow::bail!(
-            "Computed per-UTXO amount is 0 — lower --count or increase balance."
-        );
+        anyhow::bail!("Computed per-UTXO amount is 0 — lower --count or increase balance.");
     }
 
     println!("  Per UTXO: {} sat", style(per_utxo).bold().yellow());
-    println!("  Total out: {} sat", style(per_utxo * count as u64).yellow());
+    println!(
+        "  Total out: {} sat",
+        style(per_utxo * count as u64).yellow()
+    );
     println!();
 
     // Build transaction: N outputs back to wallet, each with per_utxo sats of asset_id
     let mut builder = wollet.tx_builder().fee_rate(Some(100.0));
     for i in 0..count {
-        let addr = wollet.address(Some(i))
+        let addr = wollet
+            .address(Some(i))
             .map_err(|e| anyhow::anyhow!("Cannot derive address {i}: {e}"))?;
         if is_lbtc {
             builder = builder
@@ -578,12 +613,16 @@ fn cmd_split(
         }
     }
 
-    let mut pset = builder.finish()
+    let mut pset = builder
+        .finish()
         .map_err(|e| anyhow::anyhow!("Failed to build PSET: {e}"))?;
 
     let fee = prepare::pset_fee(&pset);
     println!("{}", style("Transaction preview:").bold());
-    println!("  {} × {} sat {}  →  your wallet", count, per_utxo, asset_label);
+    println!(
+        "  {} × {} sat {}  →  your wallet",
+        count, per_utxo, asset_label
+    );
     println!("  Fee: {} sat", style(fee).yellow());
     println!();
 
@@ -602,7 +641,8 @@ fn cmd_split(
     s.sign(&mut pset)
         .map_err(|e| anyhow::anyhow!("Failed to sign: {e}"))?;
 
-    let tx = wollet.finalize(&mut pset)
+    let tx = wollet
+        .finalize(&mut pset)
         .map_err(|e| anyhow::anyhow!("Failed to finalize: {e}"))?;
 
     let client = tx_manifest_lib::backend::Backend::connect(backend_kind, server_url, network)?;
@@ -614,11 +654,16 @@ fn cmd_split(
 }
 
 fn cmd_validate(manifest_path: &Path) -> Result<()> {
-    use tx_manifest_lib::validate::Severity;
     use console::style;
+    use tx_manifest_lib::validate::Severity;
 
     println!();
-    println!("{}", style(format!("Validating {}", manifest_path.display())).bold().cyan());
+    println!(
+        "{}",
+        style(format!("Validating {}", manifest_path.display()))
+            .bold()
+            .cyan()
+    );
     println!();
 
     // Parse first — a malformed file or a missing required field is reported here.
@@ -634,7 +679,12 @@ fn cmd_validate(manifest_path: &Path) -> Result<()> {
             Severity::Error => style("[error]").red().bold(),
             Severity::Warning => style("[warn] ").yellow().bold(),
         };
-        println!("  {} {} — {}", tag, style(&issue.location).dim(), issue.message);
+        println!(
+            "  {} {} — {}",
+            tag,
+            style(&issue.location).dim(),
+            issue.message
+        );
     }
 
     if report.issues.is_empty() {
@@ -642,7 +692,11 @@ fn cmd_validate(manifest_path: &Path) -> Result<()> {
     }
 
     println!();
-    let summary = format!("{} error(s), {} warning(s)", report.errors(), report.warnings());
+    let summary = format!(
+        "{} error(s), {} warning(s)",
+        report.errors(),
+        report.warnings()
+    );
     if report.is_ok() {
         println!("{} {}", style("OK:").green().bold(), summary);
         Ok(())
@@ -682,7 +736,10 @@ fn main() -> Result<()> {
             debug_jets,
         } => {
             let cfg = config::load();
-            let network = network.as_deref().unwrap_or(&cfg.default_network).to_string();
+            let network = network
+                .as_deref()
+                .unwrap_or(&cfg.default_network)
+                .to_string();
             let data_dir = data_dir.unwrap_or_else(wallet::default_data_dir);
 
             // Instance/state INPUT files are never auto-discovered from the manifest stem:
@@ -704,10 +761,10 @@ fn main() -> Result<()> {
                 Some(&network),
                 params.as_deref(),
                 loaded_instance.as_ref(),
-                instance.as_deref(),       // instance_in_path
-                instance_out.as_deref(),   // instance_out_path
-                state.as_deref(),          // state_in_path
-                state_out.as_deref(),      // state_out_path
+                instance.as_deref(),     // instance_in_path
+                instance_out.as_deref(), // instance_out_path
+                state.as_deref(),        // state_in_path
+                state_out.as_deref(),    // state_out_path
                 &provided_inputs,
                 &wallet,
                 &data_dir,
@@ -718,17 +775,48 @@ fn main() -> Result<()> {
         }
 
         Commands::Validate { manifest_file } => cmd_validate(&manifest_file),
-        Commands::Describe { manifest_file, action_name } => {
-            cmd_describe(&manifest_file, action_name.as_deref())
-        }
+        Commands::Describe {
+            manifest_file,
+            action_name,
+        } => cmd_describe(&manifest_file, action_name.as_deref()),
         Commands::Config { key, value } => cmd_config(key.as_deref(), value.as_deref()),
-        Commands::Prepare { manifest_file, action_name, wallet, esplora, data_dir, split_amount } =>
-            cmd_prepare(&manifest_file, &action_name, &wallet, esplora.as_deref(), data_dir.as_deref(), split_amount),
+        Commands::Prepare {
+            manifest_file,
+            action_name,
+            wallet,
+            esplora,
+            data_dir,
+            split_amount,
+        } => cmd_prepare(
+            &manifest_file,
+            &action_name,
+            &wallet,
+            esplora.as_deref(),
+            data_dir.as_deref(),
+            split_amount,
+        ),
         Commands::CreateWallet { out, mainnet } => cmd_create_wallet(&out, mainnet),
         Commands::Info { wallet } => cmd_info(&wallet),
-        Commands::Sync { wallet, esplora, data_dir } => cmd_sync(&wallet, esplora.as_deref(), data_dir.as_deref()),
+        Commands::Sync {
+            wallet,
+            esplora,
+            data_dir,
+        } => cmd_sync(&wallet, esplora.as_deref(), data_dir.as_deref()),
         Commands::GetBalance { wallet, data_dir } => cmd_get_balance(&wallet, data_dir.as_deref()),
-        Commands::Split { count, asset, amount_each, wallet, esplora, data_dir } =>
-            cmd_split(count, &asset, amount_each, &wallet, esplora.as_deref(), data_dir.as_deref()),
+        Commands::Split {
+            count,
+            asset,
+            amount_each,
+            wallet,
+            esplora,
+            data_dir,
+        } => cmd_split(
+            count,
+            &asset,
+            amount_each,
+            &wallet,
+            esplora.as_deref(),
+            data_dir.as_deref(),
+        ),
     }
 }

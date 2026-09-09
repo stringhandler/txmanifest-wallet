@@ -34,7 +34,11 @@ const STATES: [(&str, u64); 4] = [
 
 /// Same fixture as `deadcat_recon`: repeated bytes, so the `liquid.asset_id` reversal is a
 /// no-op and the two examples are compared on equal terms.
-fn fixture() -> (HashMap<String, String>, HashMap<String, String>, ExecutionContext) {
+fn fixture() -> (
+    HashMap<String, String>,
+    HashMap<String, String>,
+    ExecutionContext,
+) {
     let fields: [(&str, String, &str); 8] = [
         ("ORACLE_PUBLIC_KEY", "aa".repeat(32), "pubkey"),
         ("COLLATERAL_ASSET_ID", "bb".repeat(32), "liquid.asset_id"),
@@ -115,8 +119,17 @@ fn main() {
             "{gone} is still a witness — the commitment check was not fully removed"
         );
     }
-    for kept in ["STATE", "PATH", "ORACLE_SIGNATURE", "TOKENS_BURNED", "PAIRS_BURNED"] {
-        assert!(names.iter().any(|n| n == kept), "{kept} must survive the fork");
+    for kept in [
+        "STATE",
+        "PATH",
+        "ORACLE_SIGNATURE",
+        "TOKENS_BURNED",
+        "PAIRS_BURNED",
+    ] {
+        assert!(
+            names.iter().any(|n| n == kept),
+            "{kept} must survive the fork"
+        );
     }
 
     println!("\nOK: v2 moved all four addresses and dropped all eight blinding witnesses.");
@@ -127,8 +140,12 @@ fn v2_witness_names() -> Vec<String> {
     use simplicityhl::{Arguments, CompiledProgram};
 
     let (params, _, _) = fixture();
-    let asset_arg =
-        |name: &str| format!(r#""{name}": {{ "value": "0x{}", "type": "u256" }}"#, params[name]);
+    let asset_arg = |name: &str| {
+        format!(
+            r#""{name}": {{ "value": "0x{}", "type": "u256" }}"#,
+            params[name]
+        )
+    };
     let args_json = format!(
         "{{{}, {}, {}, {}, {}, {}, {}, {}}}",
         asset_arg("ORACLE_PUBLIC_KEY"),
@@ -147,5 +164,8 @@ fn v2_witness_names() -> Vec<String> {
         .expect("compile v2")
         .generate_abi_meta()
         .expect("abi");
-    abi.witness_types.iter().map(|(n, _)| n.to_string()).collect()
+    abi.witness_types
+        .iter()
+        .map(|(n, _)| n.to_string())
+        .collect()
 }
