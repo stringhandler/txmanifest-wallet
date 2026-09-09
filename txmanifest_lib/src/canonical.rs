@@ -100,7 +100,10 @@ pub fn manifest_id(raw: &str) -> Result<[u8; 32]> {
 
 /// [`manifest_id`] as lowercase hex — the form a registry key would take.
 pub fn manifest_id_hex(raw: &str) -> Result<String> {
-    Ok(manifest_id(raw)?.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(manifest_id(raw)?
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 #[cfg(test)]
@@ -125,7 +128,10 @@ mod tests {
     fn editing_a_description_does_not_change_the_id() {
         // The whole point: prose churn must not mint a new registry entry.
         let edited = BASE
-            .replace("the original prose", "completely rewritten, much longer prose")
+            .replace(
+                "the original prose",
+                "completely rewritten, much longer prose",
+            )
             .replace("developer note", "a different note entirely");
         assert_eq!(manifest_id(BASE).unwrap(), manifest_id(&edited).unwrap());
     }
@@ -136,7 +142,10 @@ mod tests {
         let value: Value = serde_json::from_str(BASE).unwrap();
         let reformatted = serde_json::to_string_pretty(&value).unwrap();
         let compact = serde_json::to_string(&value).unwrap();
-        assert_eq!(manifest_id(BASE).unwrap(), manifest_id(&reformatted).unwrap());
+        assert_eq!(
+            manifest_id(BASE).unwrap(),
+            manifest_id(&reformatted).unwrap()
+        );
         assert_eq!(manifest_id(BASE).unwrap(), manifest_id(&compact).unwrap());
     }
 
@@ -171,7 +180,10 @@ mod tests {
         for key in UNHASHED_KEYS {
             assert!(!text.contains(key), "canonical form still contains '{key}'");
         }
-        assert!(text.contains("change back to you"), "ui.label must be hashed");
+        assert!(
+            text.contains("change back to you"),
+            "ui.label must be hashed"
+        );
     }
 
     #[test]

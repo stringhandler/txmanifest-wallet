@@ -418,7 +418,9 @@ pub enum ParamCompute {
     /// wallet-derived?" is a single check on `compute` before dispatching on
     /// `wallet` — and so adding a new wallet-derived value does not grow the
     /// top-level variant list.
-    Wallet { wallet: WalletValue },
+    Wallet {
+        wallet: WalletValue,
+    },
     /// Call a named function in a `.simf` file after inputs are resolved.
     /// The function is compiled with `compile_params` as param:: constants.
     /// Its runtime input is read from `input` (a dot-path into ctx, e.g. `"params.STATE_BYTES"`).
@@ -518,7 +520,11 @@ pub enum AllowChange {
 
 impl AllowChange {
     /// Whether a surplus in `asset` may be returned to the wallet.
-    pub fn permits(&self, asset: &lwk_wollet::elements::AssetId, policy_asset: &lwk_wollet::elements::AssetId) -> bool {
+    pub fn permits(
+        &self,
+        asset: &lwk_wollet::elements::AssetId,
+        policy_asset: &lwk_wollet::elements::AssetId,
+    ) -> bool {
         match self {
             AllowChange::None => false,
             AllowChange::LbtcOnly => asset == policy_asset,
@@ -765,7 +771,6 @@ pub struct Input {
     /// Clear-signing UI hint for this input (net-effect debit line).
     pub ui: Option<UiSpec>,
 }
-
 
 impl Input {
     /// This input's short human-readable label, if it declares one.
@@ -1398,7 +1403,11 @@ impl UtxoType {
         std::collections::HashMap<String, String>,
         std::collections::HashMap<String, String>,
     )> {
-        let declared = self.params.as_ref().map(|p| p.iter().collect::<Vec<_>>()).unwrap_or_default();
+        let declared = self
+            .params
+            .as_ref()
+            .map(|p| p.iter().collect::<Vec<_>>())
+            .unwrap_or_default();
         let args = site
             .and_then(|s| s.get(SITE_ARGS_KEY))
             .and_then(|a| a.as_object());
@@ -1410,7 +1419,11 @@ impl UtxoType {
                 if !self.params.as_ref().is_some_and(|p| p.contains_key(name)) {
                     anyhow::bail!(
                         "'{name}' is not a param of this utxo_type; declared: [{}]",
-                        declared.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+                        declared
+                            .iter()
+                            .map(|(n, _)| n.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     );
                 }
             }
@@ -1568,7 +1581,10 @@ mod tests {
     fn format_version_gate_is_minor_exact_at_zero_x() {
         assert!(check_format_version("0.2.0").is_ok());
         assert!(check_format_version("0.2.7").is_ok(), "patch must not gate");
-        assert!(check_format_version("0.2.0-rc1").is_ok(), "pre-release must not gate");
+        assert!(
+            check_format_version("0.2.0-rc1").is_ok(),
+            "pre-release must not gate"
+        );
 
         for rejected in ["0.1.0", "0.3.0", "1.0.0", "1.2.0"] {
             assert!(
@@ -1582,7 +1598,10 @@ mod tests {
     #[test]
     fn format_version_rejects_non_semver() {
         for junk in ["", "latest", "v0.2.0", "0.x"] {
-            assert!(check_format_version(junk).is_err(), "{junk:?} must not be read as a version");
+            assert!(
+                check_format_version(junk).is_err(),
+                "{junk:?} must not be read as a version"
+            );
         }
     }
 
@@ -1965,7 +1984,9 @@ mod tests {
         // Binding a name the type does not declare is a typo that would otherwise be a
         // no-op — the site would silently derive the default address.
         let typo = serde_json::json!({ "utxo_type": "vault", "args": { "STAT": "0x00" } });
-        let err = ut.bind_site_params(Some(&typo), &arg, &default).unwrap_err();
+        let err = ut
+            .bind_site_params(Some(&typo), &arg, &default)
+            .unwrap_err();
         assert!(err.to_string().contains("STAT"), "{err}");
     }
 
@@ -1984,7 +2005,10 @@ mod tests {
 
         let err = ut.bind_site_params(None, &id, &id).unwrap_err();
         assert!(err.to_string().contains("DEBT"), "{err}");
-        assert!(err.to_string().contains("args"), "should say how to fix it: {err}");
+        assert!(
+            err.to_string().contains("args"),
+            "should say how to fix it: {err}"
+        );
 
         let site = serde_json::json!({ "utxo_type": "vault", "args": { "DEBT": "1000" } });
         let (values, _) = ut.bind_site_params(Some(&site), &id, &id).unwrap();
@@ -2064,7 +2088,10 @@ mod tests {
         .expect_err("a misspelled feature must not parse");
         let msg = err.to_string();
         assert!(msg.contains("enum"), "{msg}");
-        assert!(msg.contains("enums"), "message should list known features: {msg}");
+        assert!(
+            msg.contains("enums"),
+            "message should list known features: {msg}"
+        );
 
         // Both settings travel together to the compile sites.
         let both = Manifest::from_json_str(
@@ -2101,7 +2128,11 @@ mod tests {
         for n in ["K", "H", "A"] {
             // A wallet value is not reproducible from the manifest, so it must never
             // be mistaken for an expression the engine could evaluate itself.
-            assert_eq!(spec(n).as_expr(), None, "{n} must not read as an expression");
+            assert_eq!(
+                spec(n).as_expr(),
+                None,
+                "{n} must not read as an expression"
+            );
         }
         assert!(spec("E").as_wallet().is_none());
         assert_eq!(spec("E").as_expr(), Some("1 + 1"));
@@ -2216,7 +2247,10 @@ mod tests {
         // (compute spec, the substring the error must contain)
         for (compute, needle) in [
             // An unknown key inside an otherwise well-formed spec.
-            (r#"{ "type": "tapleaf", "simf": "./a.simf", "bogus": 1 }"#, "bogus"),
+            (
+                r#"{ "type": "tapleaf", "simf": "./a.simf", "bogus": 1 }"#,
+                "bogus",
+            ),
             // An unknown discriminator.
             (r#"{ "type": "no_such_kind" }"#, "no_such_kind"),
             // A required field missing from a known variant.
@@ -2302,6 +2336,9 @@ mod tests {
     fn type_wins_when_both_keys_present() {
         // `type` is canonical; a stray `lang` must not override it.
         let fv = parse_field_value(r#"{ "type": "expr", "lang": "tapleaf", "expr": "1 + 1" }"#);
-        assert!(matches!(fv, ComputeSpec::Compute(ParamCompute::Expr { .. })));
+        assert!(matches!(
+            fv,
+            ComputeSpec::Compute(ParamCompute::Expr { .. })
+        ));
     }
 }

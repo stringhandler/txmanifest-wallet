@@ -23,12 +23,23 @@ fn main() {
     hints.insert("SCRIPT_HASH".to_string(), "bytes32".to_string());
 
     let tapleaf = covenant::compute_tapleaf_hash(&simf, &params, &hints, true).unwrap();
-    let spk_hash =
-        covenant::compute_covenant_script_hash(&simf, &params, &hints, ElementsNetwork::LiquidTestnet, true)
-            .unwrap();
-    let addr =
-        covenant::compute_covenant_address(&simf, &params, &hints, &[], ElementsNetwork::LiquidTestnet, true)
-            .unwrap();
+    let spk_hash = covenant::compute_covenant_script_hash(
+        &simf,
+        &params,
+        &hints,
+        ElementsNetwork::LiquidTestnet,
+        true,
+    )
+    .unwrap();
+    let addr = covenant::compute_covenant_address(
+        &simf,
+        &params,
+        &hints,
+        &[],
+        ElementsNetwork::LiquidTestnet,
+        true,
+    )
+    .unwrap();
 
     eprintln!("---- result ----");
     println!("simf         = {}", simf.display());

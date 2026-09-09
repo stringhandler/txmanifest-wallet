@@ -12,9 +12,9 @@
 // so the `liquid.asset_id` byte-reversal is a no-op and the two sides are comparable.
 use std::collections::HashMap;
 
-use lwk_wollet::ElementsNetwork;
-use lwk_wollet::elements::hashes::{Hash, HashEngine, sha256};
+use lwk_wollet::elements::hashes::{sha256, Hash, HashEngine};
 use lwk_wollet::elements::secp256k1_zkp::{Scalar, Secp256k1, XOnlyPublicKey};
+use lwk_wollet::ElementsNetwork;
 use tx_manifest_lib::context::ExecutionContext;
 use tx_manifest_lib::covenant;
 use tx_manifest_lib::manifest::Manifest;
@@ -154,11 +154,11 @@ fn main() {
 /// hand, so this is where a mis-nested `Left`/`Right` would otherwise go unnoticed until a
 /// spend failed on chain.
 fn check_witness_literals(simf: &std::path::Path, params: &HashMap<String, String>) {
+    use simplicityhl::ast::ElementsJetHinter;
     use simplicityhl::parse::ParseFromStr;
     use simplicityhl::str::WitnessName;
     use simplicityhl::value::Value;
     use simplicityhl::{Arguments, CompiledProgram};
-    use simplicityhl::ast::ElementsJetHinter;
 
     let asset_arg = |name: &str| {
         format!(
@@ -179,8 +179,9 @@ fn check_witness_literals(simf: &std::path::Path, params: &HashMap<String, Strin
     );
     let arguments: Arguments = serde_json::from_str(&args_json).expect("arguments");
     let source = std::fs::read_to_string(simf).expect("read simf");
-    let compiled = CompiledProgram::new(source, arguments, false, Box::new(ElementsJetHinter::new()))
-        .expect("compile");
+    let compiled =
+        CompiledProgram::new(source, arguments, false, Box::new(ElementsJetHinter::new()))
+            .expect("compile");
     let abi = compiled.generate_abi_meta().expect("abi");
 
     eprintln!("---- witness ABI ----");
@@ -193,12 +194,28 @@ fn check_witness_literals(simf: &std::path::Path, params: &HashMap<String, Strin
     let burn_literal = format!("0x{}", "01".repeat(32));
     let literals: [(&str, &str, &str); 13] = [
         ("PATH", "Left(Left(Left(())))", "path 1 — initial issuance"),
-        ("PATH", "Left(Left(Right(())))", "path 2 — subsequent issuance"),
+        (
+            "PATH",
+            "Left(Left(Right(())))",
+            "path 2 — subsequent issuance",
+        ),
         ("PATH", "Left(Right(Left(())))", "path 3 — oracle resolve"),
-        ("PATH", "Left(Right(Right(())))", "path 4 — post-resolution redemption"),
-        ("PATH", "Right(Left(Left(())))", "path 5 — expiry redemption"),
+        (
+            "PATH",
+            "Left(Right(Right(())))",
+            "path 4 — post-resolution redemption",
+        ),
+        (
+            "PATH",
+            "Right(Left(Left(())))",
+            "path 5 — expiry redemption",
+        ),
         ("PATH", "Right(Left(Right(())))", "path 6 — cancellation"),
-        ("PATH", "Right(Right(()))", "path 7 — secondary covenant input"),
+        (
+            "PATH",
+            "Right(Right(()))",
+            "path 7 — secondary covenant input",
+        ),
         ("STATE", "0", "dormant"),
         ("STATE", "3", "resolved-no"),
         ("ORACLE_OUTCOME_YES", "true", "YES resolve"),

@@ -8,8 +8,8 @@ use lwk_wollet::{
         hashes::{sha256, Hash as _},
         pset::{Input, Output, PartiallySignedTransaction},
         secp256k1_zkp::{RangeProof, SecretKey, SurjectionProof, Tweak},
-        AssetId, ContractHash, OutPoint, Script, Sequence, Txid, TxOut, TxOutWitness,
-        BlindAssetProofs, BlindValueProofs, RangeProofMessage, SurjectionInput, TxOutSecrets,
+        AssetId, BlindAssetProofs, BlindValueProofs, ContractHash, OutPoint, RangeProofMessage,
+        Script, Sequence, SurjectionInput, TxOut, TxOutSecrets, TxOutWitness, Txid,
     },
     ElementsNetwork, WalletTxOut, Wollet, EC,
 };
@@ -125,7 +125,11 @@ pub struct BuildPsetResult {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-pub fn build_pset(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRequest) -> Result<BuildPsetResult> {
+pub fn build_pset(
+    wollet: &Wollet,
+    network: ElementsNetwork,
+    req: &BuildPsetRequest,
+) -> Result<BuildPsetResult> {
     let secp = EC.clone();
     let mut rng = thread_rng();
 
@@ -138,8 +142,17 @@ pub fn build_pset(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRequ
     let wallet_blinding_pk_btc = btc_pubkey(wallet_blinding_pk);
 
     // First pass: temp fee=1 to estimate weight.
-    let (temp_pset, temp_sec, _) =
-        build_inner(wollet, &secp, &mut rng, req, 1, wallet_blinding_pk_btc, network, false, false)?;
+    let (temp_pset, temp_sec, _) = build_inner(
+        wollet,
+        &secp,
+        &mut rng,
+        req,
+        1,
+        wallet_blinding_pk_btc,
+        network,
+        false,
+        false,
+    )?;
     let fee = {
         let mut tmp = temp_pset.clone();
         let mut tmp_rng = thread_rng();
@@ -157,8 +170,17 @@ pub fn build_pset(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRequ
     };
 
     // Second pass: real fee.
-    let (mut pset, inp_txout_sec, issuances) =
-        build_inner(wollet, &secp, &mut rng, req, fee, wallet_blinding_pk_btc, network, false, true)?;
+    let (mut pset, inp_txout_sec, issuances) = build_inner(
+        wollet,
+        &secp,
+        &mut rng,
+        req,
+        fee,
+        wallet_blinding_pk_btc,
+        network,
+        false,
+        true,
+    )?;
 
     wollet
         .add_details(&mut pset)
@@ -227,10 +249,9 @@ fn blind_with_pinned_factors(
         if out.blinding_key.is_none() {
             continue;
         }
-        let blinder = out
-            .blinder_index
-            .ok_or_else(|| anyhow::anyhow!("Output {i} is confidential but names no blinder input"))?
-            as usize;
+        let blinder = out.blinder_index.ok_or_else(|| {
+            anyhow::anyhow!("Output {i} is confidential but names no blinder input")
+        })? as usize;
         if blinder >= pset.inputs().len() {
             anyhow::bail!("Output {i} names blinder input {blinder}, which does not exist");
         }
@@ -259,7 +280,10 @@ fn blind_with_pinned_factors(
         let (Some(abf), Some(asset)) = (pin.asset_bf, pset.outputs()[i].asset) else {
             continue;
         };
-        if inp_txout_sec.values().any(|s| s.asset == asset && s.asset_bf == abf) {
+        if inp_txout_sec
+            .values()
+            .any(|s| s.asset == asset && s.asset_bf == abf)
+        {
             anyhow::bail!(
                 "Output {i} pins the asset blinding factor of an input carrying the same \
                  asset ({asset}).\n\
@@ -300,8 +324,12 @@ fn blind_with_pinned_factors(
             continue;
         }
         let pin = pins.get(&i).copied().unwrap_or_default();
-        let abf = pin.asset_bf.unwrap_or_else(|| AssetBlindingFactor::new(rng));
-        let vbf = pin.value_bf.unwrap_or_else(|| ValueBlindingFactor::new(rng));
+        let abf = pin
+            .asset_bf
+            .unwrap_or_else(|| AssetBlindingFactor::new(rng));
+        let vbf = pin
+            .value_bf
+            .unwrap_or_else(|| ValueBlindingFactor::new(rng));
         let value = blind_one_output(pset, i, secp, rng, &surject_inputs, abf, vbf)?;
         out_secrets.push((value, abf, vbf));
     }
@@ -315,7 +343,11 @@ fn blind_with_pinned_factors(
         let amount = out
             .amount
             .ok_or_else(|| anyhow::anyhow!("Explicit output {i} has no amount"))?;
-        out_secrets.push((amount, AssetBlindingFactor::zero(), ValueBlindingFactor::zero()));
+        out_secrets.push((
+            amount,
+            AssetBlindingFactor::zero(),
+            ValueBlindingFactor::zero(),
+        ));
     }
 
     let inp_secrets: Vec<(u64, AssetBlindingFactor, ValueBlindingFactor)> = inp_txout_sec
@@ -372,7 +404,10 @@ fn blind_one_output(
             blinding_pk,
             SecretKey::new(rng),
             &script_pubkey,
-            &RangeProofMessage { asset: asset_id, bf: abf },
+            &RangeProofMessage {
+                asset: asset_id,
+                bf: abf,
+            },
         )
         .map_err(|e| anyhow::anyhow!("Output {idx} value blinding failed: {e}"))?;
 
@@ -395,10 +430,12 @@ fn blind_one_output(
     out.asset_surjection_proof = Some(Box::new(surjection_proof));
     out.amount_comm = Some(value_commitment);
     out.asset_comm = Some(asset_gen);
-    out.ecdh_pubkey = nonce.commitment().map(|pk| lwk_wollet::elements::bitcoin::PublicKey {
-        inner: pk,
-        compressed: true,
-    });
+    out.ecdh_pubkey = nonce
+        .commitment()
+        .map(|pk| lwk_wollet::elements::bitcoin::PublicKey {
+            inner: pk,
+            compressed: true,
+        });
     out.blind_asset_proof = Some(Box::new(blind_asset_proof));
     out.blind_value_proof = Some(Box::new(blind_value_proof));
 
@@ -414,10 +451,13 @@ fn blind_one_output(
 fn estimated_input_witness_weight(req: &BuildPsetRequest) -> usize {
     const WALLET_INPUT_WU: usize = 108;
     const COVENANT_INPUT_WU: usize = 800;
-    req.inputs.iter().map(|i| match i {
-        PsetInput::Wallet { .. } => WALLET_INPUT_WU,
-        PsetInput::Covenant { .. } => COVENANT_INPUT_WU,
-    }).sum()
+    req.inputs
+        .iter()
+        .map(|i| match i {
+            PsetInput::Wallet { .. } => WALLET_INPUT_WU,
+            PsetInput::Covenant { .. } => COVENANT_INPUT_WU,
+        })
+        .sum()
 }
 
 /// Estimate the network fee (sats) for `req`, from the resulting transaction's
@@ -428,7 +468,11 @@ fn estimated_input_witness_weight(req: &BuildPsetRequest) -> usize {
 /// Note: like the builder's own estimate, this counts a fixed witness allowance
 /// for wallet inputs but not the (large, variable) Simplicity witness of covenant
 /// inputs — so covenant spends are under-counted, same as elsewhere in the tool.
-pub fn estimate_fee(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRequest) -> Result<u64> {
+pub fn estimate_fee(
+    wollet: &Wollet,
+    network: ElementsNetwork,
+    req: &BuildPsetRequest,
+) -> Result<u64> {
     let secp = EC.clone();
     let mut rng = thread_rng();
 
@@ -440,8 +484,17 @@ pub fn estimate_fee(wollet: &Wollet, network: ElementsNetwork, req: &BuildPsetRe
         .context("Wallet address has no blinding key — not a CT descriptor")?;
     let wallet_blinding_pk_btc = btc_pubkey(wallet_blinding_pk);
 
-    let (draft_pset, draft_sec, _) =
-        build_inner(wollet, &secp, &mut rng, req, 0, wallet_blinding_pk_btc, network, true, false)?;
+    let (draft_pset, draft_sec, _) = build_inner(
+        wollet,
+        &secp,
+        &mut rng,
+        req,
+        0,
+        wallet_blinding_pk_btc,
+        network,
+        true,
+        false,
+    )?;
     let mut tmp = draft_pset;
     if pset_has_confidential_output(&tmp) {
         tmp.blind_last(&mut rng, &secp, &draft_sec)
@@ -475,7 +528,11 @@ fn build_inner(
     // Only the final pass checks the absorbed surplus. The weight-estimation pass runs with
     // a placeholder fee of 1, against which every real surplus looks absurd.
     enforce_fee_sanity: bool,
-) -> Result<(PartiallySignedTransaction, HashMap<usize, TxOutSecrets>, Vec<IssuanceResult>)> {
+) -> Result<(
+    PartiallySignedTransaction,
+    HashMap<usize, TxOutSecrets>,
+    Vec<IssuanceResult>,
+)> {
     let mut pset = PartiallySignedTransaction::new_v2();
     let mut inp_txout_sec: HashMap<usize, TxOutSecrets> = HashMap::new();
     let mut issuances: Vec<IssuanceResult> = Vec::new();
@@ -486,7 +543,12 @@ fn build_inner(
     // Add inputs
     for pset_input in &req.inputs {
         match pset_input {
-            PsetInput::Wallet { input_id, utxo, issuance, sequence } => {
+            PsetInput::Wallet {
+                input_id,
+                utxo,
+                issuance,
+                sequence,
+            } => {
                 let idx = add_wallet_input(&mut pset, &mut inp_txout_sec, wollet, secp, rng, utxo)?;
                 apply_sequence(&mut pset, idx, *sequence);
                 if let Some(iso) = issuance {
@@ -503,18 +565,39 @@ fn build_inner(
                         }
                         IssuanceKind::Reissue { entropy, .. } => Some(*entropy),
                     };
-                    issuances.push(IssuanceResult { input_id: input_id.clone(), asset_id, token_id, entropy });
+                    issuances.push(IssuanceResult {
+                        input_id: input_id.clone(),
+                        asset_id,
+                        token_id,
+                        entropy,
+                    });
                 }
                 if utxo.unblinded.asset == req.policy_asset {
                     total_lbtc_in += utxo.unblinded.value;
                 } else {
-                    *wallet_asset_in.entry(utxo.unblinded.asset).or_default() += utxo.unblinded.value;
+                    *wallet_asset_in.entry(utxo.unblinded.asset).or_default() +=
+                        utxo.unblinded.value;
                 }
             }
-            PsetInput::Covenant { input_id, outpoint, script_pubkey, asset, amount, issuance, sequence, blinding } => {
+            PsetInput::Covenant {
+                input_id,
+                outpoint,
+                script_pubkey,
+                asset,
+                amount,
+                issuance,
+                sequence,
+                blinding,
+            } => {
                 let idx = add_covenant_input(
-                    &mut pset, &mut inp_txout_sec, secp, *outpoint, script_pubkey.clone(),
-                    *asset, *amount, *blinding,
+                    &mut pset,
+                    &mut inp_txout_sec,
+                    secp,
+                    *outpoint,
+                    script_pubkey.clone(),
+                    *asset,
+                    *amount,
+                    *blinding,
                 )?;
                 apply_sequence(&mut pset, idx, *sequence);
                 if let Some(iso) = issuance {
@@ -535,7 +618,12 @@ fn build_inner(
                         }
                     };
                     let (asset_id, token_id) = pset.inputs()[idx].issuance_ids();
-                    issuances.push(IssuanceResult { input_id: input_id.clone(), asset_id, token_id, entropy });
+                    issuances.push(IssuanceResult {
+                        input_id: input_id.clone(),
+                        asset_id,
+                        token_id,
+                        entropy,
+                    });
                 }
                 if *asset == req.policy_asset {
                     total_lbtc_in += amount;
@@ -545,79 +633,67 @@ fn build_inner(
     }
 
     // L-BTC accounting
-    let total_lbtc_out: u64 = req.outputs.iter()
+    let total_lbtc_out: u64 = req
+        .outputs
+        .iter()
         .filter(|o| o.asset == req.policy_asset)
         .map(|o| o.amount)
         .sum();
-    // When the action declares a change output, the fee is the estimate and any
-    // surplus becomes change. When it doesn't, the fee absorbs the whole surplus
-    // (no change output is ever added) — so the tx is exactly the declared outputs
-    // plus the fee, as recursive covenants require.
-    let (change, fee) = if draft {
-        (0u64, total_lbtc_in.saturating_sub(total_lbtc_out))
-    } else if req.change_assets.contains(&req.policy_asset) {
-        let lbtc_needed = total_lbtc_out + fee;
-        if total_lbtc_in < lbtc_needed {
-            anyhow::bail!(
-                "Insufficient L-BTC: have {} sat, need {} sat (outputs {} + fee {})",
-                total_lbtc_in, lbtc_needed, total_lbtc_out, fee
-            );
-        }
-        (total_lbtc_in - lbtc_needed, fee)
-    } else {
-        if total_lbtc_in <= total_lbtc_out {
-            anyhow::bail!(
-                "No change output declared, but L-BTC inputs ({} sat) do not exceed outputs ({} sat) — nothing left to cover the fee",
-                total_lbtc_in, total_lbtc_out
-            );
-        }
-        let surplus = total_lbtc_in - total_lbtc_out;
-        // No change permitted for L-BTC, so the surplus IS the fee — and anything the fee
-        // does not account for is value leaving the wallet to no declared destination.
-        // Paying it to miners silently is exactly the failure `allow_change` exists to
-        // prevent, so the difference is an error, not a donation.
-        if enforce_fee_sanity && surplus != fee {
-            anyhow::bail!(
-                "L-BTC does not balance: inputs exceed outputs by {surplus} sat, but the fee \
-                 is {fee} sat, leaving {} sat unaccounted for.\n\
-                 This action does not permit L-BTC change, so there is nowhere for it to go. \
-                 Either set \"allow_change\": \"lbtc_only\" on the action, declare a change \
-                 output, or size the input to outputs + fee exactly.",
-                surplus.saturating_sub(fee)
-            );
-        }
-        (0u64, surplus)
-    };
+    // The change/fee split is the one calculation here whose silent wrong answer costs the
+    // user money, so it lives in a pure function that can be tested without a wallet.
+    let (change, fee) = resolve_lbtc_balance(
+        total_lbtc_in,
+        total_lbtc_out,
+        fee,
+        req.change_assets.contains(&req.policy_asset),
+        draft,
+        enforce_fee_sanity,
+    )?;
 
     // blinder_index must reference an input whose secrets are in inp_txout_sec (i.e. a wallet
     // input).  Inputs may arrive in any order so we pick the first wallet input by key.
-    let blinder_idx = inp_txout_sec
-        .keys()
-        .copied()
-        .min()
-        .unwrap_or(0) as u32;
+    let blinder_idx = inp_txout_sec.keys().copied().min().unwrap_or(0) as u32;
 
     // Add specified outputs
     for o in &req.outputs {
-        pset.add_output(build_output(o.script_pubkey.clone(), o.amount, o.asset, o.blinding_key, blinder_idx));
+        pset.add_output(build_output(
+            o.script_pubkey.clone(),
+            o.amount,
+            o.asset,
+            o.blinding_key,
+            blinder_idx,
+        ));
     }
 
     // L-BTC change output (if any)
     if change > 0 {
-        let change_addr = wollet.change(None).context("Cannot derive change address")?.address().clone();
+        let change_addr = wollet
+            .change(None)
+            .context("Cannot derive change address")?
+            .address()
+            .clone();
         let change_bpk = change_addr
             .blinding_pubkey
             .map(btc_pubkey)
             .unwrap_or(wallet_blinding_pk);
         pset.add_output(confidential_output(
-            change_addr.script_pubkey(), change, req.policy_asset, change_bpk, blinder_idx
+            change_addr.script_pubkey(),
+            change,
+            req.policy_asset,
+            change_bpk,
+            blinder_idx,
         ));
     }
 
     // Non-LBTC change outputs: for any wallet-input asset where the input exceeds the outputs.
-    let total_non_lbtc_out: HashMap<AssetId, u64> = req.outputs.iter()
+    let total_non_lbtc_out: HashMap<AssetId, u64> = req
+        .outputs
+        .iter()
         .filter(|o| o.asset != req.policy_asset)
-        .fold(HashMap::new(), |mut m, o| { *m.entry(o.asset).or_default() += o.amount; m });
+        .fold(HashMap::new(), |mut m, o| {
+            *m.entry(o.asset).or_default() += o.amount;
+            m
+        });
     for (asset, in_amt) in &wallet_asset_in {
         let out_amt = total_non_lbtc_out.get(asset).copied().unwrap_or(0);
         if *in_amt > out_amt && !req.change_assets.contains(asset) {
@@ -636,19 +712,102 @@ fn build_inner(
         }
         if *in_amt > out_amt {
             let surplus = in_amt - out_amt;
-            let change_addr = wollet.change(None).context("Cannot derive change address")?.address().clone();
-            let change_bpk = change_addr.blinding_pubkey.map(btc_pubkey).unwrap_or(wallet_blinding_pk);
+            let change_addr = wollet
+                .change(None)
+                .context("Cannot derive change address")?
+                .address()
+                .clone();
+            let change_bpk = change_addr
+                .blinding_pubkey
+                .map(btc_pubkey)
+                .unwrap_or(wallet_blinding_pk);
             pset.add_output(confidential_output(
-                change_addr.script_pubkey(), surplus, *asset, change_bpk, blinder_idx
+                change_addr.script_pubkey(),
+                surplus,
+                *asset,
+                change_bpk,
+                blinder_idx,
             ));
         }
     }
 
     // Fee output
-    pset.add_output(Output::new_explicit(Script::default(), fee, req.policy_asset, None));
+    pset.add_output(Output::new_explicit(
+        Script::default(),
+        fee,
+        req.policy_asset,
+        None,
+    ));
 
     let _ = network; // reserved for future address encoding
     Ok((pset, inp_txout_sec, issuances))
+}
+
+/// Split the L-BTC a transaction holds into a change amount and a network fee.
+///
+/// `lbtc_change_permitted` is whether the action declared a `"change"` output for L-BTC, or
+/// set `allow_change` to something that covers it. When it did, the fee is the estimate and
+/// the surplus becomes change. When it did not, no change output is ever added — the
+/// transaction is exactly the declared outputs plus the fee, as recursive covenants
+/// require — so a surplus larger than the fee has nowhere to go, and is an error rather
+/// than a silent donation to miners.
+///
+/// `draft` is the sizing pass: it balances nothing and adds no change, because its only job
+/// is to produce a transaction of the right vsize. `enforce_fee_sanity` is off for the
+/// weight-estimation pass too, which runs with a placeholder fee of 1 that every real
+/// surplus would look absurd against.
+///
+/// Kept pure and separate from [`build_inner`] because reaching it there needs a funded
+/// wallet, and this is the one calculation in this module whose silent wrong answer is
+/// measured in the user's satoshis.
+fn resolve_lbtc_balance(
+    total_lbtc_in: u64,
+    total_lbtc_out: u64,
+    fee: u64,
+    lbtc_change_permitted: bool,
+    draft: bool,
+    enforce_fee_sanity: bool,
+) -> Result<(u64, u64)> {
+    if draft {
+        return Ok((0u64, total_lbtc_in.saturating_sub(total_lbtc_out)));
+    }
+
+    if lbtc_change_permitted {
+        let lbtc_needed = total_lbtc_out + fee;
+        if total_lbtc_in < lbtc_needed {
+            anyhow::bail!(
+                "Insufficient L-BTC: have {} sat, need {} sat (outputs {} + fee {})",
+                total_lbtc_in,
+                lbtc_needed,
+                total_lbtc_out,
+                fee
+            );
+        }
+        return Ok((total_lbtc_in - lbtc_needed, fee));
+    }
+
+    if total_lbtc_in <= total_lbtc_out {
+        anyhow::bail!(
+            "No change output declared, but L-BTC inputs ({} sat) do not exceed outputs ({} sat) — nothing left to cover the fee",
+            total_lbtc_in, total_lbtc_out
+        );
+    }
+    let surplus = total_lbtc_in - total_lbtc_out;
+    // No change permitted for L-BTC, so the surplus IS the fee — and anything the fee
+    // does not account for is value leaving the wallet to no declared destination.
+    // Paying it to miners silently is exactly the failure `allow_change` exists to
+    // prevent, so the difference is an error, not a donation.
+    if enforce_fee_sanity && surplus != fee {
+        anyhow::bail!(
+            "L-BTC does not balance: inputs exceed outputs by {surplus} sat, but the fee \
+             is {fee} sat, leaving {} sat unaccounted for.\n\
+             This action does not permit L-BTC change, so there is nowhere for it to go. \
+             Either set \"allow_change\": \"lbtc_only\" on the action, declare a change \
+             output, or size the input to outputs + fee exactly.",
+            surplus.saturating_sub(fee)
+        );
+    }
+    Ok((0u64, surplus))
 }
 
 // ---------------------------------------------------------------------------
@@ -690,20 +849,32 @@ fn add_wallet_input(
             asset_bf: AssetBlindingFactor::zero(),
         }
     } else {
-        let value_comm = txout.value.commitment()
+        let value_comm = txout
+            .value
+            .commitment()
             .ok_or_else(|| anyhow::anyhow!("Input TxOut value is not a commitment"))?;
-        let asset_gen = txout.asset.commitment()
+        let asset_gen = txout
+            .asset
+            .commitment()
             .ok_or_else(|| anyhow::anyhow!("Input TxOut asset is not a commitment"))?;
         input.in_utxo_rangeproof = txout.witness.rangeproof.take();
         input.witness_utxo = Some(txout);
         input.blind_asset_proof = Some(Box::new(
-            SurjectionProof::blind_asset_proof(rng, secp, utxo.unblinded.asset, utxo.unblinded.asset_bf)
-                .map_err(|e| anyhow::anyhow!("blind_asset_proof failed: {e}"))?,
+            SurjectionProof::blind_asset_proof(
+                rng,
+                secp,
+                utxo.unblinded.asset,
+                utxo.unblinded.asset_bf,
+            )
+            .map_err(|e| anyhow::anyhow!("blind_asset_proof failed: {e}"))?,
         ));
         input.blind_value_proof = Some(Box::new(
             RangeProof::blind_value_proof(
-                rng, secp,
-                utxo.unblinded.value, value_comm, asset_gen,
+                rng,
+                secp,
+                utxo.unblinded.value,
+                value_comm,
+                asset_gen,
                 utxo.unblinded.value_bf,
             )
             .map_err(|e| anyhow::anyhow!("blind_value_proof failed: {e}"))?,
@@ -781,7 +952,12 @@ fn add_covenant_input(
                     script_pubkey,
                     witness: TxOutWitness::default(),
                 },
-                TxOutSecrets { value: amount, value_bf: vbf, asset, asset_bf: abf },
+                TxOutSecrets {
+                    value: amount,
+                    value_bf: vbf,
+                    asset,
+                    asset_bf: abf,
+                },
             )
         }
     };
@@ -805,8 +981,16 @@ fn apply_sequence(pset: &mut PartiallySignedTransaction, idx: usize, sequence: O
     }
 }
 
-fn apply_new_issuance(pset: &mut PartiallySignedTransaction, idx: usize, iso: &IssuanceKind) -> Result<()> {
-    if let IssuanceKind::New { asset_amount, inflation_amount } = iso {
+fn apply_new_issuance(
+    pset: &mut PartiallySignedTransaction,
+    idx: usize,
+    iso: &IssuanceKind,
+) -> Result<()> {
+    if let IssuanceKind::New {
+        asset_amount,
+        inflation_amount,
+    } = iso
+    {
         let input = &mut pset.inputs_mut()[idx];
         if *asset_amount > 0 {
             input.issuance_value_amount = Some(*asset_amount);
@@ -839,7 +1023,11 @@ fn apply_reissuance(
     iso: &IssuanceKind,
     blinding: Option<PinnedBlinding>,
 ) -> Result<()> {
-    if let IssuanceKind::Reissue { asset_amount, entropy } = iso {
+    if let IssuanceKind::Reissue {
+        asset_amount,
+        entropy,
+    } = iso
+    {
         let nonce_bytes = match blinding.and_then(|b| b.asset_bf) {
             Some(abf) => *abf.into_inner().as_ref(),
             None => {
@@ -905,7 +1093,10 @@ fn confidential_output(
 ///   entropy      = fast_merkle_root([prevout_hash, zero_contract_hash])
 ///   asset        = SHA256(entropy || 0x00) as Midstate
 ///   token        = SHA256(entropy || 0x01) as Midstate  (explicit, confidential=false)
-pub fn compute_asset_ids_from_outpoint(txid_display: &str, vout: u32) -> Result<(AssetId, AssetId)> {
+pub fn compute_asset_ids_from_outpoint(
+    txid_display: &str,
+    vout: u32,
+) -> Result<(AssetId, AssetId)> {
     let txid = Txid::from_str(txid_display)
         .map_err(|e| anyhow::anyhow!("Cannot parse txid '{txid_display}': {e}"))?;
     let outpoint = OutPoint::new(txid, vout);
@@ -925,8 +1116,13 @@ pub fn compute_asset_from_entropy(entropy: &[u8; 32]) -> Result<AssetId> {
 // Utility
 // ---------------------------------------------------------------------------
 
-fn btc_pubkey(pk: lwk_wollet::elements::secp256k1_zkp::PublicKey) -> lwk_wollet::elements::bitcoin::PublicKey {
-    lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true }
+fn btc_pubkey(
+    pk: lwk_wollet::elements::secp256k1_zkp::PublicKey,
+) -> lwk_wollet::elements::bitcoin::PublicKey {
+    lwk_wollet::elements::bitcoin::PublicKey {
+        inner: pk,
+        compressed: true,
+    }
 }
 
 /// Resolve the covenant address for a utxo_type and return its script_pubkey.
@@ -938,8 +1134,15 @@ pub fn covenant_script_pubkey(
     network: ElementsNetwork,
     opts: impl Into<covenant::CompileOpts>,
 ) -> Result<Script> {
-    let addr = covenant::compute_covenant_address(simf_path, compile_params, type_hints, extra_leaf_payloads, network, opts)
-        .with_context(|| "Cannot compute covenant address")?;
+    let addr = covenant::compute_covenant_address(
+        simf_path,
+        compile_params,
+        type_hints,
+        extra_leaf_payloads,
+        network,
+        opts,
+    )
+    .with_context(|| "Cannot compute covenant address")?;
     Ok(addr.script_pubkey())
 }
 
@@ -1005,36 +1208,47 @@ mod pinned_blinding_tests {
             witness: TxOutWitness::default(),
         };
         let mut pset = PartiallySignedTransaction::new_v2();
-        let mut input = Input::from_prevout(OutPoint::new(
-            Txid::from_byte_array([1u8; 32]),
-            0,
-        ));
+        let mut input = Input::from_prevout(OutPoint::new(Txid::from_byte_array([1u8; 32]), 0));
         input.witness_utxo = Some(prev.clone());
         input.asset = Some(asset);
         input.amount = Some(1000);
         pset.add_input(input);
 
         let mut secrets = HashMap::new();
-        secrets.insert(0usize, TxOutSecrets {
-            value: 1000,
-            value_bf: ValueBlindingFactor::zero(),
-            asset,
-            asset_bf: AssetBlindingFactor::zero(),
-        });
+        secrets.insert(
+            0usize,
+            TxOutSecrets {
+                value: 1000,
+                value_bf: ValueBlindingFactor::zero(),
+                asset,
+                asset_bf: AssetBlindingFactor::zero(),
+            },
+        );
 
         let pinned_sk = SecretKey::new(&mut rng);
         let free_sk = SecretKey::new(&mut rng);
         pset.add_output(confidential_output(
-            test_spk(2), 600, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &pinned_sk)), 0,
+            test_spk(2),
+            600,
+            asset,
+            btc_pubkey(PublicKey::from_secret_key(&secp, &pinned_sk)),
+            0,
         ));
         pset.add_output(confidential_output(
-            test_spk(3), 300, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &free_sk)), 0,
+            test_spk(3),
+            300,
+            asset,
+            btc_pubkey(PublicKey::from_secret_key(&secp, &free_sk)),
+            0,
         ));
         pset.add_output(Output::new_explicit(Script::default(), 100, asset, None));
 
         let pins = HashMap::from([(
             0usize,
-            PinnedBlinding { asset_bf: Some(one_abf), value_bf: Some(one_vbf) },
+            PinnedBlinding {
+                asset_bf: Some(one_abf),
+                value_bf: Some(one_vbf),
+            },
         )]);
         blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins)
             .expect("pinned blinding");
@@ -1043,9 +1257,17 @@ mod pinned_blinding_tests {
         tx.verify_tx_amt_proofs(&secp, &[prev])
             .expect("rangeproofs, surjection proofs and the commitment balance must all check");
 
-        let opened = tx.output[0].unblind(&secp, pinned_sk).expect("unblind pinned output");
-        assert_eq!(opened.asset_bf, one_abf, "pinned abf must reach the chain verbatim");
-        assert_eq!(opened.value_bf, one_vbf, "pinned vbf must reach the chain verbatim");
+        let opened = tx.output[0]
+            .unblind(&secp, pinned_sk)
+            .expect("unblind pinned output");
+        assert_eq!(
+            opened.asset_bf, one_abf,
+            "pinned abf must reach the chain verbatim"
+        );
+        assert_eq!(
+            opened.value_bf, one_vbf,
+            "pinned vbf must reach the chain verbatim"
+        );
         assert_eq!(opened.value, 600);
         assert_eq!(opened.asset, asset);
     }
@@ -1076,22 +1298,32 @@ mod pinned_blinding_tests {
         pset.add_input(input);
 
         let mut secrets = HashMap::new();
-        secrets.insert(0usize, TxOutSecrets {
-            value: 1000,
-            value_bf: ValueBlindingFactor::zero(),
-            asset,
-            asset_bf: AssetBlindingFactor::zero(),
-        });
+        secrets.insert(
+            0usize,
+            TxOutSecrets {
+                value: 1000,
+                value_bf: ValueBlindingFactor::zero(),
+                asset,
+                asset_bf: AssetBlindingFactor::zero(),
+            },
+        );
 
         let sk = SecretKey::new(&mut rng);
         pset.add_output(confidential_output(
-            test_spk(2), 900, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &sk)), 0,
+            test_spk(2),
+            900,
+            asset,
+            btc_pubkey(PublicKey::from_secret_key(&secp, &sk)),
+            0,
         ));
         pset.add_output(Output::new_explicit(Script::default(), 100, asset, None));
 
         let pins = HashMap::from([(
             0usize,
-            PinnedBlinding { asset_bf: Some(one_abf), value_bf: Some(one_vbf) },
+            PinnedBlinding {
+                asset_bf: Some(one_abf),
+                value_bf: Some(one_vbf),
+            },
         )]);
         let err = blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins)
             .expect_err("no output left free to balance");
@@ -1153,27 +1385,41 @@ mod covenant_input_tests {
         input.amount = Some(10);
         pset.add_input(input);
         let mut secrets = HashMap::new();
-        secrets.insert(0usize, TxOutSecrets {
-            value: 10,
-            value_bf: ValueBlindingFactor::zero(),
-            asset,
-            asset_bf: AssetBlindingFactor::zero(),
-        });
+        secrets.insert(
+            0usize,
+            TxOutSecrets {
+                value: 10,
+                value_bf: ValueBlindingFactor::zero(),
+                asset,
+                asset_bf: AssetBlindingFactor::zero(),
+            },
+        );
 
         let token_sk = SecretKey::new(&mut rng);
         let free_sk = SecretKey::new(&mut rng);
         // Index 0 is the covenant token; index 1 absorbs the balance; index 2 is the fee.
         pset.add_output(confidential_output(
-            spk(2), 1, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &token_sk)), 0,
+            spk(2),
+            1,
+            asset,
+            btc_pubkey(PublicKey::from_secret_key(&secp, &token_sk)),
+            0,
         ));
         pset.add_output(confidential_output(
-            spk(3), 8, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &free_sk)), 0,
+            spk(3),
+            8,
+            asset,
+            btc_pubkey(PublicKey::from_secret_key(&secp, &free_sk)),
+            0,
         ));
         pset.add_output(Output::new_explicit(Script::default(), 1, asset, None));
 
         let pins = HashMap::from([(
             0usize,
-            PinnedBlinding { asset_bf: Some(abf), value_bf: Some(vbf) },
+            PinnedBlinding {
+                asset_bf: Some(abf),
+                value_bf: Some(vbf),
+            },
         )]);
         blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins).unwrap();
         let created = pset.extract_tx().unwrap().output[0].clone();
@@ -1189,15 +1435,27 @@ mod covenant_input_tests {
             spk(2),
             asset,
             1,
-            Some(PinnedBlinding { asset_bf: Some(abf), value_bf: Some(vbf) }),
+            Some(PinnedBlinding {
+                asset_bf: Some(abf),
+                value_bf: Some(vbf),
+            }),
         )
         .expect("rebuild confidential prevout");
 
         let rebuilt = spend.inputs()[0].witness_utxo.as_ref().unwrap();
-        assert_eq!(rebuilt.asset, created.asset, "asset commitment must match the chain's");
-        assert_eq!(rebuilt.value, created.value, "value commitment must match the chain's");
+        assert_eq!(
+            rebuilt.asset, created.asset,
+            "asset commitment must match the chain's"
+        );
+        assert_eq!(
+            rebuilt.value, created.value,
+            "value commitment must match the chain's"
+        );
         assert_eq!(rebuilt.script_pubkey, created.script_pubkey);
-        assert!(rebuilt.asset.commitment().is_some(), "prevout must be confidential");
+        assert!(
+            rebuilt.asset.commitment().is_some(),
+            "prevout must be confidential"
+        );
 
         // And the secrets the blinder will balance against are the real ones, not zeros.
         let sec = &spend_secrets[&0];
@@ -1229,7 +1487,10 @@ mod covenant_input_tests {
             }),
         )
         .expect_err("half a pair must not build a prevout");
-        assert!(err.to_string().contains("both blinding factors"), "got: {err}");
+        assert!(
+            err.to_string().contains("both blinding factors"),
+            "got: {err}"
+        );
     }
 
     /// The reissuance nonce is the spent token's asset blinding factor — Elements rebuilds
@@ -1248,25 +1509,36 @@ mod covenant_input_tests {
         let mut pset = PartiallySignedTransaction::new_v2();
         let mut secrets = HashMap::new();
         let idx = add_covenant_input(
-            &mut pset, &mut secrets, &secp,
+            &mut pset,
+            &mut secrets,
+            &secp,
             OutPoint::new(Txid::from_byte_array([6u8; 32]), 0),
-            spk(2), asset, 1, Some(blinding),
+            spk(2),
+            asset,
+            1,
+            Some(blinding),
         )
         .unwrap();
 
         apply_reissuance(
             &mut pset,
             idx,
-            &IssuanceKind::Reissue { asset_amount: 5, entropy: [2u8; 32] },
+            &IssuanceKind::Reissue {
+                asset_amount: 5,
+                entropy: [2u8; 32],
+            },
             Some(blinding),
         )
         .unwrap();
 
         let nonce = pset.inputs()[idx].issuance_blinding_nonce.unwrap();
-        assert_eq!(nonce.as_ref(), abf.into_inner().as_ref(), "nonce must be the input's abf");
+        assert_eq!(
+            nonce.as_ref(),
+            abf.into_inner().as_ref(),
+            "nonce must be the input's abf"
+        );
     }
 }
-
 
 #[cfg(test)]
 mod abf_reuse_tests {
@@ -1314,20 +1586,31 @@ mod abf_reuse_tests {
 
         // The input is blinded with abf = 1 — exactly what the output below asks for.
         let mut secrets = HashMap::new();
-        secrets.insert(0usize, TxOutSecrets {
-            value: 10,
-            value_bf: ValueBlindingFactor::from_slice(&scalar(5)).unwrap(),
-            asset,
-            asset_bf: one,
-        });
+        secrets.insert(
+            0usize,
+            TxOutSecrets {
+                value: 10,
+                value_bf: ValueBlindingFactor::from_slice(&scalar(5)).unwrap(),
+                asset,
+                asset_bf: one,
+            },
+        );
 
         let sk = SecretKey::new(&mut rng);
         let free_sk = SecretKey::new(&mut rng);
         pset.add_output(confidential_output(
-            spk(2), 1, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &sk)), 0,
+            spk(2),
+            1,
+            asset,
+            btc_pubkey(PublicKey::from_secret_key(&secp, &sk)),
+            0,
         ));
         pset.add_output(confidential_output(
-            spk(3), 8, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &free_sk)), 0,
+            spk(3),
+            8,
+            asset,
+            btc_pubkey(PublicKey::from_secret_key(&secp, &free_sk)),
+            0,
         ));
         pset.add_output(Output::new_explicit(Script::default(), 1, asset, None));
 
@@ -1341,8 +1624,14 @@ mod abf_reuse_tests {
         let err = blind_with_pinned_factors(&mut pset, &secp, &mut rng, &secrets, &pins)
             .expect_err("reusing the input's abf must be refused");
         let msg = err.to_string();
-        assert!(msg.contains("surjection"), "must explain the surjection proof: {msg}");
-        assert!(msg.contains("differ"), "must say what to do about it: {msg}");
+        assert!(
+            msg.contains("surjection"),
+            "must explain the surjection proof: {msg}"
+        );
+        assert!(
+            msg.contains("differ"),
+            "must say what to do about it: {msg}"
+        );
     }
 
     /// The same hand-off with the factor advanced by one — the convention — builds and
@@ -1376,10 +1665,18 @@ mod abf_reuse_tests {
         let sk = SecretKey::new(&mut rng);
         let free_sk = SecretKey::new(&mut rng);
         pset.add_output(confidential_output(
-            spk(2), 1, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &sk)), 0,
+            spk(2),
+            1,
+            asset,
+            btc_pubkey(PublicKey::from_secret_key(&secp, &sk)),
+            0,
         ));
         pset.add_output(confidential_output(
-            spk(3), 8, asset, btc_pubkey(PublicKey::from_secret_key(&secp, &free_sk)), 0,
+            spk(3),
+            8,
+            asset,
+            btc_pubkey(PublicKey::from_secret_key(&secp, &free_sk)),
+            0,
         ));
         pset.add_output(Output::new_explicit(Script::default(), 1, asset, None));
 
@@ -1396,5 +1693,109 @@ mod abf_reuse_tests {
         let tx = pset.extract_tx().unwrap();
         tx.verify_tx_amt_proofs(&secp, &[prev])
             .expect("proofs and balance must check against the rebuilt prevout");
+    }
+}
+
+#[cfg(test)]
+mod lbtc_balance_tests {
+    use super::resolve_lbtc_balance;
+
+    /// A plausible network fee for a small transaction, in sats.
+    const FEE: u64 = 265;
+
+    /// The regression these tests exist for. An action that declares no change output and
+    /// leaves `allow_change` at its default once turned an oversized input into an
+    /// 88,735-sat fee without a word of warning: the surplus had nowhere to go, and the
+    /// builder gave it to the miner. It has to stop the build instead.
+    #[test]
+    fn an_undeclared_lbtc_surplus_is_an_error_not_a_donation_to_miners() {
+        let err = resolve_lbtc_balance(100_000, 10_000, FEE, false, false, true)
+            .expect_err("a surplus with nowhere to go must fail the build");
+        let msg = err.to_string();
+        assert!(msg.contains("does not balance"), "{msg}");
+        assert!(
+            msg.contains(&(90_000 - FEE).to_string()),
+            "the message must name the sats at stake: {msg}"
+        );
+        assert!(
+            msg.contains("allow_change"),
+            "the message must name the way out: {msg}"
+        );
+    }
+
+    /// One satoshi over is still value leaving to a destination the manifest never named.
+    /// The comparison is exact on purpose — a tolerance is a hole the size of the
+    /// tolerance, and nobody would be able to say what the right size is.
+    #[test]
+    fn even_a_single_unaccounted_satoshi_fails() {
+        let err = resolve_lbtc_balance(10_001 + FEE, 10_000, FEE, false, false, true)
+            .expect_err("1 sat is still unaccounted value");
+        assert!(err.to_string().contains("1 sat unaccounted"), "{err}");
+    }
+
+    /// The exact-spend case the strict default is built around: inputs sized to
+    /// outputs + fee, so nothing is left over and nothing needs a destination.
+    #[test]
+    fn a_surplus_equal_to_the_fee_is_the_fee() {
+        let (change, fee) = resolve_lbtc_balance(10_000 + FEE, 10_000, FEE, false, false, true)
+            .expect("an exactly-sized spend must build");
+        assert_eq!(change, 0, "no change output may be invented");
+        assert_eq!(fee, FEE);
+    }
+
+    /// With change permitted — a declared `"change"` output, or `allow_change` — the
+    /// surplus goes to the wallet and the fee stays at the estimate.
+    #[test]
+    fn permitted_change_takes_the_surplus_and_leaves_the_fee_at_the_estimate() {
+        let (change, fee) = resolve_lbtc_balance(100_000, 10_000, FEE, true, false, true)
+            .expect("a declared change output must absorb the surplus");
+        assert_eq!(change, 100_000 - 10_000 - FEE);
+        assert_eq!(fee, FEE);
+    }
+
+    /// Change permitted, but the inputs cannot cover outputs + fee.
+    #[test]
+    fn change_permitted_but_the_inputs_do_not_cover_outputs_plus_fee() {
+        let err = resolve_lbtc_balance(10_000, 10_000, FEE, true, false, true)
+            .expect_err("the fee has to come from somewhere");
+        assert!(err.to_string().contains("Insufficient L-BTC"), "{err}");
+    }
+
+    /// No change permitted and nothing above the outputs: there is nothing to pay with.
+    #[test]
+    fn nothing_above_the_outputs_leaves_nothing_to_pay_the_fee_with() {
+        let err = resolve_lbtc_balance(10_000, 10_000, FEE, false, false, true)
+            .expect_err("a fee cannot be paid out of a balanced transaction");
+        assert!(
+            err.to_string().contains("nothing left to cover the fee"),
+            "{err}"
+        );
+    }
+
+    /// The weight-estimation pass runs with a placeholder fee of 1, against which every
+    /// real surplus looks absurd, so it must not enforce. Its PSET is measured and thrown
+    /// away — this is the only pass allowed to absorb a surplus into the fee, and the
+    /// reason `enforce_fee_sanity` exists as a separate flag from `draft`.
+    #[test]
+    fn the_weight_estimation_pass_absorbs_the_surplus_without_erroring() {
+        let (change, fee) = resolve_lbtc_balance(100_000, 10_000, 1, false, false, false)
+            .expect("the sizing pass must not enforce the balance");
+        assert_eq!(change, 0);
+        assert_eq!(fee, 90_000);
+    }
+
+    /// The draft pass balances nothing; it exists only to be measured. It must also
+    /// survive outputs that exceed the inputs, which a draft built before the amounts are
+    /// final can legitimately have.
+    #[test]
+    fn the_draft_pass_puts_everything_left_over_in_the_fee() {
+        let (change, fee) = resolve_lbtc_balance(100_000, 10_000, 0, false, true, false)
+            .expect("a draft never fails on balance");
+        assert_eq!(change, 0);
+        assert_eq!(fee, 90_000);
+
+        let (_, fee) = resolve_lbtc_balance(1_000, 10_000, 0, false, true, false)
+            .expect("a draft with outputs above inputs must not underflow");
+        assert_eq!(fee, 0);
     }
 }

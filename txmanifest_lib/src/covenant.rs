@@ -131,7 +131,14 @@ pub fn compute_covenant_script_hash(
     network: lwk_wollet::ElementsNetwork,
     opts: impl Into<CompileOpts>,
 ) -> Result<[u8; 32]> {
-    compute_covenant_script_hash_with_leaves(simf_path, compile_params, type_hints, &[], network, opts)
+    compute_covenant_script_hash_with_leaves(
+        simf_path,
+        compile_params,
+        type_hints,
+        &[],
+        network,
+        opts,
+    )
 }
 
 /// Like [`compute_covenant_script_hash`] but folds `extra_leaf_payloads` (taproot storage
@@ -146,7 +153,14 @@ pub fn compute_covenant_script_hash_with_leaves(
     network: lwk_wollet::ElementsNetwork,
     opts: impl Into<CompileOpts>,
 ) -> Result<[u8; 32]> {
-    let addr = compute_covenant_address(simf_path, compile_params, type_hints, extra_leaf_payloads, network, opts)?;
+    let addr = compute_covenant_address(
+        simf_path,
+        compile_params,
+        type_hints,
+        extra_leaf_payloads,
+        network,
+        opts,
+    )?;
     let spk = addr.script_pubkey();
     Ok(sha256::Hash::hash(spk.as_bytes()).to_byte_array())
 }
@@ -969,7 +983,10 @@ fn build_witness_values_from_types(
     }
 
     if !problems.is_empty() {
-        anyhow::bail!("Witnesses do not match the program:\n  {}", problems.join("\n  "));
+        anyhow::bail!(
+            "Witnesses do not match the program:\n  {}",
+            problems.join("\n  ")
+        );
     }
 
     Ok(WitnessValues::from(map))
@@ -1260,7 +1277,10 @@ mod tests {
         let err = build_witness_values_from_types(Some(&declared), &types).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("TOKENS_BURNED"), "{msg}");
-        assert!(msg.contains("unused"), "the error should name the way out: {msg}");
+        assert!(
+            msg.contains("unused"),
+            "the error should name the way out: {msg}"
+        );
 
         // `"unused"` is that way out, and resolves to the zero the pruned branch wants.
         let declared = serde_json::json!({
@@ -1342,7 +1362,10 @@ mod tests {
         // Hex of the wrong width is not silently padded, and the error still names the
         // witness and its value rather than the retry.
         let err = parse_witness_value("W", "ea0b31", &u256).unwrap_err();
-        assert!(err.to_string().contains('W') && err.to_string().contains("ea0b31"), "{err}");
+        assert!(
+            err.to_string().contains('W') && err.to_string().contains("ea0b31"),
+            "{err}"
+        );
 
         // Non-integer types never get the retry: a name is a name there.
         let err = parse_witness_value("ACTION", "deadbeef", &ResolvedType::unit()).unwrap_err();
@@ -1487,7 +1510,11 @@ mod tests {
     #[test]
     fn untyped_asset_named_param_is_not_inferred_as_asset() {
         let asset = "857e17708b6ec9ad0e2cc50a8faa8140b7ad253029443513850f14e4a95589b4";
-        assert_eq!(infer_simf_type("SOME_ASSET_ID"), None, "asset names are no longer type-inferred");
+        assert_eq!(
+            infer_simf_type("SOME_ASSET_ID"),
+            None,
+            "asset names are no longer type-inferred"
+        );
 
         let mut params = HashMap::new();
         params.insert("SOME_ASSET_ID".to_string(), asset.to_string());
@@ -1537,8 +1564,8 @@ mod tests {
         hints.insert("SCRIPT_HASH".to_string(), "bytes32".to_string());
 
         // Path A — the function under test. (Debug-symbol setting must match Path B.)
-        let hash_a = compute_tapleaf_hash(&simf_path, &params, &hints, true)
-            .expect("compute_tapleaf_hash");
+        let hash_a =
+            compute_tapleaf_hash(&simf_path, &params, &hints, true).expect("compute_tapleaf_hash");
 
         // Path B — compile directly, get CMR, use TapLeafHash::from_script.
         let source = std::fs::read_to_string(&simf_path).expect("read simf");
@@ -1723,9 +1750,14 @@ mod tests {
         );
 
         // Hash A: explicit params only (mirrors IssueUtilityNFTs PRE_LOCK_COV_HASH computation)
-        let hash_a =
-            compute_covenant_script_hash(&simf_path, &explicit_params, &explicit_hints, network, false)
-                .expect("hash with explicit params");
+        let hash_a = compute_covenant_script_hash(
+            &simf_path,
+            &explicit_params,
+            &explicit_hints,
+            network,
+            false,
+        )
+        .expect("hash with explicit params");
 
         // Add the extra params that LockCollateral includes via compile_params_map
         // (all instance fields, including ones pre_lock.simf does NOT reference).
@@ -1789,8 +1821,9 @@ mod tests {
         );
 
         // Hash B: all params (mirrors how LockCollateral creates the pre_lock output)
-        let hash_b = compute_covenant_script_hash(&simf_path, &all_params, &all_hints, network, false)
-            .expect("hash with all params");
+        let hash_b =
+            compute_covenant_script_hash(&simf_path, &all_params, &all_hints, network, false)
+                .expect("hash with all params");
 
         let hex_a: String = hash_a.iter().map(|b| format!("{b:02x}")).collect();
         let hex_b: String = hash_b.iter().map(|b| format!("{b:02x}")).collect();
@@ -1939,4 +1972,3 @@ mod tests {
         );
     }
 }
-

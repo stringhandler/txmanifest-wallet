@@ -5,8 +5,8 @@ use anyhow::Result;
 use console::style;
 use dialoguer::{Confirm, Input};
 
-use crate::manifest;
 use crate::context::ResolvedInput;
+use crate::manifest;
 
 // ---------------------------------------------------------------------------
 // Generic param prompt
@@ -47,16 +47,19 @@ pub fn prompt_param(
                 .default(def_bool)
                 .interact()
                 .map_err(|e| anyhow::anyhow!("prompt error for '{name}': {e}"))?;
-            if confirmed { "true".to_string() } else { "false".to_string() }
+            if confirmed {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
         }
-        "u8"  => prompt_integer::<u8>(name, type_, default)?,
+        "u8" => prompt_integer::<u8>(name, type_, default)?,
         "u16" => prompt_integer::<u16>(name, type_, default)?,
         "u32" => prompt_integer::<u32>(name, type_, default)?,
         "u64" => prompt_integer::<u64>(name, type_, default)?,
         _ => {
             let hint = type_hint(type_);
-            let mut input = Input::<String>::new()
-                .with_prompt(format!("  {name}{hint}"));
+            let mut input = Input::<String>::new().with_prompt(format!("  {name}{hint}"));
             if let Some(dv) = default {
                 input = input.default(dv.to_string()).show_default(false);
             }
@@ -88,8 +91,7 @@ where
     T::Err: std::fmt::Display,
 {
     loop {
-        let mut input = Input::<String>::new()
-            .with_prompt(format!("  {name} [{}]", type_));
+        let mut input = Input::<String>::new().with_prompt(format!("  {name} [{}]", type_));
         if let Some(dv) = default {
             input = input.default(dv.to_string()).show_default(false);
         }
@@ -180,7 +182,9 @@ pub fn prompt_input_selection(input: &manifest::Input) -> Result<ResolvedInput> 
         // Protocol/covenant UTXOs are never fabricated: a stub would silently build a
         // transaction against a UTXO that does not exist. Callers resolve these from
         // --input / instance.provided_inputs / the state file, and error otherwise.
-        let utxo_type = input.utxo_type_name().unwrap_or_else(|| "[complex]".to_string());
+        let utxo_type = input
+            .utxo_type_name()
+            .unwrap_or_else(|| "[complex]".to_string());
         anyhow::bail!(
             "Input '{}' (utxo_type '{}') must be resolved from --input, \
              instance.provided_inputs, or the state file — it cannot be prompted for.",

@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::manifest::{
-    Action, ContractTemplate, Manifest, InstanceCreate, Input, Output, ParamDef,
+    Action, ContractTemplate, Input, InstanceCreate, Manifest, Output, ParamDef,
 };
 
 /// Entry point: explore the contract interactively, or dump it if non-interactive.
@@ -70,7 +70,10 @@ fn main_menu(manifest: &Manifest) -> Result<()> {
 
         if let Some(contract_templates) = &manifest.contract_templates {
             for (cname, cdef) in contract_templates {
-                labels.push(format!("template  {cname}  ({} actions)", cdef.actions.len()));
+                labels.push(format!(
+                    "template  {cname}  ({} actions)",
+                    cdef.actions.len()
+                ));
                 targets.push(Target::Template(cname.clone()));
             }
         }
@@ -104,7 +107,11 @@ fn main_menu(manifest: &Manifest) -> Result<()> {
 }
 
 fn template_menu(manifest: &Manifest, template_name: &str) -> Result<()> {
-    let template = match manifest.contract_templates.as_ref().and_then(|c| c.get(template_name)) {
+    let template = match manifest
+        .contract_templates
+        .as_ref()
+        .and_then(|c| c.get(template_name))
+    {
         Some(c) => c,
         None => return Ok(()),
     };
@@ -164,14 +171,21 @@ fn print_overview(manifest: &Manifest) {
     if let Some(d) = &manifest.description {
         println!("  {}", style(d).italic());
     }
-    println!("  chain    : {}", manifest.chain.as_deref().unwrap_or("elements (default)"));
+    println!(
+        "  chain    : {}",
+        manifest.chain.as_deref().unwrap_or("elements (default)")
+    );
     println!("  version  : {}", manifest.manifest_version);
 
     if let Some(utxo_types) = &manifest.utxo_types {
         if !utxo_types.is_empty() {
             println!("  {}", style("UTXO types").bold());
             for (name, t) in utxo_types {
-                println!("    {} — {}", style(name).green(), style(&t.description).dim());
+                println!(
+                    "    {} — {}",
+                    style(name).green(),
+                    style(&t.description).dim()
+                );
             }
         }
     }
@@ -179,12 +193,20 @@ fn print_overview(manifest: &Manifest) {
     if let Some(contract_templates) = &manifest.contract_templates {
         if !contract_templates.is_empty() {
             let names: Vec<&str> = contract_templates.keys().map(String::as_str).collect();
-            println!("  {}: {}", style("Contract templates").bold(), names.join(", "));
+            println!(
+                "  {}: {}",
+                style("Contract templates").bold(),
+                names.join(", ")
+            );
         }
     }
     if !manifest.actions.is_empty() {
         let names: Vec<&str> = manifest.actions.keys().map(String::as_str).collect();
-        println!("  {}: {}", style("Standalone actions").bold(), names.join(", "));
+        println!(
+            "  {}: {}",
+            style("Standalone actions").bold(),
+            names.join(", ")
+        );
     }
 }
 
@@ -197,12 +219,35 @@ fn print_template_header(name: &str, template: &ContractTemplate) {
     if !template.fields.is_empty() {
         println!("  {}", style("Fields").bold());
         for (fname, def) in &template.fields {
-            let desc = def.description.as_deref().map(|d| format!(" — {d}")).unwrap_or_default();
-            let default = def.default.as_deref().map(|d| format!("  [default: {d}]")).unwrap_or_default();
-            println!("    {} : {}{}{}", style(fname).green(), def.type_, style(desc).dim(), style(default).yellow());
+            let desc = def
+                .description
+                .as_deref()
+                .map(|d| format!(" — {d}"))
+                .unwrap_or_default();
+            let default = def
+                .default
+                .as_deref()
+                .map(|d| format!("  [default: {d}]"))
+                .unwrap_or_default();
+            println!(
+                "    {} : {}{}{}",
+                style(fname).green(),
+                def.type_,
+                style(desc).dim(),
+                style(default).yellow()
+            );
         }
     }
-    println!("  {}: {}", style("Actions").bold(), template.actions.keys().cloned().collect::<Vec<_>>().join(", "));
+    println!(
+        "  {}: {}",
+        style("Actions").bold(),
+        template
+            .actions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 }
 
 fn print_action(title: &str, action: &Action) {
@@ -237,8 +282,18 @@ fn print_param_map(label: &str, params: &Option<BTreeMap<String, ParamDef>>) {
         if def.compute.is_some() {
             extra.push_str(" (computed)");
         }
-        let desc = def.description.as_deref().map(|d| format!(" — {d}")).unwrap_or_default();
-        println!("    {} : {}{}{}", style(name).green(), def.type_, style(extra).yellow(), style(desc).dim());
+        let desc = def
+            .description
+            .as_deref()
+            .map(|d| format!(" — {d}"))
+            .unwrap_or_default();
+        println!(
+            "    {} : {}{}{}",
+            style(name).green(),
+            def.type_,
+            style(extra).yellow(),
+            style(desc).dim()
+        );
     }
 }
 
@@ -256,16 +311,35 @@ fn print_inputs(inputs: &Option<Vec<Input>>) {
         } else {
             val_str(&inp.utxo_source)
         };
-        let asset = inp.asset.as_ref().map(|a| format!("  asset={}", val_str(a))).unwrap_or_default();
-        let amount = inp.amount_sat.as_ref().map(|a| format!("  amount={}", val_str(a))).unwrap_or_default();
-        println!("    {}{} ← {}{}{}", style(&inp.id).green(), role_tag(inp.ui_role()), src, style(asset).dim(), style(amount).dim());
+        let asset = inp
+            .asset
+            .as_ref()
+            .map(|a| format!("  asset={}", val_str(a)))
+            .unwrap_or_default();
+        let amount = inp
+            .amount_sat
+            .as_ref()
+            .map(|a| format!("  amount={}", val_str(a)))
+            .unwrap_or_default();
+        println!(
+            "    {}{} ← {}{}{}",
+            style(&inp.id).green(),
+            role_tag(inp.ui_role()),
+            src,
+            style(asset).dim(),
+            style(amount).dim()
+        );
         if let Some(label) = inp.ui_label() {
             println!("        {}", style(label).dim());
         }
         if let Some(Value::Object(m)) = &inp.witnesses {
             if !m.is_empty() {
                 let keys: Vec<&str> = m.keys().map(String::as_str).collect();
-                println!("        {} {}", style("witnesses:").dim(), style(keys.join(", ")).dim());
+                println!(
+                    "        {} {}",
+                    style("witnesses:").dim(),
+                    style(keys.join(", ")).dim()
+                );
             }
         }
         if inp.issuance.is_some() {
@@ -286,8 +360,16 @@ fn print_outputs(outputs: &Option<Vec<Output>>) {
             .as_ref()
             .map(|a| format!("  amount={}", val_str(a)))
             .unwrap_or_else(|| "  amount=(auto)".to_string());
-        let asset = o.asset.as_ref().map(|a| format!("  asset={}", val_str(a))).unwrap_or_default();
-        let opt = if o.optional.unwrap_or(false) { "  (optional)" } else { "" };
+        let asset = o
+            .asset
+            .as_ref()
+            .map(|a| format!("  asset={}", val_str(a)))
+            .unwrap_or_default();
+        let opt = if o.optional.unwrap_or(false) {
+            "  (optional)"
+        } else {
+            ""
+        };
         println!(
             "    {}{} → {}{}{}{}",
             style(&o.id).green(),

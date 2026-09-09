@@ -49,7 +49,10 @@ pub fn json_schema() -> Value {
 
     let root = value.as_object_mut().expect("root schema is an object");
     root.insert("$id".to_string(), json!(SCHEMA_ID));
-    root.insert("title".to_string(), json!("Transaction Manifest (txmanifest.json)"));
+    root.insert(
+        "title".to_string(),
+        json!("Transaction Manifest (txmanifest.json)"),
+    );
     // `$schema` is only meaningful on the root document, so admit it only there. The
     // parser strips it at any depth, which makes the schema marginally stricter than
     // the engine — the safe direction: an author can be warned about something that

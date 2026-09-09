@@ -30,7 +30,10 @@ fn example_manifests() -> Vec<PathBuf> {
 #[test]
 fn every_example_manifest_parses() {
     let manifests = example_manifests();
-    assert!(!manifests.is_empty(), "no example manifests were discovered");
+    assert!(
+        !manifests.is_empty(),
+        "no example manifests were discovered"
+    );
 
     let mut failures = Vec::new();
     for path in &manifests {
