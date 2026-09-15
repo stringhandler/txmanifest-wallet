@@ -56,10 +56,78 @@ pub struct AddressInfo {
     pub index: u32,
 }
 
+/// An address written in a manifest, resolved for the chain in play.
+#[derive(Debug)]
+pub struct ParsedDestination {
+    pub script_pubkey: Script,
+    /// The blinding key the address carries, if any. Always `None` on Bitcoin.
+    pub blinding_pubkey: Option<PublicKey>,
+}
+
+/// Parse an address a manifest names as a destination or an input pin.
+///
+/// Keyed on the network rather than hardcoded, because the two chains' address encodings
+/// are disjoint: an `elements::Address` parser rejects every Bitcoin address outright.
+/// That mattered more than it sounds. Both call sites treated a parse failure as "skip
+/// this" — the output loop dropped the output and carried on, and the input pin fell back
+/// to selecting from anywhere. So on a Bitcoin run a manifest paying a literal address
+/// built a transaction with that payment simply missing, the value falling into change,
+/// with nothing but a warning in a long interactive log to say so.
+///
+/// A free function rather than only a trait method because input selection runs before any
+/// context exists, and the two must agree — an address the selector rejects and the
+/// assembly accepts would pin nothing while appearing to.
+pub fn parse_destination(address: &str, network: Network) -> Result<ParsedDestination> {
+    let trimmed = address.trim();
+    match network.family() {
+        ChainFamily::Elements => {
+            let addr: lwk_wollet::elements::Address = trimmed
+                .parse()
+                .map_err(|e| anyhow::anyhow!("'{trimmed}' is not a valid {network} address: {e}"))?;
+            Ok(ParsedDestination {
+                script_pubkey: addr.script_pubkey(),
+                blinding_pubkey: addr.blinding_pubkey.map(compressed),
+            })
+        }
+        ChainFamily::Bitcoin => {
+            use lwk_wollet::elements::bitcoin as btc;
+            let parsed: btc::Address<btc::address::NetworkUnchecked> = trimmed
+                .parse()
+                .map_err(|e| anyhow::anyhow!("'{trimmed}' is not a valid Bitcoin address: {e}"))?;
+            // Checked against the run's network, not merely parsed. A mainnet address on a
+            // signet run parses perfectly well and would send real-network funds nowhere
+            // recoverable.
+            let btc_net = bitcoin_network(network)?;
+            let addr = parsed.require_network(btc_net).map_err(|e| {
+                anyhow::anyhow!("'{trimmed}' is not a {network} address: {e}")
+            })?;
+            Ok(ParsedDestination {
+                script_pubkey: Script::from(addr.script_pubkey().to_bytes()),
+                blinding_pubkey: None,
+            })
+        }
+    }
+}
+
+/// The `rust-bitcoin` network for one of our Bitcoin networks.
+fn bitcoin_network(network: Network) -> Result<lwk_wollet::elements::bitcoin::Network> {
+    use lwk_wollet::elements::bitcoin as btc;
+    Ok(match network {
+        Network::Bitcoin => btc::Network::Bitcoin,
+        Network::BitcoinTestnet => btc::Network::Testnet,
+        Network::BitcoinSignet => btc::Network::Signet,
+        Network::BitcoinRegtest => btc::Network::Regtest,
+        other => anyhow::bail!("{other} is not a Bitcoin network"),
+    })
+}
+
 /// The chain-specific half of the lifecycle's assembly.
 pub trait AssemblyContext {
     /// Which ledger this run targets.
     fn family(&self) -> ChainFamily;
+
+    /// The concrete network, for address parsing and encoding.
+    fn network(&self) -> Network;
 
     /// The chain's own unit of account — L-BTC's asset id on Elements, a synthetic
     /// constant on Bitcoin.
@@ -124,6 +192,10 @@ pub struct ElementsContext<'a> {
 impl AssemblyContext for ElementsContext<'_> {
     fn family(&self) -> ChainFamily {
         ChainFamily::Elements
+    }
+
+    fn network(&self) -> Network {
+        Network::from(self.network)
     }
 
     fn policy_asset(&self) -> AssetId {
@@ -248,6 +320,10 @@ impl BitcoinContext<'_> {
 impl AssemblyContext for BitcoinContext<'_> {
     fn family(&self) -> ChainFamily {
         ChainFamily::Bitcoin
+    }
+
+    fn network(&self) -> Network {
+        self.network
     }
 
     fn policy_asset(&self) -> AssetId {

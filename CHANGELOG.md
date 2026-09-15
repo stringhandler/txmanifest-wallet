@@ -72,6 +72,66 @@ the aliases `liquid` and `btc`. It was a free-form string that nothing read;
   are written, and counting it as multi-asset marked `p2pk` and `last_will`
   unportable when they are the two that port most cleanly.
 
+- **`bitcoin_rpc` — chain access over a node's own JSON-RPC,** selectable with
+  `bitcoin_backend: "rpc"`. Esplora is right against a public network, where
+  somebody else runs the indexer; it is the wrong tool against a regtest you just
+  started, where it means an electrs and an API server to index four blocks.
+  `scantxoutset` finds our coins from descriptors with no wallet, no import and
+  no rescan, and `generatetoaddress` funds a regtest wallet without a faucet.
+
+  Amounts are converted from Bitcoin Core's decimal BTC **textually**, never
+  through `f64`. A BTC amount is a decimal fraction with eight places, which
+  binary floating point cannot hold exactly; `0.1` BTC via a float lands just
+  under 10,000,000 and truncates to 9,999,999, and an amount one satoshi off
+  invalidates every signature committing to it.
+
+  The two backends differ in what bounds a scan, which is worth knowing: Esplora
+  reads address *history* and finds coins beyond a gap of spent addresses, while
+  a UTXO-set scan has no history, so the gap limit becomes the hard edge of how
+  far it looks.
+
+- **`contrib/regtest` — a Simplicity-enabled regtest.** A container built from
+  `delta1/bitcoin@simplicity-inquisition`. `SIMPLICITY` is active from height 0,
+  alongside `OP_CAT`, `CHECKTEMPLATEVERIFY`, `CHECKSIGFROMSTACK` and
+  `ANYPREVOUT`. It appears as an enabled **script flag**, not as a BIP9
+  deployment — so `deployment_active` checks `getdeploymentinfo`'s `script_flags`
+  as well as its `deployments`, since looking only at the latter reports an
+  active rule as inactive and would refuse a covenant run that would have worked.
+
+- **Fixed: a Bitcoin run could have sent money to the wrong place.** Manifest
+  addresses were parsed as `elements::Address` at both sites that read one, and
+  that parser rejects every Bitcoin address. Neither site treated the failure as
+  fatal: the output loop dropped the output and built the transaction *without
+  it* — the declared payment missing, its value falling into change — and
+  `from_address` degraded from "spend this specific coin" to "spend anything".
+  Both failed with only a warning in a long interactive log, behind a
+  transaction that then built and broadcast successfully.
+
+  `assembly::parse_destination` now parses for the chain in play, and both call
+  sites treat a failure as fatal. Dropping a declared output or a declared
+  restriction is not a recoverable condition. Bitcoin addresses are also checked
+  against the run's network rather than merely parsed — a mainnet address parses
+  fine on a signet run.
+
+  `select_input` now takes the run's `Network` and derives both the asset it
+  matches on and its address parser from it, so the two cannot drift apart again.
+
+- **Fixed: a Bitcoin run would have reported a funded wallet as empty.**
+  `select_input` resolved the manifest labels `"lbtc"` / `"bitcoin"` through an
+  `ElementsNetwork`, so on a Bitcoin run it looked for Liquid's policy asset
+  while the scan produced the synthetic Bitcoin one. The two never match, and the
+  failure mode was silent: no error, no wrong transaction, just "no wallet UTXOs
+  available" from a wallet holding funds. `select_input` now takes the run's
+  policy asset directly — the asset a run spends is a property of the run, not of
+  a network.
+
+  Every module-level test passed throughout, because the disagreement was
+  *between* two modules that were each individually right. `tests/bitcoin_path.rs`
+  now exercises the seam rather than the parts: scanned UTXO → the shared
+  assembly's vocabulary → the narrowing → a built, signed, extractable
+  transaction, with the signature verified against the scriptPubKey being spent.
+  It also pins the specific mismatch, so it cannot come back.
+
 - **Bitcoin runs are dispatched from `lifecycle::run`.** A Bitcoin manifest now
   loads a `BitcoinWallet`, scans Esplora for UTXOs, runs the shared assembly, and
   then builds, signs and broadcasts a PSBT. Elements is untouched.

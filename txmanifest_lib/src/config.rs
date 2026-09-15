@@ -37,6 +37,23 @@ pub struct Config {
     /// this crate has no way to verify one.
     #[serde(default)]
     pub extra_capabilities: Vec<String>,
+    /// Which Bitcoin backend to use: `"esplora"` (default) or `"rpc"`.
+    ///
+    /// Separate from `default_backend`, which selects among the Elements backends. The two
+    /// chains have disjoint backend sets, and one field naming both would accept
+    /// `"electrum"` for Bitcoin — a value that parses and then cannot connect.
+    #[serde(default)]
+    pub bitcoin_backend: Option<String>,
+    /// JSON-RPC endpoint of a Bitcoin node, e.g. `http://127.0.0.1:18443`.
+    #[serde(default)]
+    pub bitcoin_rpc_url: Option<String>,
+    /// Path to the node's `.cookie` file. Preferred over `bitcoin_rpc_auth`: the cookie is
+    /// rewritten on every node start, so it cannot go stale in a config file.
+    #[serde(default)]
+    pub bitcoin_rpc_cookie: Option<String>,
+    /// `user:password` for nodes configured with `rpcauth` instead of a cookie.
+    #[serde(default)]
+    pub bitcoin_rpc_auth: Option<String>,
 }
 
 impl Default for Config {
@@ -48,6 +65,10 @@ impl Default for Config {
             default_electrum: None,
             simplicity_activated: None,
             extra_capabilities: Vec::new(),
+            bitcoin_backend: None,
+            bitcoin_rpc_url: None,
+            bitcoin_rpc_cookie: None,
+            bitcoin_rpc_auth: None,
         }
     }
 }
@@ -138,6 +159,47 @@ impl Config {
                 .unwrap_or_else(|| Activation::default_for(network).simplicity),
             extensions,
         })
+    }
+}
+
+impl Config {
+    /// Connect to whichever Bitcoin backend this config selects.
+    pub fn bitcoin_chain(&self, network: Network) -> Result<crate::bitcoin_backend::BitcoinChain> {
+        use crate::bitcoin_backend::{BitcoinBackendKind, BitcoinChain, EsploraClient};
+        use crate::bitcoin_rpc::RpcClient;
+
+        let kind = self
+            .bitcoin_backend
+            .as_deref()
+            .map_or(BitcoinBackendKind::Esplora, BitcoinBackendKind::parse);
+
+        match kind {
+            BitcoinBackendKind::Esplora => Ok(BitcoinChain::Esplora(EsploraClient::new(
+                self.esplora_url(),
+            ))),
+            BitcoinBackendKind::Rpc => {
+                let url = self.bitcoin_rpc_url.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "bitcoin_backend is \"rpc\" but bitcoin_rpc_url is not set; \
+                         a node endpoint has no sensible default"
+                    )
+                })?;
+                let client = match (&self.bitcoin_rpc_cookie, &self.bitcoin_rpc_auth) {
+                    (Some(path), _) => RpcClient::with_cookie(url, std::path::Path::new(path))?,
+                    (None, Some(auth)) => {
+                        let (u, p) = auth.split_once(':').ok_or_else(|| {
+                            anyhow::anyhow!("bitcoin_rpc_auth must be \"user:password\"")
+                        })?;
+                        RpcClient::new(url, Some((u.to_string(), p.to_string())))
+                    }
+                    // A node with no auth at all is unusual but legal, and refusing it here
+                    // would block exactly the throwaway regtest this backend exists for.
+                    (None, None) => RpcClient::new(url, None),
+                };
+                let _ = network;
+                Ok(BitcoinChain::Rpc(client))
+            }
+        }
     }
 }
 

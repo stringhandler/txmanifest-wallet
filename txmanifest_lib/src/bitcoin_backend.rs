@@ -528,3 +528,132 @@ mod tests {
         assert!(hex_to_bytes("zz").is_err(), "non-hex digits");
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// Backend selection
+// ---------------------------------------------------------------------------
+
+/// Which kind of chain access to use for Bitcoin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitcoinBackendKind {
+    /// An Esplora HTTP instance. Right against a public network.
+    Esplora,
+    /// A node's own JSON-RPC. Right against a chain you run yourself — notably a regtest,
+    /// where standing up an Esplora would mean an indexer and an API server to serve a
+    /// handful of blocks.
+    Rpc,
+}
+
+impl BitcoinBackendKind {
+    /// Parse a config string, defaulting to Esplora for anything unrecognized so an older
+    /// config keeps its behaviour.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "rpc" | "bitcoind" | "node" => BitcoinBackendKind::Rpc,
+            _ => BitcoinBackendKind::Esplora,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BitcoinBackendKind::Esplora => "esplora",
+            BitcoinBackendKind::Rpc => "rpc",
+        }
+    }
+}
+
+/// A connected Bitcoin chain backend.
+///
+/// An enum rather than a trait object for the same reason [`crate::backend::Backend`] is
+/// one: there are two of them, they are chosen once per run, and a single concrete type at
+/// every call site is easier to follow than a dyn dispatch that never varies.
+pub enum BitcoinChain {
+    Esplora(EsploraClient),
+    Rpc(crate::bitcoin_rpc::RpcClient),
+}
+
+impl BitcoinChain {
+    /// Every unspent output belonging to `wallet`.
+    ///
+    /// The two backends differ in what bounds the search, and it is worth knowing which
+    /// you have. Esplora reads address *history*, so it stops after `gap_limit` consecutive
+    /// addresses that were never used and finds coins beyond a gap of spent addresses. A
+    /// node's UTXO-set scan has no history at all, so `gap_limit` becomes the hard edge of
+    /// how far it looks: a coin at index `gap_limit + 1` is invisible to it.
+    pub fn scan(&self, wallet: &BitcoinWallet, gap_limit: u32) -> Result<Vec<Utxo>> {
+        match self {
+            BitcoinChain::Esplora(c) => c.scan(wallet, gap_limit),
+            BitcoinChain::Rpc(c) => c.scan_wallet(wallet, gap_limit),
+        }
+    }
+
+    pub fn broadcast(
+        &self,
+        tx: &lwk_wollet::elements::bitcoin::Transaction,
+    ) -> Result<lwk_wollet::elements::bitcoin::Txid> {
+        match self {
+            BitcoinChain::Esplora(c) => c.broadcast(tx),
+            BitcoinChain::Rpc(c) => c.broadcast(tx),
+        }
+    }
+
+    pub fn tip_height(&self) -> Result<u32> {
+        match self {
+            BitcoinChain::Esplora(c) => c.tip_height(),
+            BitcoinChain::Rpc(c) => Ok(c.block_count()? as u32),
+        }
+    }
+
+    /// The first address on `branch` this backend considers free.
+    ///
+    /// "Free" means something weaker on RPC. Esplora can say an address was never touched;
+    /// a UTXO-set scan can only say it holds nothing now, which is also true of an address
+    /// that received and spent. So on a node backend this can hand back an address with a
+    /// history — a privacy fault rather than a loss, and the honest trade for not running
+    /// an indexer.
+    pub fn next_unused(&self, wallet: &BitcoinWallet, branch: Branch) -> Result<(Address, u32)> {
+        match self {
+            BitcoinChain::Esplora(c) => c.next_unused(wallet, branch),
+            BitcoinChain::Rpc(c) => {
+                let held: std::collections::HashSet<u32> = c
+                    .scan_wallet(wallet, DEFAULT_GAP_LIMIT)?
+                    .into_iter()
+                    .filter(|u| u.branch == branch)
+                    .map(|u| u.index)
+                    .collect();
+                let index = (0..).find(|i| !held.contains(i)).expect("an index is free");
+                Ok((wallet.address(branch, index)?, index))
+            }
+        }
+    }
+
+    /// Fee rate in sat/vB for confirmation within `target_blocks`, when the backend offers
+    /// one. `None` is a normal answer on regtest, which has no fee market to estimate from.
+    pub fn fee_estimate(&self, target_blocks: u16) -> Result<Option<f32>> {
+        match self {
+            BitcoinChain::Esplora(c) => c.fee_estimate(target_blocks),
+            // `estimatesmartfee` errors rather than answering on a chain with no history,
+            // which is the usual case for the node backend, so a failure is reported as
+            // "no estimate" rather than as a broken backend.
+            BitcoinChain::Rpc(c) => {
+                let Ok(v) = c.call("estimatesmartfee", serde_json::json!([target_blocks])) else {
+                    return Ok(None);
+                };
+                Ok(v.get("feerate")
+                    .and_then(|f| f.as_f64())
+                    // BTC/kvB on the wire; sat/vB everywhere in this crate.
+                    .map(|btc_per_kvb| (btc_per_kvb * 100_000.0) as f32))
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for BitcoinChain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BitcoinChain::Esplora(c) => write!(f, "{c:?}"),
+            BitcoinChain::Rpc(c) => write!(f, "{c:?}"),
+        }
+    }
+}

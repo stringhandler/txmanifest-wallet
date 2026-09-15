@@ -1,0 +1,472 @@
+//! Bitcoin chain access over a node's JSON-RPC, as an alternative to
+//! [`crate::bitcoin_backend`]'s Esplora client.
+//!
+//! Esplora is the right backend against a public network, where somebody else already runs
+//! the indexer. It is the wrong one against a regtest you just started: standing up an
+//! Esplora instance means an electrs and an API server alongside the node, to index a
+//! chain with four blocks in it.
+//!
+//! A node speaks everything this engine needs on its own, and two of the RPCs matter more
+//! than the rest:
+//!
+//! - **`scantxoutset`** finds our coins by scanning the UTXO set for descriptors we supply.
+//!   No wallet, no rescan, no import — which is what makes this work against a node started
+//!   thirty seconds ago, and against one built without wallet support at all.
+//! - **`generatetoaddress`** mines to an address we choose, so a regtest wallet funds itself
+//!   without a faucet.
+//!
+//! # Why this exists now
+//!
+//! Simplicity on Bitcoin is a soft fork nobody has activated on a public network, so the
+//! only chain that will execute a Bitcoin covenant is one you run yourself — currently a
+//! regtest of the `simplicity-inquisition` branch. Esplora cannot reach that chain without
+//! a great deal of scaffolding; a node's own RPC can.
+
+use std::collections::HashMap;
+
+use anyhow::{Context, Result};
+use lwk_wollet::elements::bitcoin::{
+    consensus::encode::serialize_hex, Address, OutPoint, ScriptBuf, Transaction, Txid,
+};
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::bitcoin_backend::Utxo;
+use crate::bitcoin_wallet::{BitcoinWallet, Branch};
+
+/// A blocking JSON-RPC client for a Bitcoin node.
+pub struct RpcClient {
+    url: String,
+    auth: Option<(String, String)>,
+    agent: ureq::Agent,
+}
+
+impl std::fmt::Debug for RpcClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The password is deliberately absent. A cookie or an rpcpassword in a log line is
+        // a credential leak, and `{:?}` reaches logs by accident more than by design.
+        f.debug_struct("RpcClient")
+            .field("url", &self.url)
+            .field("auth", &self.auth.as_ref().map(|(u, _)| u.as_str()))
+            .finish()
+    }
+}
+
+impl RpcClient {
+    /// A client for `url`, optionally with HTTP basic auth credentials.
+    pub fn new(url: impl Into<String>, auth: Option<(String, String)>) -> Self {
+        Self {
+            url: url.into().trim_end_matches('/').to_string(),
+            auth,
+            agent: ureq::AgentBuilder::new().build(),
+        }
+    }
+
+    /// A client reading credentials from a node's `.cookie` file.
+    ///
+    /// The cookie is `__cookie__:<random>`, rewritten on every start, which is what makes
+    /// it the right thing to read rather than cache.
+    pub fn with_cookie(url: impl Into<String>, cookie_path: &std::path::Path) -> Result<Self> {
+        let raw = std::fs::read_to_string(cookie_path)
+            .with_context(|| format!("cannot read RPC cookie: {}", cookie_path.display()))?;
+        let (user, pass) = raw.trim().split_once(':').ok_or_else(|| {
+            anyhow::anyhow!("malformed RPC cookie in {}", cookie_path.display())
+        })?;
+        Ok(Self::new(url, Some((user.to_string(), pass.to_string()))))
+    }
+
+    /// Issue one JSON-RPC call and return its `result`.
+    pub fn call(&self, method: &str, params: Value) -> Result<Value> {
+        let body = json!({"jsonrpc": "1.0", "id": "txmanifest", "method": method, "params": params});
+        let mut req = self.agent.post(&self.url).set("Content-Type", "application/json");
+        if let Some((user, pass)) = &self.auth {
+            req = req.set("Authorization", &basic_auth(user, pass));
+        }
+        // Serialized here rather than via `send_json`, which needs a ureq feature this
+        // crate does not otherwise enable.
+        let encoded = serde_json::to_string(&body).context("cannot encode RPC request")?;
+        let text = match req.send_string(&encoded) {
+            Ok(resp) => resp.into_string().context("cannot read RPC response")?,
+            // A node reports an application error with an HTTP error status *and* a body
+            // carrying the reason, so the body is the useful half and must not be dropped.
+            Err(ureq::Error::Status(status, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                match parse_rpc_error(&body) {
+                    Some(msg) => anyhow::bail!("{method} failed: {msg}"),
+                    None => anyhow::bail!("{method} failed with HTTP {status}: {}", body.trim()),
+                }
+            }
+            Err(e) => anyhow::bail!("{method} failed: {e}"),
+        };
+        parse_rpc_result(&text).with_context(|| format!("{method} returned an unusable response"))
+    }
+
+    pub fn block_count(&self) -> Result<u64> {
+        self.call("getblockcount", json!([]))?
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("getblockcount did not return a number"))
+    }
+
+    /// The chain the node is on, as it names it (`main`, `test`, `signet`, `regtest`).
+    pub fn chain(&self) -> Result<String> {
+        let info = self.call("getblockchaininfo", json!([]))?;
+        info.get("chain")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("getblockchaininfo carries no chain"))
+    }
+
+    /// Whether the node reports a deployment as active.
+    ///
+    /// Used to check that a node actually has Simplicity, rather than taking the wallet
+    /// config's word for it — the config says what the operator believes, and a covenant
+    /// address derived against a node that will not execute it is unspendable.
+    pub fn deployment_active(&self, name: &str) -> Result<bool> {
+        let info = self.call("getdeploymentinfo", json!([]))?;
+
+        // Two places, because a rule can reach a node by two routes. A soft fork still
+        // being deployed appears under `deployments` with a BIP9 status; one that is simply
+        // *on* for this chain — which is how Simplicity arrives on an inquisition
+        // regtest — appears only as an enabled script flag. Checking `deployments` alone
+        // reports an active rule as inactive, which is the answer that stops a covenant run
+        // that would have worked.
+        if let Some(flags) = info.get("script_flags").and_then(Value::as_array) {
+            if flags
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|f| f.eq_ignore_ascii_case(name))
+            {
+                return Ok(true);
+            }
+        }
+
+        let Some(deployments) = info.get("deployments") else { return Ok(false) };
+        let Some(entry) = deployments.get(name).or_else(|| {
+            deployments
+                .as_object()
+                .and_then(|m| m.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v))
+        }) else {
+            return Ok(false);
+        };
+        Ok(entry.get("active").and_then(Value::as_bool).unwrap_or(false)
+            || entry.get("bip9").and_then(|b| b.get("status")).and_then(Value::as_str)
+                == Some("active"))
+    }
+
+    /// Broadcast a signed transaction.
+    pub fn broadcast(&self, tx: &Transaction) -> Result<Txid> {
+        let hex = serialize_hex(tx);
+        let returned: Txid = self
+            .call("sendrawtransaction", json!([hex]))?
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("sendrawtransaction did not return a txid"))?
+            .parse()
+            .context("sendrawtransaction returned an unparseable txid")?;
+        // The node echoes what it accepted. A mismatch means something rewrote the
+        // transaction, and reporting the sent txid would mean tracking one that does not
+        // exist.
+        let expected = tx.compute_txid();
+        if returned != expected {
+            anyhow::bail!("node accepted {returned}, but the sent transaction is {expected}");
+        }
+        Ok(returned)
+    }
+
+    /// Mine `blocks` blocks paying `address`. Regtest only.
+    pub fn generate_to_address(&self, blocks: u32, address: &Address) -> Result<Vec<String>> {
+        let hashes = self.call("generatetoaddress", json!([blocks, address.to_string()]))?;
+        Ok(hashes
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default())
+    }
+
+    /// Find unspent outputs paying any of `scripts`, by scanning the node's UTXO set.
+    ///
+    /// Addressed by raw scriptPubKey (`raw(<hex>)`) rather than by address, because a
+    /// covenant's scriptPubKey is derived rather than encoded — it has an address form, but
+    /// building one only to have the node decode it back is a round trip that can only lose.
+    pub fn scan_scripts(&self, scripts: &[ScriptBuf]) -> Result<Vec<ScannedOutput>> {
+        if scripts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let descriptors: Vec<Value> = scripts
+            .iter()
+            .map(|s| json!(format!("raw({})", hex_of(s.as_bytes()))))
+            .collect();
+        let result = self.call("scantxoutset", json!(["start", descriptors]))?;
+
+        // `success: false` means the scan was aborted, which is not the same as finding
+        // nothing — treating it as an empty wallet would be a silent wrong answer.
+        if result.get("success").and_then(Value::as_bool) == Some(false) {
+            anyhow::bail!("scantxoutset did not complete");
+        }
+        let wire: Vec<WireScanUnspent> = serde_json::from_value(
+            result.get("unspents").cloned().unwrap_or_else(|| json!([])),
+        )
+        .context("cannot decode scantxoutset unspents")?;
+
+        wire.into_iter()
+            .map(|u| {
+                Ok(ScannedOutput {
+                    outpoint: OutPoint {
+                        txid: u.txid.parse().with_context(|| format!("bad txid {}", u.txid))?,
+                        vout: u.vout,
+                    },
+                    script_pubkey: ScriptBuf::from_bytes(
+                        bytes_of_hex(&u.script_pub_key).context("bad scriptPubKey hex")?,
+                    ),
+                    // Bitcoin Core reports this in BTC as a JSON number. Converting through
+                    // a float is how an amount ends up a satoshi off, and one satoshi
+                    // invalidates every signature over it — so the raw text is parsed as a
+                    // decimal instead.
+                    value: btc_string_to_sats(&u.amount.to_string())
+                        .with_context(|| format!("cannot read amount {}", u.amount))?,
+                    height: u.height,
+                })
+            })
+            .collect()
+    }
+
+    /// Scan for a wallet's own coins, deriving addresses up to `gap_limit` on each branch.
+    ///
+    /// A UTXO-set scan has no notion of address history, so it cannot stop at a gap the way
+    /// [`crate::bitcoin_backend::EsploraClient::scan`] does — it simply looks at every
+    /// script it is given. That makes the limit an input rather than a stopping rule.
+    pub fn scan_wallet(&self, wallet: &BitcoinWallet, gap_limit: u32) -> Result<Vec<Utxo>> {
+        let mut scripts = Vec::new();
+        let mut origin: HashMap<Vec<u8>, (Branch, u32)> = HashMap::new();
+        for branch in [Branch::Receive, Branch::Change] {
+            for index in 0..gap_limit {
+                let spk = wallet.script_pubkey(branch, index)?;
+                origin.insert(spk.to_bytes(), (branch, index));
+                scripts.push(spk);
+            }
+        }
+
+        self.scan_scripts(&scripts)?
+            .into_iter()
+            .map(|found| {
+                let (branch, index) = origin
+                    .get(found.script_pubkey.as_bytes())
+                    .copied()
+                    // The node only reports scripts we asked about, so this cannot happen
+                    // — and if it does, guessing a derivation would produce an input that
+                    // is signed with the wrong key.
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "node reported {} for a script that was not scanned",
+                            found.outpoint
+                        )
+                    })?;
+                Ok(Utxo {
+                    outpoint: found.outpoint,
+                    value: found.value,
+                    script_pubkey: found.script_pubkey,
+                    branch,
+                    index,
+                    height: found.height,
+                })
+            })
+            .collect()
+    }
+}
+
+/// One unspent output as `scantxoutset` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScannedOutput {
+    pub outpoint: OutPoint,
+    pub script_pubkey: ScriptBuf,
+    pub value: u64,
+    pub height: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireScanUnspent {
+    txid: String,
+    vout: u32,
+    #[serde(rename = "scriptPubKey")]
+    script_pub_key: String,
+    /// BTC, as a JSON number. Kept as `serde_json::Number` so its exact text survives —
+    /// see the note in `scan_scripts`.
+    amount: serde_json::Number,
+    #[serde(default)]
+    height: Option<u32>,
+}
+
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
+
+/// Pull `result` out of a JSON-RPC response, surfacing `error` when present.
+fn parse_rpc_result(body: &str) -> Result<Value> {
+    let v: Value = serde_json::from_str(body)
+        .with_context(|| format!("response is not JSON: {}", body.trim()))?;
+    if let Some(err) = v.get("error") {
+        if !err.is_null() {
+            let msg = err.get("message").and_then(Value::as_str).unwrap_or("unknown error");
+            let code = err.get("code").and_then(Value::as_i64).unwrap_or(0);
+            anyhow::bail!("node error {code}: {msg}");
+        }
+    }
+    v.get("result")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("response carries no result: {}", body.trim()))
+}
+
+/// The `error.message` from an error-status response body, if it has one.
+fn parse_rpc_error(body: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let err = v.get("error")?;
+    let msg = err.get("message").and_then(Value::as_str)?;
+    let code = err.get("code").and_then(Value::as_i64).unwrap_or(0);
+    Some(format!("node error {code}: {msg}"))
+}
+
+/// Convert a BTC amount written as a decimal string into satoshis.
+///
+/// Deliberately textual. `0.1 + 0.2` is the standard demonstration that binary floating
+/// point cannot hold decimal fractions exactly, and a BTC amount is a decimal fraction with
+/// eight places. Going through `f64` rounds, and an amount off by one satoshi makes every
+/// signature committing to it invalid.
+fn btc_string_to_sats(s: &str) -> Result<u64> {
+    let s = s.trim();
+    let (whole, frac) = match s.split_once('.') {
+        Some((w, f)) => (w, f),
+        None => (s, ""),
+    };
+    if frac.len() > 8 {
+        anyhow::bail!("{s} has more precision than a satoshi");
+    }
+    let whole: u64 = whole.parse().with_context(|| format!("bad BTC amount {s}"))?;
+    let mut frac_digits = frac.to_string();
+    while frac_digits.len() < 8 {
+        frac_digits.push('0');
+    }
+    let frac: u64 = if frac_digits.is_empty() {
+        0
+    } else {
+        frac_digits.parse().with_context(|| format!("bad BTC amount {s}"))?
+    };
+    whole
+        .checked_mul(100_000_000)
+        .and_then(|w| w.checked_add(frac))
+        .ok_or_else(|| anyhow::anyhow!("{s} overflows a satoshi count"))
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn bytes_of_hex(s: &str) -> Result<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        anyhow::bail!("hex string has an odd length");
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16)
+                .map_err(|e| anyhow::anyhow!("bad hex at byte {}: {e}", i / 2))
+        })
+        .collect()
+}
+
+fn basic_auth(user: &str, pass: &str) -> String {
+    use base64::Engine as _;
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"))
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The conversion that must not go through a float.
+    #[test]
+    fn btc_amounts_convert_exactly() {
+        assert_eq!(btc_string_to_sats("1.0").unwrap(), 100_000_000);
+        assert_eq!(btc_string_to_sats("0.00000001").unwrap(), 1);
+        assert_eq!(btc_string_to_sats("50").unwrap(), 5_000_000_000);
+        assert_eq!(btc_string_to_sats("0").unwrap(), 0);
+        assert_eq!(btc_string_to_sats("21000000.0").unwrap(), 2_100_000_000_000_000);
+
+        // The values a float gets wrong. 0.1 BTC is exactly 10_000_000 sat; via `f64` the
+        // multiplication lands just below and truncates to 9_999_999.
+        assert_eq!(btc_string_to_sats("0.1").unwrap(), 10_000_000);
+        assert_eq!(btc_string_to_sats("0.29").unwrap(), 29_000_000);
+        assert_eq!(btc_string_to_sats("1.1").unwrap(), 110_000_000);
+        assert_eq!(btc_string_to_sats("25.06084842").unwrap(), 2_506_084_842);
+
+        assert!(btc_string_to_sats("0.000000001").is_err(), "sub-satoshi precision");
+        assert!(btc_string_to_sats("not a number").is_err());
+    }
+
+    /// A node reports an application error in the body, not only in the status.
+    #[test]
+    fn rpc_errors_surface_the_nodes_own_message() {
+        let body = r#"{"result":null,"error":{"code":-26,"message":"min relay fee not met"},"id":"x"}"#;
+        let err = parse_rpc_result(body).unwrap_err().to_string();
+        assert!(err.contains("min relay fee not met"), "{err}");
+        assert!(err.contains("-26"), "{err}");
+
+        assert_eq!(parse_rpc_error(body).unwrap(), "node error -26: min relay fee not met");
+    }
+
+    #[test]
+    fn a_successful_response_yields_its_result() {
+        let body = r#"{"result":812345,"error":null,"id":"x"}"#;
+        assert_eq!(parse_rpc_result(body).unwrap().as_u64(), Some(812345));
+    }
+
+    /// A `scantxoutset` response, shaped as Bitcoin Core sends one.
+    #[test]
+    fn scan_results_decode_with_exact_amounts() {
+        let body = r#"{
+          "success": true,
+          "txouts": 1,
+          "height": 101,
+          "unspents": [
+            {"txid":"2d3f2a2a71f12377fd502c2555be9f43e12b207bbc48c9905814e824034dc348",
+             "vout":0,
+             "scriptPubKey":"512042424242424242424242424242424242424242424242424242424242424242 42",
+             "desc":"raw(...)",
+             "amount":25.06084842,
+             "height":101}
+          ],
+          "total_amount": 25.06084842
+        }"#;
+        // The embedded space above would be a real decode failure, so strip it the way a
+        // real response would never need.
+        let body = body.replace("42 42", "4242");
+        let v: Value = serde_json::from_str(&body).unwrap();
+        let wire: Vec<WireScanUnspent> =
+            serde_json::from_value(v.get("unspents").cloned().unwrap()).expect("decodes");
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0].vout, 0);
+        assert_eq!(wire[0].height, Some(101));
+        // The amount survives as text, so it converts exactly.
+        assert_eq!(btc_string_to_sats(&wire[0].amount.to_string()).unwrap(), 2_506_084_842);
+    }
+
+    #[test]
+    fn hex_round_trips() {
+        let bytes = vec![0x51, 0x20, 0xab, 0x00, 0xff];
+        assert_eq!(bytes_of_hex(&hex_of(&bytes)).unwrap(), bytes);
+        assert!(bytes_of_hex("abc").is_err());
+        assert!(bytes_of_hex("zz").is_err());
+    }
+
+    /// Credentials must not reach a log line through `{:?}`.
+    #[test]
+    fn debug_output_omits_the_password() {
+        let c = RpcClient::new(
+            "http://localhost:18443",
+            Some(("__cookie__".into(), "supersecret".into())),
+        );
+        let rendered = format!("{c:?}");
+        assert!(!rendered.contains("supersecret"), "{rendered}");
+        assert!(rendered.contains("__cookie__"), "{rendered}");
+    }
+}

@@ -129,15 +129,17 @@ fn fetch_onchain_txout(
 ///
 /// Stripping the blinding key does not change the scriptPubKey, so a covenant committed to
 /// `sha256(spk)` still matches the output — see `wallet::script_hash_of_address`.
+///
+/// Takes the address's blinding key rather than the address, so it serves both chains: a
+/// Bitcoin address simply has none, and this then correctly reports none.
 fn address_blinding_key(
     output: &crate::manifest::Output,
-    addr: &lwk_wollet::elements::Address,
+    addr_blinding_pubkey: Option<lwk_wollet::elements::bitcoin::PublicKey>,
 ) -> Option<lwk_wollet::elements::bitcoin::PublicKey> {
     if output.confidential == Some(false) {
         return None;
     }
-    addr.blinding_pubkey
-        .map(|pk| lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true })
+    addr_blinding_pubkey
 }
 
 /// Resolve an output's pinned blinding factors, if it declared any.
@@ -435,6 +437,16 @@ pub fn run(
         Some(BitcoinRun { network: target, wallet: btc_wallet, client, utxos, change_index, receive_start })
     } else {
         None
+    };
+
+    // The network this run targets. Input selection derives both the asset it matches on
+    // and its address parser from this, so neither can drift from the other or from the
+    // UTXOs `available_utxos` below carries.
+    let run_network: Option<crate::chain::Network> = match &bitcoin_run {
+        Some(r) => Some(r.network),
+        None => loaded_wallet
+            .as_ref()
+            .map(|w| crate::chain::Network::from(wallet::elements_network(w))),
     };
 
     // Load UTXOs for auto-selection: from persisted LWK state on Elements, from the scan
@@ -830,10 +842,7 @@ pub fn run(
                         &available_explicit,
                         &mut claimed,
                         manual_inputs,
-                        loaded_wallet.as_ref().map(|w| {
-                            if w.is_mainnet() { ElementsNetwork::Liquid }
-                            else { ElementsNetwork::LiquidTestnet }
-                        }),
+                        run_network,
                         &ctx,
                     )?
                 }
@@ -844,10 +853,7 @@ pub fn run(
                     &available_explicit,
                     &mut claimed,
                     manual_inputs,
-                    loaded_wallet.as_ref().map(|w| {
-                        if w.is_mainnet() { ElementsNetwork::Liquid }
-                        else { ElementsNetwork::LiquidTestnet }
-                    }),
+                    run_network,
                     &ctx,
                 )?
             };
@@ -1741,15 +1747,21 @@ pub fn run(
                     serde_json::Value::String(dest) => {
                         let addr_str = eval::eval_destination_str(dest, &ctx)
                             .unwrap_or_else(|| dest.clone());
-                        let addr = match addr_str.trim().parse::<lwk_wollet::elements::Address>() {
+                        // An unparseable destination is fatal, not skippable. `continue`
+                        // here used to drop the output and build the transaction without
+                        // it — the declared payment simply missing and its value falling
+                        // into change. That is the wrong money in the wrong place off the
+                        // back of a warning, so the whole build stops instead.
+                        let parsed = match crate::assembly::parse_destination(&addr_str, actx.network()) {
                             Ok(a) => a,
                             Err(e) => {
-                                println!("  {} Output '{}' address parse failed ('{}': {e})", style("[warn]").yellow(), output.id, addr_str);
-                                continue;
+                                println!("  {} Output '{}' address is unusable: {e}", style("[error]").red(), output.id);
+                                collect_outputs_ok = false;
+                                break;
                             }
                         };
-                        let bpk = address_blinding_key(output, &addr);
-                        if bpk.is_none() && addr.blinding_pubkey.is_some() {
+                        let bpk = address_blinding_key(output, parsed.blinding_pubkey);
+                        if bpk.is_none() && parsed.blinding_pubkey.is_some() {
                             println!(
                                 "  {} Output '{}' pays a confidential address explicitly (confidential: false) — the amount and asset stay in the clear.",
                                 style("·").dim(), output.id
@@ -1769,7 +1781,7 @@ pub fn run(
                             &addr_str[..addr_str.len().min(24)]
                         );
                         pset_outputs.push(pset_builder::PsetOutputSpec {
-                            script_pubkey: addr.script_pubkey(), amount, asset: asset_id, blinding_key: bpk,
+                            script_pubkey: parsed.script_pubkey, amount, asset: asset_id, blinding_key: bpk,
                             blinding: pinned_blinding,
                         });
                     }
@@ -2867,9 +2879,24 @@ fn select_input(
     available_explicit: &[lwk_wollet::ExternalUtxo],
     claimed: &mut std::collections::HashSet<String>,
     manual_inputs: bool,
-    network: Option<ElementsNetwork>,
+    // The network this run targets, which settles two things selection depends on: the
+    // asset the labels `"lbtc"` / `"bitcoin"` name, and how `from_address` parses.
+    //
+    // Both used to be hardcoded to Elements here. A Bitcoin run therefore looked for
+    // Liquid's policy asset — matching none of its own UTXOs and reporting an empty wallet
+    // while holding funds — and rejected every `from_address` as unparseable, quietly
+    // selecting from anywhere instead. Deriving both from one value is what stops them
+    // disagreeing again.
+    network: Option<crate::chain::Network>,
     ctx: &ExecutionContext,
 ) -> Result<ResolvedInput> {
+    let policy_asset = network.map(|n| match n.family() {
+        crate::chain::ChainFamily::Bitcoin => crate::assembly::bitcoin_policy_asset(),
+        crate::chain::ChainFamily::Elements => n
+            .elements_network()
+            .expect("an Elements network maps")
+            .policy_asset(),
+    });
     // Protocol/covenant inputs are never invented. Reaching here means every
     // resolution source came up empty (--input override, instance.provided_inputs,
     // and the state file), so fail loudly with the fix rather than fabricating a UTXO.
@@ -2915,7 +2942,7 @@ fn select_input(
             }
         })
         .and_then(|s| match s {
-            "lbtc" | "bitcoin" => network.map(|n| n.policy_asset()),
+            "lbtc" | "bitcoin" => policy_asset,
             other => other.parse().ok(),
         });
 
@@ -2971,16 +2998,22 @@ fn select_input(
 
     // Optional address pin: restrict selection to UTXOs at this exact scriptPubKey.
     // Resolves a reference (instance./params.) or a literal address string.
-    let from_spk: Option<lwk_wollet::elements::Script> = input.from_address.as_ref().and_then(|s| {
-        let resolved = eval::eval_destination_str(s, ctx).unwrap_or_else(|| s.clone());
-        match resolved.trim().parse::<lwk_wollet::elements::Address>() {
-            Ok(a) => Some(a.script_pubkey()),
-            Err(e) => {
-                println!("  {} Input '{}' from_address '{}' is not a valid address: {e}", style("[warn]").yellow(), input.id, resolved);
-                None
-            }
+    // An unparseable pin must not degrade into "select from anywhere". `from_address` is a
+    // restriction, and silently dropping a restriction is how a manifest that meant to
+    // spend one specific coin spends a different one.
+    let from_spk: Option<lwk_wollet::elements::Script> = match input.from_address.as_ref() {
+        None => None,
+        Some(s) => {
+            let resolved = eval::eval_destination_str(s, ctx).unwrap_or_else(|| s.clone());
+            let net = network.ok_or_else(|| {
+                anyhow::anyhow!("input '{}' pins from_address but no network is known", input.id)
+            })?;
+            let parsed = crate::assembly::parse_destination(&resolved, net).with_context(|| {
+                format!("input '{}' pins an unusable from_address", input.id)
+            })?;
+            Some(parsed.script_pubkey)
         }
-    });
+    };
     let spk_matches_wt = |u: &lwk_wollet::WalletTxOut| from_spk.as_ref().map_or(true, |spk| &u.script_pubkey == spk);
     let spk_matches_ext = |u: &lwk_wollet::ExternalUtxo| from_spk.as_ref().map_or(true, |spk| &u.txout.script_pubkey == spk);
 
@@ -3986,15 +4019,20 @@ mod tests {
                 .expect("valid address");
         assert!(confidential.blinding_pubkey.is_some());
         let explicit = confidential.to_unconfidential();
+        let confidential_bpk = || {
+            confidential.blinding_pubkey.map(|pk| {
+                lwk_wollet::elements::bitcoin::PublicKey { inner: pk, compressed: true }
+            })
+        };
 
         // The default and an explicit `true` both blind, as before.
-        assert!(address_blinding_key(default, &confidential).is_some());
-        assert!(address_blinding_key(yes, &confidential).is_some());
+        assert!(address_blinding_key(default, confidential_bpk()).is_some());
+        assert!(address_blinding_key(yes, confidential_bpk()).is_some());
         // `false` wins over the address's own key.
-        assert!(address_blinding_key(no, &confidential).is_none());
+        assert!(address_blinding_key(no, confidential_bpk()).is_none());
         // An unconfidential address has nothing to strip, whatever the flag says.
-        assert!(address_blinding_key(default, &explicit).is_none());
-        assert!(address_blinding_key(yes, &explicit).is_none());
+        assert!(address_blinding_key(default, None).is_none());
+        assert!(address_blinding_key(yes, None).is_none());
 
         // Stripping must not move the scriptPubKey, or the covenant's committed
         // sha256(spk) would stop matching the output that pays it.
