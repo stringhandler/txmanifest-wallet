@@ -1,0 +1,73 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stringhandler/txmanifest-wallet/main/schema/txmanifest.schema.json",
+  "manifest_version": "0.3.0",
+  "protocol": "bitcoin-pay",
+  "description": "A plain Bitcoin payment. The smallest manifest that runs on Bitcoin, and the one that shows what `requires: []` buys you: no covenant, no Simplicity, nothing a stock node lacks.",
+  "chain": "bitcoin",
+  "requires": [],
+  "actions": {
+    "Pay": {
+      "description": "Spend one wallet UTXO to a destination address, returning the remainder as change.",
+      "intent": "Send {params.amount_sat} sat to {params.dest}",
+      "$comment": "allow_change is lbtc_only rather than none because the fee is only known once the transaction is sized, so the leftover cannot be declared as an output amount up front. The name is Elements vocabulary; on Bitcoin it means the one asset there is.",
+      "allow_change": "lbtc_only",
+      "params": {
+        "dest": {
+          "type": "string",
+          "description": "Address to pay. Must be valid for the configured network - a mainnet address is refused on a regtest run rather than silently accepted."
+        },
+        "amount_sat": {
+          "type": "u64",
+          "description": "Amount to send, in satoshis.",
+          "default": "150000"
+        }
+      },
+      "inputs": [
+        {
+          "id": "funding",
+          "utxo_source": "wallet",
+          "asset": "lbtc",
+          "$comment": "min_amount rather than an exact figure: the wallet picks any UTXO large enough to cover the payment and the fee, and the surplus comes back as change.",
+          "amount_sat": { "min_amount": "params.amount_sat" },
+          "ui": { "label": "coin being spent", "role": "funding" }
+        }
+      ],
+      "outputs": [
+        {
+          "id": "payment",
+          "amount_sat": "params.amount_sat",
+          "asset": "lbtc",
+          "destination": "params.dest",
+          "ui": { "label": "payment to the destination address", "role": "payment" }
+        }
+      ]
+    },
+    "Sweep": {
+      "description": "Send the whole of one UTXO to a destination, leaving only the fee behind.",
+      "intent": "Sweep a coin to {params.dest}, less the network fee",
+      "$comment": "No change output is declared, so allow_change stays none: the amount formula accounts for the fee exactly, and any surplus would be an error rather than a silently invented output.",
+      "params": {
+        "dest": { "type": "string", "description": "Address to sweep to." }
+      },
+      "inputs": [
+        {
+          "id": "funding",
+          "utxo_source": "wallet",
+          "asset": "lbtc",
+          "amount_sat": { "min_amount": "10000" },
+          "ui": { "label": "coin being swept", "role": "funding" }
+        }
+      ],
+      "outputs": [
+        {
+          "id": "swept",
+          "$comment": "`fee` is a reserved keyword resolved from the built transaction's size. Referencing it is what makes this action account for the fee exactly rather than guessing.",
+          "amount_sat": "funding.amount_sat - fee",
+          "asset": "lbtc",
+          "destination": "params.dest",
+          "ui": { "label": "everything, less the network fee", "role": "payment" }
+        }
+      ]
+    }
+  }
+}

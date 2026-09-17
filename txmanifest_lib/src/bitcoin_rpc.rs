@@ -223,6 +223,13 @@ impl RpcClient {
                     value: btc_string_to_sats(&u.amount.to_string())
                         .with_context(|| format!("cannot read amount {}", u.amount))?,
                     height: u.height,
+                    coinbase: u.coinbase.then(|| crate::bitcoin_backend::CoinbaseInfo {
+                        // A coinbase with no confirmation count is treated as brand new
+                        // rather than mature: refusing to spend a mature coin costs a
+                        // retry, while spending an immature one costs a rejected
+                        // transaction and a confusing error.
+                        confirmations: u.confirmations.unwrap_or(0),
+                    }),
                 })
             })
             .collect()
@@ -266,6 +273,7 @@ impl RpcClient {
                     branch,
                     index,
                     height: found.height,
+                    coinbase: found.coinbase,
                 })
             })
             .collect()
@@ -279,6 +287,8 @@ pub struct ScannedOutput {
     pub script_pubkey: ScriptBuf,
     pub value: u64,
     pub height: Option<u32>,
+    /// Set when the output is a block reward; see [`crate::bitcoin_backend::Utxo::coinbase`].
+    pub coinbase: Option<crate::bitcoin_backend::CoinbaseInfo>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -292,6 +302,11 @@ struct WireScanUnspent {
     amount: serde_json::Number,
     #[serde(default)]
     height: Option<u32>,
+    /// Whether this output is a block reward. Core reports it; Esplora does not.
+    #[serde(default)]
+    coinbase: bool,
+    #[serde(default)]
+    confirmations: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +463,27 @@ mod tests {
         assert_eq!(wire[0].height, Some(101));
         // The amount survives as text, so it converts exactly.
         assert_eq!(btc_string_to_sats(&wire[0].amount.to_string()).unwrap(), 2_506_084_842);
+    }
+
+    /// Core reports `coinbase` and `confirmations`; both must survive decoding, since
+    /// together they decide whether a coin can be spent at all.
+    #[test]
+    fn coinbase_status_survives_decoding() {
+        let body = r#"[
+          {"txid":"285a4a65e56c2c6993c68fe72485b5b12f645221f5607ee8aa495eb092db8300",
+           "vout":0,"scriptPubKey":"5120fb","amount":6.25,
+           "coinbase":true,"height":480,"confirmations":47},
+          {"txid":"2d3f2a2a71f12377fd502c2555be9f43e12b207bbc48c9905814e824034dc348",
+           "vout":1,"scriptPubKey":"5120ab","amount":0.5,
+           "coinbase":false,"height":100,"confirmations":427}
+        ]"#;
+        let wire: Vec<WireScanUnspent> = serde_json::from_str(body).expect("decodes");
+        assert!(wire[0].coinbase);
+        assert_eq!(wire[0].confirmations, Some(47));
+        assert!(!wire[1].coinbase);
+        // ...and the amounts still convert exactly.
+        assert_eq!(btc_string_to_sats(&wire[0].amount.to_string()).unwrap(), 625_000_000);
+        assert_eq!(btc_string_to_sats(&wire[1].amount.to_string()).unwrap(), 50_000_000);
     }
 
     #[test]

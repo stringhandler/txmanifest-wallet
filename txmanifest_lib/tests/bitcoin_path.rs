@@ -45,6 +45,8 @@ fn scanned(w: &BitcoinWallet, branch: Branch, index: u32, value: u64, n: u8) -> 
         branch,
         index,
         height: Some(320_000),
+        // Not a block reward, so spendable regardless of depth.
+        coinbase: None,
     }
 }
 
@@ -283,4 +285,42 @@ fn an_address_for_the_wrong_bitcoin_network_is_refused() {
         .expect_err("a mainnet address must not be accepted on signet")
         .to_string();
     assert!(err.contains("bitcoin-signet"), "{err}");
+}
+
+
+/// The `fee` keyword must be estimated on the chain the transaction is for.
+///
+/// The lifecycle called the Elements estimator unconditionally, which on a Bitcoin run
+/// asks an LWK wallet about a UTXO it has never heard of. The keyword then cannot resolve,
+/// and every output amount depending on it -- `input.amount_sat - fee`, the way a sweep is
+/// written -- is wrong by exactly the fee.
+#[test]
+fn the_fee_keyword_is_estimable_on_bitcoin() {
+    let w = wallet();
+    let utxos = vec![scanned(&w, Branch::Receive, 0, 1_000_000, 8)];
+    let spendable = bitcoin_spendable_utxos(&utxos).expect("synthesizes");
+
+    let req = BuildPsetRequest {
+        inputs: vec![PsetInput::Wallet {
+            input_id: "funding".to_string(),
+            utxo: spendable[0].clone(),
+            issuance: None,
+            sequence: None,
+        }],
+        // A sweep declares no output amount until `fee` resolves, so the estimate is taken
+        // from a draft with none.
+        outputs: vec![],
+        fee_rate: 2.0,
+        policy_asset: bitcoin_policy_asset(),
+        change_assets: Default::default(),
+    };
+
+    let psbt_req = psbt_builder::from_pset_request(&req, None).expect("narrows");
+    let fee = psbt_builder::estimate_fee(&psbt_req).expect("estimates");
+    assert!(fee > 0, "a transaction with an input costs something to relay");
+    assert!(fee < 10_000, "implausible fee for one input: {fee}");
+
+    // The rate is what was asked for, within the rounding a whole-vbyte size imposes.
+    let vsize = fee as f32 / 2.0;
+    assert!(vsize > 50.0 && vsize < 200.0, "implied vsize {vsize} is not a real transaction");
 }

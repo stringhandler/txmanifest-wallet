@@ -67,6 +67,40 @@ pub struct Utxo {
     pub index: u32,
     /// Block height, or `None` while unconfirmed.
     pub height: Option<u32>,
+    /// Whether this output is a block reward, and how deep it is if so.
+    ///
+    /// A coinbase output cannot be spent until it is 100 blocks deep. Selecting one before
+    /// then builds a transaction the network rejects with
+    /// `bad-txns-premature-spend-of-coinbase` — a message that points at the coin rather
+    /// than at the wallet that chose it, and which is unavoidable on regtest, where mining
+    /// is how a wallet gets funded at all.
+    ///
+    /// `None` means the backend does not report it. Esplora's UTXO listing carries no
+    /// coinbase flag, so this stays `None` there and such an output is treated as
+    /// spendable — the status quo, and harmless for wallets that do not receive block
+    /// rewards.
+    pub coinbase: Option<CoinbaseInfo>,
+}
+
+/// What is known about a coinbase output's maturity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoinbaseInfo {
+    pub confirmations: u32,
+}
+
+/// Confirmations a coinbase output needs before it can be spent.
+pub const COINBASE_MATURITY: u32 = 100;
+
+impl Utxo {
+    /// Whether this output can be included in a transaction now.
+    ///
+    /// Everything is spendable except a coinbase output that has not matured.
+    pub fn is_spendable(&self) -> bool {
+        match self.coinbase {
+            Some(info) => info.confirmations >= COINBASE_MATURITY,
+            None => true,
+        }
+    }
 }
 
 impl Utxo {
@@ -142,6 +176,8 @@ fn parse_utxos(body: &str, script_pubkey: &ScriptBuf, branch: Branch, index: u32
                 branch,
                 index,
                 height: if u.status.confirmed { u.status.block_height } else { None },
+                // Esplora's UTXO listing does not say whether an output is a coinbase.
+                coinbase: None,
             })
         })
         .collect()
@@ -463,6 +499,37 @@ mod tests {
                         "mempool_stats":{"tx_count":0}}"#;
         assert!(parse_address_used(stats).unwrap());
         assert!(parse_utxos("[]", &spk(), Branch::Receive, 0).unwrap().is_empty());
+    }
+
+    /// Block rewards need 100 confirmations. Selecting one early builds a transaction the
+    /// network rejects, and on regtest — where mining is how a wallet gets funded — that is
+    /// the default outcome rather than an edge case.
+    #[test]
+    fn immature_coinbase_outputs_are_not_spendable() {
+        let mut u = parse_utxos(UTXO_BODY, &spk(), Branch::Receive, 0).unwrap().remove(0);
+
+        // Not a coinbase: always spendable.
+        assert!(u.coinbase.is_none());
+        assert!(u.is_spendable());
+
+        u.coinbase = Some(CoinbaseInfo { confirmations: 99 });
+        assert!(!u.is_spendable(), "one short of maturity");
+
+        u.coinbase = Some(CoinbaseInfo { confirmations: COINBASE_MATURITY });
+        assert!(u.is_spendable(), "exactly mature");
+
+        u.coinbase = Some(CoinbaseInfo { confirmations: 0 });
+        assert!(!u.is_spendable(), "freshly mined");
+    }
+
+    /// Esplora does not report coinbase status, so outputs from it stay spendable — the
+    /// behaviour before this existed, and right for wallets that never receive a reward.
+    #[test]
+    fn esplora_outputs_keep_their_previous_spendability() {
+        for u in parse_utxos(UTXO_BODY, &spk(), Branch::Receive, 0).unwrap() {
+            assert!(u.coinbase.is_none());
+            assert!(u.is_spendable());
+        }
     }
 
     #[test]

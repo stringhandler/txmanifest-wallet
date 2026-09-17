@@ -45,12 +45,50 @@ The node backend rather than Esplora: an Esplora instance for a four-block chain
 indexer and an API server alongside the node, and `scantxoutset` finds our coins with no
 wallet, no import and no rescan.
 
-## Funding
+## End to end
 
-Coinbase output needs 100 confirmations before it can be spent, so mine 101 blocks to an
-address the wallet derives — `bitcoin-cli generatetoaddress 101 <address>`. The image is
-built without wallet support, which is fine: `generatetoaddress` and `scantxoutset` are
-node RPCs.
+```sh
+export TX_MANIFEST_DATA_DIR=/tmp/txm-regtest     # keeps this off your real config
+mkdir -p "$TX_MANIFEST_DATA_DIR"
+cat > "$TX_MANIFEST_DATA_DIR/config.json" <<'JSON'
+{ "default_network": "bitcoin-regtest",
+  "bitcoin_backend": "rpc",
+  "bitcoin_rpc_url": "http://127.0.0.1:18443",
+  "bitcoin_rpc_auth": "tx:manifest",
+  "simplicity_activated": true }
+JSON
+
+tx-manifest-wallet create-wallet --out "$TX_MANIFEST_DATA_DIR/wallet.json"
+tx-manifest-wallet info --wallet "$TX_MANIFEST_DATA_DIR/wallet.json"   # copy the receive address
+```
+
+Fund it by mining. A block reward needs 100 confirmations before it can be spent, so mine
+**201** rather than 101 if you want to spend immediately — the wallet skips immature
+outputs and says so, but it can only spend what has matured:
+
+```sh
+docker exec simplicity-regtest bitcoin-cli -regtest -rpcuser=tx -rpcpassword=manifest \
+  generatetoaddress 201 <receive-address>
+```
+
+Then run an action. `--export-pset` writes the signed transaction instead of broadcasting,
+which is the easy way to inspect it first:
+
+```sh
+tx-manifest-wallet run manifest.json Pay \
+  --wallet "$TX_MANIFEST_DATA_DIR/wallet.json" \
+  --data-dir "$TX_MANIFEST_DATA_DIR" \
+  --params params.json \
+  --export-pset signed.json
+
+docker exec simplicity-regtest bitcoin-cli -regtest -rpcuser=tx -rpcpassword=manifest \
+  testmempoolaccept "[\"$(jq -r .tx_hex signed.json)\"]"
+```
+
+Drop `--export-pset` to broadcast instead; the wallet prompts before it sends.
+
+The image is built without wallet support, which is fine: `generatetoaddress` and
+`scantxoutset` are node RPCs.
 
 ## What works against this today
 

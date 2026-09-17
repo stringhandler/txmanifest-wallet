@@ -560,6 +560,7 @@ mod tests {
             branch: Branch::Receive,
             index: 0,
             height: Some(320_630),
+            coinbase: None,
         }];
 
         let synthesized = bitcoin_spendable_utxos(&utxos).expect("synthesizes");

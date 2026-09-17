@@ -74,8 +74,18 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Whether the configured network carries real value.
+    ///
+    /// Asks the network rather than comparing the string to `"mainnet"`, which was true
+    /// only while Liquid was the only chain: `default_network: "bitcoin"` *is* mainnet and
+    /// compared false, so a wallet created against a Bitcoin mainnet config was recorded
+    /// as a testnet wallet. Errs toward `true` for an unparseable value, since treating an
+    /// unknown network as a testnet is the dangerous direction.
     pub fn is_mainnet(&self) -> bool {
-        self.default_network == "mainnet"
+        match self.network() {
+            Ok(n) => n.is_mainnet(),
+            Err(_) => self.default_network != "testnet",
+        }
     }
 
     /// Return the Esplora URL: explicit override > network-appropriate default.
@@ -97,8 +107,12 @@ impl Config {
                 // nothing honest to default to; the caller gets the testnet URL and will
                 // fail loudly against it rather than being pointed somewhere plausible.
                 Network::ElementsRegtest => "https://blockstream.info/liquidtestnet/api",
+                // Regtest has no public instance, so there is nothing honest to default
+                // to. A localhost URL fails to connect, which is the right failure; the
+                // public signet that used to stand in here would have silently answered
+                // questions about somebody else's chain.
                 bitcoin_net => crate::bitcoin_backend::default_esplora_url(bitcoin_net)
-                    .unwrap_or("https://blockstream.info/signet/api"),
+                    .unwrap_or("http://127.0.0.1:3002"),
             },
             Err(_) => "https://blockstream.info/liquidtestnet/api",
         }
@@ -203,7 +217,40 @@ impl Config {
     }
 }
 
+/// An explicit config path, set once at startup by the CLI's `--config`.
+///
+/// Process-global rather than threaded through every call site: `load` is reached from a
+/// dozen places, several of them deep inside the lifecycle, and none of them has anything
+/// useful to say about where the config lives. A `OnceLock` also makes the override
+/// single-assignment, so nothing can quietly repoint the config mid-run.
+static CONFIG_PATH_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Point every later [`load`] and [`save`] at `path`.
+///
+/// Returns an error if a different path was already set, which can only happen by
+/// programming mistake — but a config silently moving after something has read the old one
+/// is the kind of mistake worth refusing rather than tolerating.
+pub fn set_config_path(path: PathBuf) -> Result<()> {
+    match CONFIG_PATH_OVERRIDE.set(path.clone()) {
+        Ok(()) => Ok(()),
+        Err(_) if CONFIG_PATH_OVERRIDE.get() == Some(&path) => Ok(()),
+        Err(_) => anyhow::bail!(
+            "config path already set to {}",
+            CONFIG_PATH_OVERRIDE.get().map_or_else(String::new, |p| p.display().to_string())
+        ),
+    }
+}
+
+/// Where the config is read from and written to.
+///
+/// Precedence: an explicit `--config`, then [`crate::wallet::DATA_DIR_ENV`] via
+/// [`default_data_dir`], then the platform data directory. Deliberately *not* the current
+/// directory: a config that activates based on where you happen to be standing is how a
+/// mainnet transaction gets broadcast from the wrong folder.
 pub fn config_path() -> PathBuf {
+    if let Some(explicit) = CONFIG_PATH_OVERRIDE.get() {
+        return explicit.clone();
+    }
     default_data_dir().join("config.json")
 }
 
@@ -291,6 +338,23 @@ mod tests {
         };
         let err = c.activation(c.network().unwrap()).unwrap_err().to_string();
         assert!(err.contains("extra_capabilities"), "{err}");
+    }
+
+    /// The default must be the platform data directory, never the current one.
+    ///
+    /// A config that activates based on where you happen to be standing is how a mainnet
+    /// transaction gets broadcast from the wrong folder, so `./config.json` is deliberately
+    /// not consulted.
+    #[test]
+    fn the_default_config_path_is_not_the_current_directory() {
+        // `set_config_path` is process-global and this test must not claim it, so this
+        // checks the un-overridden shape rather than calling `config_path`.
+        let default = crate::wallet::default_data_dir().join("config.json");
+        assert_eq!(default.file_name().unwrap(), "config.json");
+        assert!(
+            default.parent().is_some_and(|p| p != std::path::Path::new("")),
+            "the config must live under a data directory, not at a bare relative path"
+        );
     }
 
     /// The Esplora default must follow the configured network across both chains, and an

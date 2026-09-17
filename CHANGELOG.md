@@ -72,6 +72,38 @@ the aliases `liquid` and `btc`. It was a free-form string that nothing read;
   are written, and counting it as multi-asset marked `p2pk` and `last_will`
   unportable when they are the two that port most cleanly.
 
+- **A Bitcoin transaction built by this engine is confirmed on chain.** Against
+  the `contrib/regtest` node: a `chain: "bitcoin"`, `requires: []` manifest
+  resolved its input from a UTXO-set scan, built a PSBT, signed a key-path spend,
+  and the node accepted it — `testmempoolaccept` `allowed: true`, then one
+  confirmation with 150,000 sat at the declared destination, change to the
+  wallet, a single 64-byte witness item, and 308 sat over 154 vbytes: exactly the
+  2 sat/vB asked for.
+
+  Getting there surfaced four things no unit test could:
+
+  - **The backend selection was never wired.** `BitcoinRun` built an
+    `EsploraClient` directly, so `bitcoin_backend: "rpc"` was read, validated and
+    ignored. Every Bitcoin run used Esplora regardless.
+  - **`default_network` could not be set to any Bitcoin network.** The CLI setter
+    checked against a two-item list written before Bitcoin support existed, so
+    regtest could only be configured by editing the file by hand. It now
+    validates by parsing.
+  - **`config` showed Elements fields for a Bitcoin config** — an Esplora URL a
+    Bitcoin run never consults, beside a network that cannot use it. It now shows
+    the backend the configured chain actually uses, with the RPC password
+    redacted.
+  - **Regtest's Esplora fallback pointed at a public signet.** It now points at
+    localhost, which fails to connect — the right failure. The old default would
+    have quietly answered questions about somebody else's chain, and did exactly
+    that until the run caught it.
+
+- **`TX_MANIFEST_DATA_DIR` relocates the wallet's on-disk state**, config
+  included. The config lived at a fixed global path that `config::load` resolved
+  with no argument, so pointing the wallet at a regtest meant overwriting the
+  config a user's real funds are reached through — which made the thing
+  untestable by anyone who also used it.
+
 - **`bitcoin_rpc` — chain access over a node's own JSON-RPC,** selectable with
   `bitcoin_backend: "rpc"`. Esplora is right against a public network, where
   somebody else runs the indexer; it is the wrong tool against a regtest you just

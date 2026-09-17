@@ -413,7 +413,7 @@ pub fn run(
         let target = network.unwrap_or(&cfg.default_network).parse::<crate::chain::Network>()
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let btc_wallet = crate::bitcoin_wallet::BitcoinWallet::from_mnemonic(&w.mnemonic, target)?;
-        let client = crate::bitcoin_backend::EsploraClient::new(cfg.esplora_url());
+        let client = cfg.bitcoin_chain(target)?;
 
         println!("  {} Scanning {} for wallet UTXOs…", style("·").dim(), target);
         let utxos = client
@@ -453,7 +453,26 @@ pub fn run(
     // above on Bitcoin. Both arrive in the same shape so input selection is shared — see
     // `assembly::bitcoin_spendable_utxos` for what is real and what is synthesized.
     let available_utxos: Vec<lwk_wollet::WalletTxOut> = match &bitcoin_run {
-        Some(r) => crate::assembly::bitcoin_spendable_utxos(&r.utxos)?,
+        Some(r) => {
+            // Immature coinbase outputs are filtered here rather than at the scan, so the
+            // scan stays a faithful report of what the wallet holds and only *selection*
+            // is restricted. The two are different questions: a freshly mined coin is
+            // genuinely ours, and a balance that omitted it would be wrong.
+            let (spendable, immature): (Vec<_>, Vec<_>) =
+                r.utxos.iter().cloned().partition(|u| u.is_spendable());
+            if !immature.is_empty() {
+                let held: u64 = immature.iter().map(|u| u.value).sum();
+                println!(
+                    "  {} Ignoring {} immature coinbase output(s) holding {} sat — \
+                     block rewards need {} confirmations before they can be spent.",
+                    style("·").dim(),
+                    immature.len(),
+                    held,
+                    crate::bitcoin_backend::COINBASE_MATURITY,
+                );
+            }
+            crate::assembly::bitcoin_spendable_utxos(&spendable)?
+        }
         None => match &loaded_wallet {
             Some(w) if data_dir.exists() => wallet::utxos(w, data_dir).unwrap_or_else(|_| vec![]),
             _ => vec![],
@@ -1877,7 +1896,22 @@ pub fn run(
             // draft, then re-evaluate any output amount that referenced `fee`. The
             // amounts don't affect the tx vsize, so the draft gives the right size.
             if out_amount_formulas.iter().filter_map(|(_, f)| f.as_ref()).any(amount_uses_fee_keyword) {
-                match pset_builder::estimate_fee(wollet, net, &req) {
+                // Estimating on the chain the transaction is actually for. This used to
+                // call the Elements estimator unconditionally, which on a Bitcoin run asks
+                // an LWK wallet about a UTXO it has never heard of. The `fee` keyword then
+                // cannot resolve, and every output amount that depends on it is wrong by
+                // exactly the fee.
+                let estimate = match &bitcoin_run {
+                    Some(r) => (|| -> Result<u64> {
+                        let change = r
+                            .wallet
+                            .script_pubkey(crate::bitcoin_wallet::Branch::Change, r.change_index)?;
+                        let psbt_req = crate::psbt_builder::from_pset_request(&req, Some(change))?;
+                        crate::psbt_builder::estimate_fee(&psbt_req)
+                    })(),
+                    None => pset_builder::estimate_fee(wollet, net, &req),
+                };
+                match estimate {
                     Ok(est) => {
                         ctx.set_fee(est);
                         println!("  {} Estimated network fee: {} sat (resolves `fee`)", style("✓").green(), est);
@@ -5192,7 +5226,8 @@ pub(crate) struct BitcoinRun {
     /// there would hand the covenant derivation the wrong chain.
     pub network: crate::chain::Network,
     pub wallet: crate::bitcoin_wallet::BitcoinWallet,
-    pub client: crate::bitcoin_backend::EsploraClient,
+    /// Whichever backend the config selects — Esplora or a node's JSON-RPC.
+    pub client: crate::bitcoin_backend::BitcoinChain,
     pub utxos: Vec<crate::bitcoin_backend::Utxo>,
     pub change_index: u32,
     pub receive_start: u32,

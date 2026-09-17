@@ -28,18 +28,49 @@ pub struct WalletFile {
 }
 
 impl WalletFile {
+    /// The network this wallet was created for, when the field names one this build knows.
+    ///
+    /// Older files carry only `"mainnet"` or `"testnet"`, which parse as Liquid and Liquid
+    /// testnet — what they meant when written, since Elements was the only chain then.
+    pub fn network(&self) -> Option<crate::chain::Network> {
+        self.network.parse().ok()
+    }
+
+    /// Whether this wallet is for a network carrying real value.
+    ///
+    /// Parsed rather than compared to `"mainnet"`, so a file recording `bitcoin` is
+    /// correctly mainnet. Unrecognized values err toward `true`: treating an unknown
+    /// network as a testnet is the direction that loses money.
     pub fn is_mainnet(&self) -> bool {
-        self.network == "mainnet"
+        match self.network() {
+            Some(n) => n.is_mainnet(),
+            None => self.network != "testnet",
+        }
     }
 }
 
 /// Generate a new random 12-word mnemonic and return the wallet file contents.
-pub fn create_wallet(is_mainnet: bool) -> Result<WalletFile> {
-    let (_, mnemonic) = SwSigner::random(is_mainnet)
+///
+/// Records the network by name rather than as a mainnet/testnet flag. The flag predated
+/// Bitcoin support and could not distinguish `bitcoin-regtest` from Liquid testnet, so a
+/// regtest wallet said `testnet` and a reader had no way to tell which chain it meant.
+pub fn create_wallet_for(network: crate::chain::Network) -> Result<WalletFile> {
+    let (_, mnemonic) = SwSigner::random(network.is_mainnet())
         .map_err(|e| anyhow::anyhow!("Failed to generate mnemonic: {e}"))?;
     Ok(WalletFile {
-        network: if is_mainnet { "mainnet" } else { "testnet" }.to_string(),
+        network: network.to_string(),
         mnemonic: mnemonic.to_string(),
+    })
+}
+
+/// Generate a wallet for Liquid or Liquid testnet.
+///
+/// Kept for callers that only know a mainnet flag; prefer [`create_wallet_for`].
+pub fn create_wallet(is_mainnet: bool) -> Result<WalletFile> {
+    create_wallet_for(if is_mainnet {
+        crate::chain::Network::Liquid
+    } else {
+        crate::chain::Network::LiquidTestnet
     })
 }
 
@@ -105,7 +136,23 @@ pub fn wallet_signing_pubkey(wallet: &WalletFile) -> Result<(String, &'static st
 
 /// Return the default data directory for wallet state:
 /// `<user data dir>/tx-manifest-wallet` on each platform.
+/// Environment variable that relocates the wallet's entire on-disk state.
+///
+/// Covers the config, the persisted wallet state and anything else derived from the data
+/// directory, so they move together rather than half of it landing in one place.
+pub const DATA_DIR_ENV: &str = "TX_MANIFEST_DATA_DIR";
+
 pub fn default_data_dir() -> PathBuf {
+    // Honouring an override here rather than only on the CLI's `--data-dir`, because
+    // `config::load` reads this too and takes no arguments. Without it the config is at a
+    // fixed global path, so pointing the wallet at a regtest means overwriting the config
+    // a user's real funds are reached through — which makes the thing untestable by anyone
+    // who also uses it.
+    if let Some(dir) = std::env::var_os(DATA_DIR_ENV) {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     dirs_next::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("tx-manifest-wallet")
@@ -258,6 +305,35 @@ fn find_path_for_pubkey(wallet: &WalletFile, pubkey_hex: &str) -> Result<&'stati
 }
 
 /// Derive wallet info from a wallet file.
+/// Wallet info for the network the wallet is actually pointed at.
+///
+/// Takes the network rather than reading it off the wallet file, which records only a
+/// mainnet/testnet flag from a time when Elements was the only chain. Deriving the address
+/// from that flag showed a Liquid address for a Bitcoin wallet — the one piece of output a
+/// user acts on directly, naming a chain the run has no relationship with.
+pub fn wallet_info_for(wallet: &WalletFile, network: crate::chain::Network) -> Result<WalletInfo> {
+    if network.family() == crate::chain::ChainFamily::Bitcoin {
+        let btc = crate::bitcoin_wallet::BitcoinWallet::from_mnemonic(&wallet.mnemonic, network)?;
+        let key_path = btc.key_path(crate::bitcoin_wallet::Branch::Receive, 0).to_string();
+        let wallet_pubkey = btc.schnorr_pubkey_at(&format!("m/{key_path}"))?;
+        return Ok(WalletInfo {
+            network: network.to_string(),
+            fingerprint: btc.master_fingerprint().to_string(),
+            master_xpub: btc.account_xpub()?.to_string(),
+            receive_address: btc
+                .address(crate::bitcoin_wallet::Branch::Receive, 0)?
+                .to_string(),
+            wallet_pubkey,
+            wallet_key_path: format!("m/{key_path}"),
+            // The oracle key is an Elements-protocol convention with no Bitcoin
+            // counterpart, so it is reported as the same key rather than invented.
+            oracle_pubkey: String::new(),
+            oracle_path: String::new(),
+        });
+    }
+    wallet_info(wallet)
+}
+
 pub fn wallet_info(wallet: &WalletFile) -> Result<WalletInfo> {
     let s = signer(wallet)?;
 
@@ -366,6 +442,59 @@ pub fn committed_output(wallet: &WalletFile) -> Result<(String, String)> {
     let hash = sha256::Hash::hash(spk.as_bytes());
     let hash_hex: String = hash.to_byte_array().iter().map(|b| format!("{b:02x}")).collect();
     Ok((explicit.to_string(), hash_hex))
+}
+
+
+#[cfg(test)]
+mod network_field_tests {
+    use super::*;
+    use crate::chain::Network;
+
+    fn wf(network: &str) -> WalletFile {
+        WalletFile { network: network.to_string(), mnemonic: String::new() }
+    }
+
+    /// Files written before Bitcoin support carry only `mainnet`/`testnet`, and must keep
+    /// meaning what they meant: Liquid and Liquid testnet.
+    #[test]
+    fn legacy_wallet_files_keep_their_meaning() {
+        assert_eq!(wf("mainnet").network(), Some(Network::Liquid));
+        assert!(wf("mainnet").is_mainnet());
+        assert_eq!(wf("testnet").network(), Some(Network::LiquidTestnet));
+        assert!(!wf("testnet").is_mainnet());
+    }
+
+    /// The bug this replaced: `network == "mainnet"` is false for `bitcoin`, which *is*
+    /// mainnet — so a Bitcoin mainnet wallet was recorded and read back as a testnet one.
+    #[test]
+    fn bitcoin_mainnet_is_recognised_as_mainnet() {
+        assert!(wf("bitcoin").is_mainnet());
+        assert_eq!(wf("bitcoin").network(), Some(Network::Bitcoin));
+
+        for testnet in ["bitcoin-regtest", "bitcoin-signet", "bitcoin-testnet"] {
+            assert!(!wf(testnet).is_mainnet(), "{testnet} should not be mainnet");
+        }
+    }
+
+    /// An unrecognized value is treated as mainnet. Guessing "testnet" for something
+    /// unknown is the direction that loses money.
+    #[test]
+    fn an_unknown_network_errs_toward_mainnet() {
+        assert!(wf("some-future-chain").is_mainnet());
+        assert_eq!(wf("some-future-chain").network(), None);
+    }
+
+    /// A wallet records the network it was made for, so a reader can tell which chain it
+    /// belongs to rather than only whether it is a testnet of some sort.
+    #[test]
+    fn a_created_wallet_records_its_network_by_name() {
+        for net in [Network::BitcoinRegtest, Network::BitcoinSignet, Network::Liquid] {
+            let w = create_wallet_for(net).expect("creates");
+            assert_eq!(w.network, net.to_string());
+            assert_eq!(w.network(), Some(net));
+            assert_eq!(w.is_mainnet(), net.is_mainnet());
+        }
+    }
 }
 
 #[cfg(test)]
