@@ -2913,9 +2913,8 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "simplicity-lang"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13ed081e3046d66c146d7201bcbf3b655ca3436cb83f6efc26d7895bd2b79d06"
+version = "0.7.1"
+source = "git+https://github.com/delta1/rust-simplicity?branch=2025-12%2Fupdate-libsimplicity#13c1bcedcf4d4e5659ffdb7329a20d055c36c44e"
 dependencies = [
  "bitcoin",
  "bitcoin_hashes",
@@ -2931,8 +2930,7 @@ dependencies = [
 [[package]]
 name = "simplicity-sys"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96d1ec5477c7650b8ef511aa56dccb28f2e8cdb6e87f260ecffdaf0ebfef2d3b"
+source = "git+https://github.com/delta1/rust-simplicity?branch=2025-12%2Fupdate-libsimplicity#13c1bcedcf4d4e5659ffdb7329a20d055c36c44e"
 dependencies = [
  "bitcoin_hashes",
  "cc",
@@ -2940,8 +2938,8 @@ dependencies = [
 
 [[package]]
 name = "simplicityhl"
-version = "0.7.0"
-source = "git+https://github.com/BlockstreamResearch/SimplicityHL#46867308f28affa386a426f4d4e3e2a8c9db9217"
+version = "0.7.1"
+source = "git+https://github.com/delta1/SimplicityHL?branch=bitcoin#17f0fa4c535c2794df0e79d8c702458d1764a16d"
 dependencies = [
  "ariadne",
  "base64 0.21.7",

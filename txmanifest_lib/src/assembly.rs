@@ -331,13 +331,18 @@ impl AssemblyContext for BitcoinContext<'_> {
     }
 
     fn resolve_asset(&self, label: &str) -> Result<AssetId> {
-        // `validate` rejects a Bitcoin manifest naming any asset but the policy one, so a
-        // label reaching here should always denote BTC. Checking rather than assuming: a
-        // label that slipped past means the check has a hole, and quietly treating an
-        // unknown asset as BTC would spend the wrong thing.
-        if crate::manifest::names_policy_asset_str(label) {
+        // Either spelling of the one asset: the manifest's label (`lbtc`), or the synthetic
+        // id it resolves to. The id comes back from places that record a *resolved* asset
+        // and feed it in again — the state file most of all, which is how a covenant this
+        // engine created a moment ago became unspendable by it.
+        if crate::manifest::names_policy_asset_str(label)
+            || label.eq_ignore_ascii_case(&bitcoin_policy_asset().to_string())
+        {
             return Ok(self.policy_asset());
         }
+        // Anything else is a second asset, which `validate` rejects on Bitcoin. Checking
+        // rather than assuming: a label that slipped past means that check has a hole, and
+        // quietly treating an unknown asset as BTC would spend the wrong thing.
         anyhow::bail!(
             "asset '{label}' cannot be resolved on Bitcoin, which has only one asset; \
              this manifest should have been rejected by `validate`"

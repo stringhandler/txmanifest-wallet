@@ -55,14 +55,15 @@ The same mnemonic works across regtest, signet and testnet, which all use SLIP-4
 `1'`. It does **not** carry to mainnet, which uses `0'` and so derives entirely different
 addresses.
 
-Fund it by mining. **201 blocks, not 101**: a block reward needs 100 confirmations before
-it can be spent, so 101 leaves you one mature coin and a hundred the wallet correctly
-refuses. It says so when it skips them.
+Fund it:
 
 ```sh
-docker exec simplicity-regtest bitcoin-cli -regtest -rpcuser=tx -rpcpassword=manifest \
-  generatetoaddress 201 <receive-address-from-info>
+./contrib/regtest/faucet.sh --config examples/bitcoin_pay/config.json \
+                            --wallet /tmp/txm-regtest/wallet.json --utxos 3
 ```
+
+The faucet handles coinbase maturity for you: it mines your coins, then mines 100 more to
+an unspendable address so yours become spendable, leaving nothing immature behind.
 
 Then run an action. `params.json` here pays to a fixed address; change `dest` to anything
 valid for the network — a mainnet address is refused rather than silently accepted.
@@ -74,7 +75,13 @@ cargo run -p tx-manifest-wallet -- $CFG run examples/bitcoin_pay/txmanifest.json
   --params examples/bitcoin_pay/params.json
 ```
 
-It prompts before broadcasting. To inspect the transaction first instead, add
+It prompts before broadcasting, and nothing confirms until a block is mined:
+
+```sh
+./contrib/regtest/mine.sh --txid <txid>
+```
+
+To inspect the transaction rather than send it, add
 `--export-pset signed.json` — that writes `{txid, tx_hex}` and sends nothing:
 
 ```sh

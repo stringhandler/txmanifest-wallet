@@ -831,8 +831,18 @@ pub fn run(
                             a.to_string()
                         }
                     });
+                    // Compared as resolved asset *ids*, not as written. A manifest names
+                    // the chain's own unit as `"lbtc"` while the state file records the id
+                    // it resolved to, so a raw string compare matched nothing — and the
+                    // covenant the previous action had just recorded looked absent.
+                    let wanted = asset_filter.as_ref().map(|a| {
+                        run_network
+                            .and_then(|n| resolve_asset_label(a, n).ok())
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| a.clone())
+                    });
                     candidates.into_iter().find(|u| {
-                        asset_filter.as_ref().is_none_or(|a| &u.asset == a)
+                        wanted.as_ref().is_none_or(|a| &u.asset == a)
                     }).cloned()
                 });
                 if let Some(utxo) = state_match {
@@ -1111,14 +1121,6 @@ pub fn run(
     let network_for_asset = loaded_wallet.as_ref().map(wallet::elements_network);
     let mut pset_opt: Option<lwk_wollet::elements::pset::PartiallySignedTransaction> = None;
 
-    // Tracks covenant outputs for state-file updates after broadcast.
-    struct CovenantOutputMeta {
-        utxo_type: String,
-        output_id: String,
-        script_pubkey: lwk_wollet::elements::Script,
-        amount_sat: u64,
-        asset: lwk_wollet::elements::AssetId,
-    }
     let mut covenant_output_meta: Vec<CovenantOutputMeta> = Vec::new();
 
     // Computed here so both Step 7 (PSET building) and Step 9 (dry-run) can use them.
@@ -1959,8 +1961,129 @@ pub fn run(
             // path to run through yet, and nothing downstream would know what to do with a
             // PSBT.
             if actx.family() == crate::chain::ChainFamily::Bitcoin {
-                match run_bitcoin_build(&req, &bitcoin_run, export_pset_path) {
-                    Ok(()) => {}
+                // Resolve each covenant input's program and parameters here, where the
+                // manifest and the execution context are in scope. The Elements path does
+                // the same work in its own finalize step; this is the same resolution,
+                // moved to where the Bitcoin build can reach it.
+                let mut covenant_specs: std::collections::HashMap<String, CovenantSpendSpec> =
+                    std::collections::HashMap::new();
+                let mut specs_ok = true;
+                for action_inp in action.inputs.as_deref().unwrap_or_default() {
+                    let Some(type_name) = action_inp.utxo_type_name() else { continue };
+                    let spec = (|| -> Result<CovenantSpendSpec> {
+                        let ut = manifest.utxo_type(&type_name)?;
+                        let site = resolve_utxo_site(
+                            ut, Some(&action_inp.utxo_source), &compile_params_map,
+                            &compile_param_type_hints, action, &ctx,
+                        )?;
+                        let path = ut
+                            .script
+                            .as_ref()
+                            .and_then(|sc| sc.source.as_deref())
+                            .map(|src| {
+                                manifest_file
+                                    .parent()
+                                    .unwrap_or(std::path::Path::new("."))
+                                    .join(src)
+                            })
+                            .unwrap_or_else(|| simf_path.clone());
+                        Ok(CovenantSpendSpec {
+                            simf_path: path,
+                            params: site.compile_params,
+                            hints: site.type_hints,
+                            leaf_payloads: site.leaf_payloads,
+                            witnesses: action_inp
+                                .witnesses
+                                .as_ref()
+                                .map(|w| eval::resolve_witness_refs(w, &ctx)),
+                            witness_spec: action_inp.witnesses.clone(),
+                        })
+                    })();
+                    match spec {
+                        Ok(spec) => {
+                            covenant_specs.insert(action_inp.id.clone(), spec);
+                        }
+                        Err(e) => {
+                            println!(
+                                "  {} Covenant input '{}': {e}",
+                                style("[error]").red(), action_inp.id
+                            );
+                            specs_ok = false;
+                        }
+                    }
+                }
+                if !specs_ok {
+                    return Ok(());
+                }
+
+                let params_snap = compile_params_map.clone();
+                let action_params_snap = action_params_map.clone();
+                let wallet_snap = loaded_wallet.clone();
+                match run_bitcoin_build(
+                    &req,
+                    &bitcoin_run,
+                    export_pset_path,
+                    &covenant_specs,
+                    &params_snap,
+                    &action_params_snap,
+                    wallet_snap.as_ref(),
+                    &compile_opts,
+                ) {
+                    Ok(Some(broadcast)) => {
+                        // Record the covenant UTXOs this action created, so the next one
+                        // can find them. Without it the operator has to name the outpoint
+                        // and its amount by hand — which is the state the Bitcoin path was
+                        // in until now, because it returned before ever reaching the
+                        // Elements post-broadcast step that does this.
+                        let mut new_state = contract_state
+                            .take()
+                            .unwrap_or_else(|| ContractState::new(action_name));
+                        new_state.last_action = action_name.to_string();
+                        let recorded_instance = if action.create_instance.is_some() {
+                            Some(effective_instance_out.as_path())
+                        } else {
+                            instance_in_path
+                        };
+                        new_state.instance = recorded_instance.map(|p| p.display().to_string());
+                        for inp in action.inputs.as_deref().unwrap_or_default() {
+                            if inp.utxo_type_name().is_some() {
+                                if let Some(r) = ctx.get_input(&inp.id) {
+                                    new_state.remove_spent(&r.txid, r.vout);
+                                }
+                            }
+                        }
+                        record_covenant_outputs(
+                            &mut new_state,
+                            &broadcast.outputs,
+                            &covenant_output_meta,
+                            &broadcast.txid,
+                        );
+                        match new_state.write(&effective_state_out) {
+                            Ok(()) => println!(
+                                "  {} State written:    {}",
+                                style("✓").green(),
+                                effective_state_out.display()
+                            ),
+                            Err(e) => println!(
+                                "  {} Cannot write state file: {e}",
+                                style("[warn]").yellow()
+                            ),
+                        }
+                        let hist_path = history_path(&history_seed);
+                        let entry = HistoryEntry {
+                            action: action_name.to_string(),
+                            txid: broadcast.txid.clone(),
+                            utxos: new_state.utxos.clone(),
+                        };
+                        if let Err(e) =
+                            StateHistory::load(&hist_path).and_then(|mut h| h.append(entry, &hist_path))
+                        {
+                            println!("  {} Cannot append history: {e}", style("[warn]").yellow());
+                        }
+                    }
+                    // Exported rather than broadcast: nothing exists on chain yet, so there
+                    // is no state to record.
+                    Ok(None) => {}
                     Err(e) => {
                         println!("  {} Bitcoin build failed:", style("[error]").red());
                         for (i, cause) in e.chain().enumerate() {
@@ -2715,51 +2838,27 @@ pub fn run(
                                         }
                                     }
                                 }
-                                // Add new covenant outputs by matching script_pubkeys in the tx.
-                                // First, drop any existing UTXOs of the types being produced —
-                                // this action supersedes them.
-                                for meta in &covenant_output_meta {
-                                    new_state.utxos.retain(|u| u.utxo_type != meta.utxo_type);
-                                }
-                                // Match each meta entry to the correct output vout.
-                                // Multiple outputs can share the same script_pubkey (e.g. four
-                                // prelock_script_auth outputs for four different NFTs), so we
-                                // also match on asset and amount, and consume each position at
-                                // most once to avoid duplicates.
-                                let mut used_vouts: std::collections::HashSet<usize> =
-                                    std::collections::HashSet::new();
-                                for meta in &covenant_output_meta {
-                                    let found = tx.output.iter().enumerate().find(|(i, o)| {
-                                        if used_vouts.contains(i) {
-                                            return false;
-                                        }
-                                        if o.script_pubkey != meta.script_pubkey {
-                                            return false;
-                                        }
-                                        let asset_ok = matches!(
-                                            &o.asset,
-                                            lwk_wollet::elements::confidential::Asset::Explicit(a)
-                                                if *a == meta.asset
-                                        );
-                                        let value_ok = matches!(
-                                            &o.value,
-                                            lwk_wollet::elements::confidential::Value::Explicit(v)
-                                                if *v == meta.amount_sat
-                                        );
-                                        asset_ok && value_ok
-                                    });
-                                    if let Some((vout, _)) = found {
-                                        used_vouts.insert(vout);
-                                        new_state.utxos.push(StateUtxo {
-                                            utxo_type: meta.utxo_type.clone(),
-                                            utxo_id: meta.output_id.clone(),
-                                            txid: txid.clone(),
-                                            vout: vout as u32,
-                                            amount_sat: meta.amount_sat,
-                                            asset: meta.asset.to_string(),
-                                        });
-                                    }
-                                }
+                                // Add new covenant outputs by matching them against the
+                                // broadcast transaction. Shared with the Bitcoin path — see
+                                // `record_covenant_outputs`.
+                                let descriptors: Vec<OutputDescriptor> = tx
+                                    .output
+                                    .iter()
+                                    .map(|o| OutputDescriptor {
+                                        script_pubkey: o.script_pubkey.as_bytes().to_vec(),
+                                        amount_sat: match &o.value {
+                                            lwk_wollet::elements::confidential::Value::Explicit(v) => Some(*v),
+                                            _ => None,
+                                        },
+                                        asset: match &o.asset {
+                                            lwk_wollet::elements::confidential::Asset::Explicit(a) => Some(*a),
+                                            _ => None,
+                                        },
+                                    })
+                                    .collect();
+                                record_covenant_outputs(
+                                    &mut new_state, &descriptors, &covenant_output_meta, &txid,
+                                );
                                 match new_state.write(&effective_state_out) {
                                     Ok(()) => {
                                         println!(
@@ -5241,11 +5340,30 @@ pub(crate) struct BitcoinRun {
 /// needs the upstream jet FFI, so the only transactions reachable here are plain payments,
 /// and splitting three mechanical operations across three steps would only invent places
 /// to stop.
+/// Everything needed to satisfy one covenant input, resolved from the manifest.
+pub(crate) struct CovenantSpendSpec {
+    pub simf_path: std::path::PathBuf,
+    pub params: std::collections::HashMap<String, String>,
+    pub hints: std::collections::HashMap<String, String>,
+    pub leaf_payloads: Vec<Vec<u8>>,
+    /// Witness values with manifest references already resolved.
+    pub witnesses: Option<serde_json::Value>,
+    /// The manifest's raw witness block, which still carries the `source.key` a signature
+    /// witness names. Resolution strips it, so both forms are kept.
+    pub witness_spec: Option<serde_json::Value>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_bitcoin_build(
     req: &pset_builder::BuildPsetRequest,
     run: &Option<BitcoinRun>,
     export_path: Option<&Path>,
-) -> Result<()> {
+    covenant_specs: &std::collections::HashMap<String, CovenantSpendSpec>,
+    compile_params: &std::collections::HashMap<String, String>,
+    action_params: &std::collections::HashMap<String, String>,
+    wallet: Option<&WalletFile>,
+    compile_opts: &covenant::CompileOpts,
+) -> Result<Option<BitcoinBroadcast>> {
     use crate::psbt_builder;
 
     let run = run
@@ -5271,48 +5389,237 @@ fn run_bitcoin_build(
         println!("    Change at output #{idx}");
     }
 
-    // Which wallet key signs which input. A covenant input has no entry: it is satisfied
-    // by a Simplicity witness, which this build cannot produce yet.
+    // Wallet inputs are signed with a wallet key; covenant inputs are satisfied by a
+    // Simplicity witness. Split them here, since the two are finalized by different code.
     let mut plan = Vec::new();
+    let mut covenant_inputs: Vec<(usize, String)> = Vec::new();
     for (index, input) in psbt_req.inputs.iter().enumerate() {
-        let psbt_builder::PsbtInput::Wallet { outpoint, .. } = input else {
-            anyhow::bail!(
-                "input '{}' is a covenant input; Bitcoin covenant spending needs a \
-                 SimplicityHL build with Bitcoin jets, which this crate does not yet pin",
-                input.input_id()
-            );
-        };
-        let utxo = run
-            .utxos
-            .iter()
-            .find(|u| u.outpoint == *outpoint)
-            .ok_or_else(|| {
-                anyhow::anyhow!("input '{}' spends {outpoint}, which is not a wallet UTXO", input.input_id())
-            })?;
-        plan.push(psbt_builder::KeyPathSigner {
-            input_index: index,
-            branch: utxo.branch,
-            index: utxo.index,
-        });
+        match input {
+            psbt_builder::PsbtInput::Wallet { outpoint, .. } => {
+                let utxo = run
+                    .utxos
+                    .iter()
+                    .find(|u| u.outpoint == *outpoint)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "input '{}' spends {outpoint}, which is not a wallet UTXO",
+                            input.input_id()
+                        )
+                    })?;
+                plan.push(psbt_builder::KeyPathSigner {
+                    input_index: index,
+                    branch: utxo.branch,
+                    index: utxo.index,
+                });
+            }
+            psbt_builder::PsbtInput::Covenant { input_id, .. } => {
+                covenant_inputs.push((index, input_id.clone()));
+            }
+        }
     }
 
     psbt_builder::sign_key_path_inputs(&mut built.psbt, &run.wallet, &plan)?;
     psbt_builder::finalize_key_path_inputs(&mut built.psbt)?;
+    if !plan.is_empty() {
+        println!("  {} Signed {} wallet input(s).", style("✓").green(), plan.len());
+    }
+
+    // Covenant inputs, once every other input's witness is settled: the Simplicity program
+    // reads the whole transaction, and `sig_all_hash` commits to it.
+    if !covenant_inputs.is_empty() {
+        let prevouts: Vec<lwk_wollet::elements::bitcoin::TxOut> =
+            psbt_req.inputs.iter().map(|i| i.witness_utxo()).collect();
+        let unsigned = built.psbt.unsigned_tx.clone();
+
+        for (index, input_id) in &covenant_inputs {
+            let spec = covenant_specs.get(input_id).ok_or_else(|| {
+                anyhow::anyhow!("covenant input '{input_id}' has no resolved program")
+            })?;
+            print!("  {} Covenant input '{}' — satisfying… ", style("·").dim(), input_id);
+            use std::io::Write as _;
+            let _ = std::io::stdout().flush();
+
+            let witness_spec = spec.witness_spec.clone();
+            let params_snap = compile_params.clone();
+            let action_snap = action_params.clone();
+            let wallet_snap = wallet.cloned();
+            let signer = move |name: &str, _kind: &str, hash: &[u8; 32]| -> Result<[u8; 64]> {
+                let w = wallet_snap
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no wallet loaded — cannot sign '{name}'"))?;
+                let key_ref = witness_spec
+                    .as_ref()
+                    .and_then(|wits| wits.get(name))
+                    .and_then(|s| s.get("source"))
+                    .and_then(|src| src.get("key"))
+                    .and_then(|k| k.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("no signing key for witness '{name}'"))?;
+                let resolved = resolve_witness_signing_key(key_ref, &action_snap, &params_snap);
+                wallet::sign_schnorr_for_pubkey(w, resolved, hash)
+            };
+
+            match covenant::finalize_bitcoin_covenant_input(
+                &spec.simf_path,
+                &spec.params,
+                &spec.hints,
+                &spec.leaf_payloads,
+                spec.witnesses.as_ref(),
+                Some(&signer),
+                &unsigned,
+                &prevouts,
+                *index as u32,
+                compile_opts,
+            ) {
+                Ok(stack) => {
+                    println!("{}", style("OK").green());
+                    built.psbt.inputs[*index].final_script_witness = Some(
+                        lwk_wollet::elements::bitcoin::Witness::from_slice(&stack),
+                    );
+                }
+                Err(e) => {
+                    println!("{}", style("FAILED").red());
+                    for (i, cause) in e.chain().enumerate() {
+                        println!("      {i}: {cause}");
+                    }
+                    anyhow::bail!("covenant input '{input_id}' could not be satisfied");
+                }
+            }
+        }
+    }
+
     let tx = psbt_builder::extract_tx(built.psbt)?;
-    println!("  {} Signed {} input(s).", style("✓").green(), plan.len());
 
     // Exporting is not a lesser form of broadcasting: it is what a caller asks for when
     // something else will relay the transaction, so it must not also send it.
+    // The outputs, flattened for covenant-state matching. Taken before the transaction is
+    // consumed, and reported whether or not it is broadcast — an exported transaction still
+    // describes the UTXOs it would create.
+    let outputs: Vec<OutputDescriptor> = tx
+        .output
+        .iter()
+        .map(|o| OutputDescriptor {
+            script_pubkey: o.script_pubkey.to_bytes(),
+            amount_sat: Some(o.value.to_sat()),
+            // Bitcoin has one asset, so there is nothing to match on and nothing to reject.
+            asset: None,
+        })
+        .collect();
+
     if let Some(path) = export_path {
         let hex = lwk_wollet::elements::bitcoin::consensus::encode::serialize_hex(&tx);
         let doc = serde_json::json!({ "txid": tx.compute_txid().to_string(), "tx_hex": hex });
         std::fs::write(path, serde_json::to_string_pretty(&doc)?)
             .with_context(|| format!("cannot write {}", path.display()))?;
         println!("  {} Wrote signed transaction to {}", style("✓").green(), path.display());
-        return Ok(());
+        // Reported as broadcast-less: the covenant exists only once the transaction is
+        // relayed, and writing it into the state file now would name a UTXO that does not
+        // exist and may never.
+        return Ok(None);
     }
 
     let txid = run.client.broadcast(&tx)?;
     println!("  {} Broadcast: {}", style("✓").green(), style(txid.to_string()).yellow());
-    Ok(())
+    Ok(Some(BitcoinBroadcast { txid: txid.to_string(), outputs }))
+}
+
+/// What a broadcast Bitcoin transaction created, for the state file.
+pub(crate) struct BitcoinBroadcast {
+    pub txid: String,
+    pub outputs: Vec<OutputDescriptor>,
+}
+
+
+/// A covenant output this action creates, tracked so the state file can name it once the
+/// transaction is broadcast and its vouts are known.
+///
+/// At module scope rather than inside `run` because both chains' post-broadcast paths
+/// match against it.
+pub(crate) struct CovenantOutputMeta {
+    pub utxo_type: String,
+    pub output_id: String,
+    pub script_pubkey: lwk_wollet::elements::Script,
+    pub amount_sat: u64,
+    pub asset: lwk_wollet::elements::AssetId,
+}
+
+/// One transaction output, reduced to what covenant-state matching needs.
+///
+/// Both chains flatten their own output type into this. Elements outputs carry confidential
+/// commitments and an asset id, Bitcoin outputs carry neither — but the question being
+/// asked is the same, so the matching below is written once against this.
+pub(crate) struct OutputDescriptor {
+    pub script_pubkey: Vec<u8>,
+    /// `None` when the output is blinded, and therefore cannot be matched by value.
+    pub amount_sat: Option<u64>,
+    /// `None` on Bitcoin, which has one asset, and when an Elements output is blinded.
+    pub asset: Option<lwk_wollet::elements::AssetId>,
+}
+
+/// Record the covenant UTXOs a broadcast transaction just created.
+///
+/// Shared by both chains because the matching rule is subtle enough that two copies would
+/// diverge: several outputs can share a scriptPubKey — deadcat's four market states are one
+/// program under four tapdata leaves — so an output is identified by script *and* amount
+/// (and asset, where there is more than one), and each position is consumed at most once so
+/// two metas cannot claim the same vout.
+///
+/// Without this the next action has no way to find the covenant it is meant to spend, and
+/// the operator has to name the outpoint and its amount by hand.
+pub(crate) fn record_covenant_outputs(
+    state: &mut ContractState,
+    outputs: &[OutputDescriptor],
+    meta: &[CovenantOutputMeta],
+    txid: &str,
+) {
+    // This action supersedes any existing UTXO of the types it produces.
+    for m in meta {
+        state.utxos.retain(|u| u.utxo_type != m.utxo_type);
+    }
+
+    let mut used_vouts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for m in meta {
+        let found = outputs.iter().enumerate().find(|(i, o)| {
+            if used_vouts.contains(i) || o.script_pubkey != m.script_pubkey.as_bytes() {
+                return false;
+            }
+            // A blinded output matches on script alone: its amount and asset are
+            // commitments, and refusing to match would lose the UTXO entirely.
+            o.amount_sat.is_none_or(|v| v == m.amount_sat)
+                && o.asset.is_none_or(|a| a == m.asset)
+        });
+        if let Some((vout, _)) = found {
+            used_vouts.insert(vout);
+            state.utxos.push(StateUtxo {
+                utxo_type: m.utxo_type.clone(),
+                utxo_id: m.output_id.clone(),
+                txid: txid.to_string(),
+                vout: vout as u32,
+                amount_sat: m.amount_sat,
+                asset: m.asset.to_string(),
+            });
+        }
+    }
+}
+
+
+/// Resolve a manifest asset label to an id on `network`.
+///
+/// The chain's own unit (`"lbtc"` / `"bitcoin"`) resolves to whatever that network calls
+/// it — Liquid's policy asset, or the synthetic constant standing in for BTC. Anything else
+/// has to be an asset id already.
+pub(crate) fn resolve_asset_label(
+    label: &str,
+    network: crate::chain::Network,
+) -> Result<lwk_wollet::elements::AssetId> {
+    if crate::manifest::names_policy_asset_str(label) {
+        return Ok(match network.family() {
+            crate::chain::ChainFamily::Bitcoin => crate::assembly::bitcoin_policy_asset(),
+            crate::chain::ChainFamily::Elements => network
+                .elements_network()
+                .ok_or_else(|| anyhow::anyhow!("{network} has no Elements mapping"))?
+                .policy_asset(),
+        });
+    }
+    lwk_wollet::elements::AssetId::from_str(label)
+        .with_context(|| format!("Cannot parse asset ID '{label}'"))
 }

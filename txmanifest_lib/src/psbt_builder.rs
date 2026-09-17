@@ -115,7 +115,10 @@ impl PsbtInput {
     }
 
     /// The output this input spends, real or reconstructed.
-    fn witness_utxo(&self) -> TxOut {
+    ///
+    /// Public because a covenant's Simplicity program is satisfied against *every* spent
+    /// output, not only its own — a taproot sighash commits to all of them.
+    pub fn witness_utxo(&self) -> TxOut {
         match self {
             PsbtInput::Wallet { witness_utxo, .. } => witness_utxo.clone(),
             PsbtInput::Covenant { script_pubkey, amount, .. } => TxOut {

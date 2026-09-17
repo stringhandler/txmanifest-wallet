@@ -29,6 +29,32 @@ docker exec simplicity-regtest bitcoin-cli -regtest -rpcuser=tx -rpcpassword=man
                   "TAPROOT", "TEMPLATEHASH", "WITNESS" ]
 ```
 
+## Helpers
+
+Two scripts, sharing one definition of the container and the burn address so they cannot
+disagree about either:
+
+| | |
+|---|---|
+| `./contrib/regtest/faucet.sh --wallet <file> [--utxos N]` | fund a wallet with spendable coins |
+| `./contrib/regtest/mine.sh [N] [--txid <id>]` | confirm transactions, advance the chain |
+
+Both take `--config` where a wallet's network has to be resolved, and honour
+`FAUCET_CONTAINER` / `FAUCET_RPCUSER` / `FAUCET_RPCPASS`.
+
+`mine.sh` mines to an unspendable address by default, so advancing the chain never quietly
+adds coins to a wallet under test — `faucet.sh` is the one that gives you money. Passing
+`--txid` reports that transaction afterwards, and distinguishes "not yet mined" from "never
+reached the mempool", which look identical until something tells you which:
+
+```
+$ ./contrib/regtest/mine.sh --txid 6655a5a2…
+✓ mined 1 block(s) — height 1344 → 1345
+✓ 6655a5a22a174239… confirmed (2 confirmation(s))
+  out[0] 0.0015 BTC -> bcrt1p5z45vylh6vue39806mze8wl7z360ynn0uhxd8cnr5p4swe6n5gts4pf74z
+  out[1] 0.38912192 BTC -> bcrt1p5chl5z5t268jja3p6rpknkxsdskxqv7fwxc6d0umhmkgzwyl0qqq0ssl0u
+```
+
 ## Point the wallet at it
 
 ```json
@@ -62,14 +88,17 @@ tx-manifest-wallet create-wallet --out "$TX_MANIFEST_DATA_DIR/wallet.json"
 tx-manifest-wallet info --wallet "$TX_MANIFEST_DATA_DIR/wallet.json"   # copy the receive address
 ```
 
-Fund it by mining. A block reward needs 100 confirmations before it can be spent, so mine
-**201** rather than 101 if you want to spend immediately — the wallet skips immature
-outputs and says so, but it can only spend what has matured:
+Fund it:
 
 ```sh
-docker exec simplicity-regtest bitcoin-cli -regtest -rpcuser=tx -rpcpassword=manifest \
-  generatetoaddress 201 <receive-address>
+./contrib/regtest/faucet.sh --config "$TX_MANIFEST_DATA_DIR/config.json" \
+                            --wallet "$TX_MANIFEST_DATA_DIR/wallet.json" --utxos 3
 ```
+
+That mines the coins you asked for to the wallet, then mines 100 more to an unspendable
+address to mature them — so you get exactly three spendable UTXOs and nothing else. Mining
+201 blocks to your own address works too, but leaves a hundred immature outputs the wallet
+has to skip and every later scan has to walk.
 
 Then run an action. `--export-pset` writes the signed transaction instead of broadcasting,
 which is the easy way to inspect it first:

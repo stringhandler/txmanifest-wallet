@@ -286,14 +286,21 @@ pub fn sign_schnorr_for_pubkey(
 
 /// Find the derivation path in this wallet that produces `pubkey_hex` (64-char x-only hex).
 fn find_path_for_pubkey(wallet: &WalletFile, pubkey_hex: &str) -> Result<&'static str> {
+    // Compared without a `0x` prefix and without case. A manifest writes compile params as
+    // `0x…` because that is SimplicityHL's literal syntax, while a derived key renders
+    // bare — so the same key, written the way each side naturally writes it, compared
+    // unequal and the signer reported it as belonging to another wallet.
+    let normalize = |s: &str| s.trim().trim_start_matches("0x").to_ascii_lowercase();
+    let wanted = normalize(pubkey_hex);
+
     let wallet_path = if wallet.is_mainnet() { WALLET_KEY_PATH_MAINNET } else { WALLET_KEY_PATH_TESTNET };
     let wallet_pub = derive_schnorr_pubkey(wallet, wallet_path)?;
-    if wallet_pub == pubkey_hex {
+    if normalize(&wallet_pub) == wanted {
         return Ok(wallet_path);
     }
     let oracle_path = if wallet.is_mainnet() { ORACLE_PATH_MAINNET } else { ORACLE_PATH_TESTNET };
     let oracle_pub = derive_schnorr_pubkey(wallet, oracle_path)?;
-    if oracle_pub == pubkey_hex {
+    if normalize(&oracle_pub) == wanted {
         return Ok(oracle_path);
     }
     anyhow::bail!(

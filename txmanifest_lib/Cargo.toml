@@ -30,7 +30,12 @@ base64 = "0.22"
 # simplicityhl = { git = "https://github.com/stringhandler/SimplicityHL", branch = "feat/compile-function-only", features = [
 #     "serde",
 # ] }
-simplicityhl = { git = "https://github.com/BlockstreamResearch/SimplicityHL", features = [
+# delta1's Bitcoin-enabled fork: a superset of upstream that adds `BitcoinJetHinter`
+# and a real `BitcoinEnv`, without which a Bitcoin covenant cannot be compiled at all.
+# The Elements jet set, and therefore every Elements CMR and covenant address, must be
+# byte-identical to upstream's — `covenant::tests` and the recon examples pin live
+# addresses precisely so that a pin change cannot move them unnoticed.
+simplicityhl = { git = "https://github.com/delta1/SimplicityHL", branch = "bitcoin", features = [
     "serde",
 ] }
 schemars = "0.8"
