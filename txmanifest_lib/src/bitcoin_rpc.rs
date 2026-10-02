@@ -67,25 +67,54 @@ impl std::fmt::Debug for RpcClient {
 
 impl RpcClient {
     /// A client for `url`, optionally with HTTP basic auth credentials.
-    pub fn new(url: impl Into<String>, auth: Option<(String, String)>) -> Self {
-        Self {
-            url: url.into().trim_end_matches('/').to_string(),
-            auth,
-            agent: ureq::AgentBuilder::new().build(),
+    ///
+    /// Credentials go to a loopback address, or over `https`. Basic auth is a password in
+    /// the clear, and a config naming a remote `http://` URL would hand it to everything on
+    /// the path — Bitcoin Core does not speak TLS itself, so a remote node belongs behind an
+    /// SSH tunnel or a TLS proxy.
+    pub fn new(url: impl Into<String>, auth: Option<(String, String)>) -> Result<Self> {
+        let url = url.into().trim_end_matches('/').to_string();
+        if auth.is_some() {
+            let target = RpcTarget::parse(&url)?;
+            if !target.loopback && !target.https {
+                anyhow::bail!(
+                    "refusing to send RPC credentials in the clear to {}; use https, or reach \
+                     the node through an SSH tunnel to localhost",
+                    target.host
+                );
+            }
         }
+        Ok(Self { url, auth, agent: ureq::AgentBuilder::new().build() })
     }
 
     /// A client reading credentials from a node's `.cookie` file.
     ///
     /// The cookie is `__cookie__:<random>`, rewritten on every start, which is what makes
     /// it the right thing to read rather than cache.
+    ///
+    /// Two checks, because this reads a file a config names and sends what it finds to a URL
+    /// the same config names — which, unchecked, sends *any* file anywhere. A config saying
+    /// `"bitcoin_rpc_cookie": "wallet.json"` and `"bitcoin_rpc_url": "http://attacker"` would
+    /// have shipped the mnemonic out as a Basic auth header on the first call.
+    ///
+    /// - The file must be a cookie: `__cookie__:<hex>`, and small. Anything else is refused
+    ///   without its contents appearing in the error.
+    /// - The URL must be loopback. A cookie authenticates a node on this machine — that is
+    ///   where the file comes from — so there is no remote host it belongs with, and pointing
+    ///   one at a real node's `.cookie` would otherwise hand that node to whoever the URL
+    ///   names.
     pub fn with_cookie(url: impl Into<String>, cookie_path: &std::path::Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(cookie_path)
-            .with_context(|| format!("cannot read RPC cookie: {}", cookie_path.display()))?;
-        let (user, pass) = raw.trim().split_once(':').ok_or_else(|| {
-            anyhow::anyhow!("malformed RPC cookie in {}", cookie_path.display())
-        })?;
-        Ok(Self::new(url, Some((user.to_string(), pass.to_string()))))
+        let url = url.into();
+        let target = RpcTarget::parse(&url)?;
+        if !target.loopback {
+            anyhow::bail!(
+                "bitcoin_rpc_cookie authenticates a node on this machine, but bitcoin_rpc_url \
+                 points at {}; use bitcoin_rpc_auth for a remote node",
+                target.host
+            );
+        }
+        let (user, pass) = read_cookie(cookie_path)?;
+        Self::new(url, Some((user, pass)))
     }
 
     /// Issue one JSON-RPC call and return its `result`.
@@ -364,6 +393,66 @@ fn parse_rpc_error(body: &str) -> Option<String> {
     Some(format!("node error {code}: {msg}"))
 }
 
+/// What a credential check needs to know about an RPC URL.
+struct RpcTarget {
+    host: String,
+    loopback: bool,
+    https: bool,
+}
+
+impl RpcTarget {
+    fn parse(raw: &str) -> Result<Self> {
+        let url = url::Url::parse(raw).with_context(|| format!("bad bitcoin_rpc_url {raw:?}"))?;
+        let https = match url.scheme() {
+            "https" => true,
+            "http" => false,
+            other => anyhow::bail!("bitcoin_rpc_url must be http or https, not {other}"),
+        };
+        let host = url.host().ok_or_else(|| anyhow::anyhow!("bitcoin_rpc_url has no host"))?;
+        // By address, plus the one name that is loopback by definition (RFC 6761). Any other
+        // name could resolve anywhere, so it does not count, however local it looks.
+        let loopback = match &host {
+            url::Host::Ipv4(ip) => ip.is_loopback(),
+            url::Host::Ipv6(ip) => ip.is_loopback(),
+            url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+        };
+        Ok(Self { host: host.to_string(), loopback, https })
+    }
+}
+
+/// The largest file accepted as a cookie. Core's is `__cookie__:` and 64 hex digits.
+const MAX_COOKIE_BYTES: u64 = 256;
+
+/// Read and validate a node's `.cookie` file, returning its `(user, password)`.
+///
+/// Errors never include the file's contents: when the file is not a cookie, what is in it
+/// is exactly what must not end up in a terminal or a log.
+fn read_cookie(path: &std::path::Path) -> Result<(String, String)> {
+    let not_a_cookie = || {
+        anyhow::anyhow!(
+            "{} is not a Bitcoin Core RPC cookie (expected `__cookie__:<hex>`)",
+            path.display()
+        )
+    };
+    let len = std::fs::metadata(path)
+        .with_context(|| format!("cannot read RPC cookie: {}", path.display()))?
+        .len();
+    if len > MAX_COOKIE_BYTES {
+        return Err(not_a_cookie());
+    }
+    let raw = std::fs::read_to_string(path).map_err(|_| not_a_cookie())?;
+    parse_cookie(&raw).ok_or_else(not_a_cookie)
+}
+
+fn parse_cookie(raw: &str) -> Option<(String, String)> {
+    let (user, pass) = raw.trim().split_once(':')?;
+    let well_formed = user == "__cookie__"
+        && !pass.is_empty()
+        && pass.len() <= 128
+        && pass.bytes().all(|b| b.is_ascii_hexdigit());
+    well_formed.then(|| (user.to_string(), pass.to_string()))
+}
+
 /// The output fields this crate reads from `gettxout`.
 #[derive(Debug, Deserialize)]
 struct WireTxOut {
@@ -543,9 +632,96 @@ mod tests {
         let c = RpcClient::new(
             "http://localhost:18443",
             Some(("__cookie__".into(), "supersecret".into())),
-        );
+        )
+        .unwrap();
         let rendered = format!("{c:?}");
         assert!(!rendered.contains("supersecret"), "{rendered}");
         assert!(rendered.contains("__cookie__"), "{rendered}");
+    }
+
+    fn creds() -> Option<(String, String)> {
+        Some(("tx".into(), "manifest".into()))
+    }
+
+    /// Basic auth is a password in the clear: loopback, or https, and nothing else.
+    #[test]
+    fn credentials_go_only_to_loopback_or_over_https() {
+        for ok in [
+            "http://127.0.0.1:18443",
+            "http://localhost:18443",
+            "http://LOCALHOST:18443",
+            "http://[::1]:18443",
+            "http://127.8.9.10:18443",
+            "https://node.example.com",
+            "https://203.0.113.5:8332",
+        ] {
+            assert!(RpcClient::new(ok, creds()).is_ok(), "{ok}");
+        }
+        for refused in [
+            "http://node.example.com:8332",
+            "http://192.168.1.20:8332",
+            "http://203.0.113.5:8332",
+            // Looks local, resolves wherever DNS says.
+            "http://localhost.example.com:8332",
+        ] {
+            let err = RpcClient::new(refused, creds()).unwrap_err().to_string();
+            assert!(err.contains("in the clear"), "{refused}: {err}");
+        }
+        // No credentials, nothing to leak: any host is fine.
+        assert!(RpcClient::new("http://node.example.com:8332", None).is_ok());
+        assert!(RpcClient::new("ftp://localhost", creds()).is_err());
+    }
+
+    #[test]
+    fn only_a_core_cookie_parses_as_one() {
+        let hex = "a".repeat(64);
+        assert_eq!(
+            parse_cookie(&format!("__cookie__:{hex}\n")),
+            Some(("__cookie__".to_string(), hex))
+        );
+        assert_eq!(parse_cookie("__cookie__:"), None, "empty password");
+        assert_eq!(parse_cookie("tx:manifest"), None, "not a cookie user");
+        assert_eq!(parse_cookie("__cookie__:not-hex!"), None);
+        assert_eq!(parse_cookie(&format!("__cookie__:{}", "a".repeat(129))), None);
+        // The attack this guards against: a wallet file read as a cookie.
+        let wallet = r#"{"network":"bitcoin-signet","mnemonic":"abandon abandon about"}"#;
+        assert_eq!(parse_cookie(wallet), None);
+    }
+
+    /// A file that is not a cookie is refused without its contents reaching the error.
+    #[test]
+    fn a_wallet_file_is_not_accepted_as_a_cookie() {
+        let dir = std::env::temp_dir().join(format!("txm-cookie-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wallet.json");
+        std::fs::write(&path, r#"{"network":"bitcoin-signet","mnemonic":"zoo zoo wrong"}"#)
+            .unwrap();
+
+        let err = format!("{:#}", RpcClient::with_cookie("http://127.0.0.1:18443", &path).unwrap_err());
+        assert!(err.contains("not a Bitcoin Core RPC cookie"), "{err}");
+        assert!(!err.contains("zoo"), "the file's contents leaked into the error: {err}");
+
+        let big = dir.join("big");
+        std::fs::write(&big, format!("__cookie__:{}", "a".repeat(400))).unwrap();
+        assert!(RpcClient::with_cookie("http://127.0.0.1:18443", &big).is_err());
+
+        let real = dir.join(".cookie");
+        std::fs::write(&real, format!("__cookie__:{}", "b".repeat(64))).unwrap();
+        assert!(RpcClient::with_cookie("http://127.0.0.1:18443", &real).is_ok());
+    }
+
+    /// A cookie belongs to a node on this machine, so it is never sent anywhere else — not
+    /// even over https, which would protect it in transit to the wrong recipient.
+    #[test]
+    fn a_cookie_is_never_sent_off_this_machine() {
+        let dir = std::env::temp_dir().join(format!("txm-cookie-remote-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join(".cookie");
+        std::fs::write(&real, format!("__cookie__:{}", "c".repeat(64))).unwrap();
+
+        for remote in ["https://node.example.com", "http://192.168.1.20:8332"] {
+            let err = RpcClient::with_cookie(remote, &real).unwrap_err().to_string();
+            assert!(err.contains("this machine"), "{remote}: {err}");
+        }
     }
 }

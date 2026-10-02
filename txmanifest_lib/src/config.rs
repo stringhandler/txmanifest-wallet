@@ -257,11 +257,11 @@ impl Config {
                         let (u, p) = auth.split_once(':').ok_or_else(|| {
                             anyhow::anyhow!("bitcoin_rpc_auth must be \"user:password\"")
                         })?;
-                        RpcClient::new(url, Some((u.to_string(), p.to_string())))
+                        RpcClient::new(url, Some((u.to_string(), p.to_string())))?
                     }
                     // A node with no auth at all is unusual but legal, and refusing it here
                     // would block exactly the throwaway regtest this backend exists for.
-                    (None, None) => RpcClient::new(url, None),
+                    (None, None) => RpcClient::new(url, None)?,
                 };
                 let _ = network;
                 Ok(BitcoinChain::Rpc(client))
