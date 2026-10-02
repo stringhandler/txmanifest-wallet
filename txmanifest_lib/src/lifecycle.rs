@@ -1888,7 +1888,7 @@ pub fn run(
                     }
                 }
                 if !specs_ok {
-                    return Ok(());
+                    anyhow::bail!("a covenant input could not be resolved; nothing was built");
                 }
 
                 let params_snap = compile_params_map.clone();
@@ -1913,77 +1913,42 @@ pub fn run(
                         .as_deref(),
                 ) {
                     Ok(Some(broadcast)) => {
-                        // Record the covenant UTXOs this action created, so the next one
-                        // can find them. Without it the operator has to name the outpoint
-                        // and its amount by hand — which is the state the Bitcoin path was
-                        // in until now, because it returned before ever reaching the
-                        // Elements post-broadcast step that does this.
-                        let mut new_state = contract_state
-                            .take()
-                            .unwrap_or_else(|| ContractState::new(action_name));
-                        new_state.last_action = action_name.to_string();
                         let recorded_instance = if action.create_instance.is_some() {
                             Some(effective_instance_out.as_path())
                         } else {
                             instance_in_path
                         };
-                        new_state.instance = recorded_instance.map(|p| p.display().to_string());
-                        for inp in action.inputs.as_deref().unwrap_or_default() {
-                            if inp.utxo_type_name().is_some() {
-                                if let Some(r) = ctx.get_input(&inp.id) {
-                                    new_state.remove_spent(&r.txid, r.vout);
-                                }
-                            }
-                        }
-                        record_covenant_outputs(
-                            &mut new_state,
-                            &broadcast.outputs,
-                            &covenant_output_meta,
+                        record_broadcast(
+                            &BroadcastRecord {
+                                action_name,
+                                action,
+                                instance: recorded_instance,
+                                covenant_outputs: &covenant_output_meta,
+                                state_out: &effective_state_out,
+                                history_seed: &history_seed,
+                            },
                             &broadcast.txid,
+                            &broadcast.outputs,
+                            &mut ctx,
+                            &mut contract_state,
                         );
-                        match new_state.write(&effective_state_out) {
-                            Ok(()) => println!(
-                                "  {} State written:    {}",
-                                style("✓").green(),
-                                effective_state_out.display()
-                            ),
-                            Err(e) => println!(
-                                "  {} Cannot write state file: {e}",
-                                style("[warn]").yellow()
-                            ),
-                        }
-                        let hist_path = history_path(&history_seed);
-                        let entry = HistoryEntry {
-                            action: action_name.to_string(),
-                            txid: broadcast.txid.clone(),
-                            utxos: new_state.utxos.clone(),
-                        };
-                        if let Err(e) =
-                            StateHistory::load(&hist_path).and_then(|mut h| h.append(entry, &hist_path))
-                        {
-                            println!("  {} Cannot append history: {e}", style("[warn]").yellow());
-                        }
                     }
                     // Exported, or declined at the prompt: nothing exists on chain yet, so
                     // there is no state to record.
                     Ok(None) => {}
-                    Err(e) => {
-                        println!("  {} Bitcoin build failed:", style("[error]").red());
-                        for (i, cause) in e.chain().enumerate() {
-                            println!("    {i}: {cause}");
-                        }
-                    }
+                    // A build, signing or broadcast failure is a failed run, and says so in
+                    // the exit status. It used to print and return `Ok`, so a rejected
+                    // broadcast looked, to anything checking, like a payment made.
+                    Err(e) => return Err(e.context("Bitcoin build failed")),
                 }
                 return Ok(());
             }
 
             match pset_builder::build_pset(wollet, net, &req) {
-                Err(e) => {
-                    println!("  {} PSET build failed:", style("[error]").red());
-                    for (i, cause) in e.chain().enumerate() {
-                        println!("    {i}: {cause}");
-                    }
-                }
+                // With a wallet loaded, a transaction that cannot be built is a failed run.
+                // Carrying on reached the broadcast prompt with nothing to broadcast, and
+                // exited 0.
+                Err(e) => return Err(e.context("PSET build failed")),
                 Ok(result) => {
                     for iso in &result.issuances {
                         // Printed in full, not elided. These ids exist nowhere else yet:
@@ -2693,36 +2658,9 @@ pub fn run(
                                 );
                                 println!("  Run `sync` after confirmation to update wallet state.");
 
-                                // --- Method-level on_post_broadcast hook ---
-                                if let Some(hook) = &action.on_post_broadcast {
-                                    ctx.set_param("broadcast_txid", &txid);
-                                    run_hook_block(hook, &mut ctx, "[on_post_broadcast]", None);
-                                }
-
-                                // --- Update and write state file ---
-                                let mut new_state = contract_state.take()
-                                    .unwrap_or_else(|| ContractState::new(action_name));
-                                new_state.last_action = action_name.to_string();
-                                // Record which instance file this contract belongs to: the
-                                // just-written output for constructors, else the loaded input.
-                                let recorded_instance = if action.create_instance.is_some() {
-                                    Some(effective_instance_out.as_path())
-                                } else {
-                                    instance_in_path
-                                };
-                                new_state.instance =
-                                    recorded_instance.map(|p| p.display().to_string());
-                                // Remove spent covenant inputs.
-                                for inp in action.inputs.as_deref().unwrap_or_default() {
-                                    if inp.utxo_type_name().is_some() {
-                                        if let Some(r) = ctx.get_input(&inp.id) {
-                                            new_state.remove_spent(&r.txid, r.vout);
-                                        }
-                                    }
-                                }
                                 // Add new covenant outputs by matching them against the
-                                // broadcast transaction. Shared with the Bitcoin path — see
-                                // `record_covenant_outputs`.
+                                // broadcast transaction; confidential values and assets are
+                                // unknown here and match on script alone.
                                 let descriptors: Vec<OutputDescriptor> = tx
                                     .output
                                     .iter()
@@ -2738,44 +2676,31 @@ pub fn run(
                                         },
                                     })
                                     .collect();
-                                record_covenant_outputs(
-                                    &mut new_state, &descriptors, &covenant_output_meta, &txid,
+                                let recorded_instance = if action.create_instance.is_some() {
+                                    Some(effective_instance_out.as_path())
+                                } else {
+                                    instance_in_path
+                                };
+                                record_broadcast(
+                                    &BroadcastRecord {
+                                        action_name,
+                                        action,
+                                        instance: recorded_instance,
+                                        covenant_outputs: &covenant_output_meta,
+                                        state_out: &effective_state_out,
+                                        history_seed: &history_seed,
+                                    },
+                                    &txid,
+                                    &descriptors,
+                                    &mut ctx,
+                                    &mut contract_state,
                                 );
-                                match new_state.write(&effective_state_out) {
-                                    Ok(()) => {
-                                        println!(
-                                            "  {} State written:    {}",
-                                            style("✓").green(),
-                                            effective_state_out.display()
-                                        );
-                                        let hist_path = history_path(&history_seed);
-                                        let entry = HistoryEntry {
-                                            action: action_name.to_string(),
-                                            txid: txid.clone(),
-                                            utxos: new_state.utxos.clone(),
-                                        };
-                                        match StateHistory::load(&hist_path)
-                                            .and_then(|mut h| h.append(entry, &hist_path))
-                                        {
-                                            Ok(()) => println!(
-                                                "  {} History appended: {}",
-                                                style("✓").green(),
-                                                hist_path.display()
-                                            ),
-                                            Err(e) => println!(
-                                                "  {} Could not write history file: {e}",
-                                                style("[warn]").yellow()
-                                            ),
-                                        }
-                                    }
-                                    Err(e) => println!(
-                                        "  {} Could not write state file: {e}",
-                                        style("[warn]").yellow()
-                                    ),
-                                }
                         }
+                        // Nothing was sent, so the run failed. This printed and carried on to
+                        // exit 0, which a script cannot tell from a payment made.
                         Err(msg) => {
                             println!("  {} Broadcast failed: {msg}", style("[error]").red());
+                            anyhow::bail!("broadcast failed: {msg}");
                         }
                     }
                 }
@@ -4058,6 +3983,89 @@ mod tests {
         assert_eq!(confidential.script_pubkey(), explicit.script_pubkey());
     }
 
+    fn broadcast_fixture(dir_name: &str) -> (Manifest, std::path::PathBuf) {
+        let manifest = Manifest::from_json_str(
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
+                 "actions": { "A": {
+                   "on_post_broadcast": { "set": { "instance.RAN": "1 + 1" } }
+                 } } }"#,
+        )
+        .expect("manifest should parse");
+        let dir = std::env::temp_dir().join(format!("txm-{dir_name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        (manifest, dir)
+    }
+
+    fn vault_meta() -> CovenantOutputMeta {
+        CovenantOutputMeta {
+            utxo_type: "vault".into(),
+            output_id: "locked".into(),
+            script_pubkey: lwk_wollet::elements::Script::from(vec![0x51, 0x20, 7, 7]),
+            amount_sat: 1_000,
+            asset: crate::assembly::bitcoin_policy_asset(),
+        }
+    }
+
+    /// One function now records a broadcast for both chains: the hook runs (the Bitcoin
+    /// copy never ran it), the covenant output is recorded, and history is appended.
+    #[test]
+    fn a_broadcast_runs_the_hook_and_records_state_and_history() {
+        let (manifest, dir) = broadcast_fixture("record");
+        let state_out = dir.join("t.state.1.json");
+        let meta = [vault_meta()];
+        let rec = BroadcastRecord {
+            action_name: "A",
+            action: &manifest.actions["A"],
+            instance: None,
+            covenant_outputs: &meta,
+            state_out: &state_out,
+            history_seed: &state_out,
+        };
+        let outputs = [OutputDescriptor {
+            script_pubkey: vec![0x51, 0x20, 7, 7],
+            amount_sat: Some(1_000),
+            asset: None,
+        }];
+        let mut ctx = ExecutionContext::new();
+        let mut state = None;
+        let txid = "ab".repeat(32);
+
+        record_broadcast(&rec, &txid, &outputs, &mut ctx, &mut state);
+
+        assert_eq!(ctx.get_compile_param("RAN"), Some("2"), "hook ran");
+        assert_eq!(ctx.get_param("broadcast_txid"), Some(txid.as_str()));
+        let written = ContractState::load(&state_out).expect("state written");
+        assert_eq!(written.utxos_for_type("vault").len(), 1);
+        assert_eq!(written.utxos[0].txid, txid);
+        let history = StateHistory::load(&history_path(&state_out)).unwrap();
+        assert_eq!(history.entries.len(), 1);
+    }
+
+    /// History follows the state file: if the state could not be written, no history entry
+    /// claims it was. The Bitcoin copy appended regardless.
+    #[test]
+    fn no_history_is_appended_when_state_cannot_be_written() {
+        let (manifest, dir) = broadcast_fixture("nowrite");
+        // A state path whose parent is a file, so the write must fail.
+        let blocker = dir.join("not-a-dir");
+        std::fs::write(&blocker, "").unwrap();
+        let state_out = blocker.join("t.state.1.json");
+        let history_seed = dir.join("t.state.1.json");
+        let rec = BroadcastRecord {
+            action_name: "A",
+            action: &manifest.actions["A"],
+            instance: None,
+            covenant_outputs: &[],
+            state_out: &state_out,
+            history_seed: &history_seed,
+        };
+        record_broadcast(&rec, &"cd".repeat(32), &[], &mut ExecutionContext::new(), &mut None);
+
+        assert!(!state_out.exists());
+        assert!(StateHistory::load(&history_path(&history_seed)).unwrap().entries.is_empty());
+    }
+
     /// The end this boundary exists for: one closed `utxo_type`, two sites, two states —
     /// and the state each site commits to comes from the site, not from whatever the
     /// running action happens to have in scope.
@@ -5182,7 +5190,7 @@ fn check_target_capabilities(manifest: &Manifest, bound: &crate::target::Target)
     }
     // Say how to proceed, but only where proceeding is a configuration question rather
     // than a fact about the chain.
-    if missing.iter().any(|c| *c == crate::chain::Capability::SIMPLICITY) {
+    if missing.contains(&crate::chain::Capability::SIMPLICITY) {
         msg.push_str(
             "\n\nIf this node does run Simplicity, set `simplicity_activated: true` in the \
              wallet config.",
@@ -5198,14 +5206,6 @@ fn check_target_capabilities(manifest: &Manifest, bound: &crate::target::Target)
 }
 
 
-/// Build, sign and broadcast a Bitcoin transaction from the assembled request.
-///
-/// The Elements path spreads these across several interactive steps because a PSET passes
-/// through a signer, a covenant dry-run and a finalizer, each of which can fail in a way
-/// worth reporting on its own. None of that applies yet on Bitcoin: covenant execution
-/// needs the upstream jet FFI, so the only transactions reachable here are plain payments,
-/// and splitting three mechanical operations across three steps would only invent places
-/// to stop.
 /// Everything needed to satisfy one covenant input, resolved from the manifest.
 pub(crate) struct CovenantSpendSpec {
     pub simf_path: std::path::PathBuf,
@@ -5418,6 +5418,70 @@ pub(crate) struct BitcoinBroadcast {
     pub outputs: Vec<OutputDescriptor>,
 }
 
+
+/// What a run records once its transaction is on the network.
+pub(crate) struct BroadcastRecord<'a> {
+    pub action_name: &'a str,
+    pub action: &'a crate::manifest::Action,
+    /// The instance file this contract belongs to: the one just written for a constructor,
+    /// else the one loaded.
+    pub instance: Option<&'a Path>,
+    pub covenant_outputs: &'a [CovenantOutputMeta],
+    pub state_out: &'a Path,
+    pub history_seed: &'a Path,
+}
+
+/// Everything after a transaction is on the network, the same on both chains: the action's
+/// `on_post_broadcast` hook, then the state file — spent covenant inputs out, the covenant
+/// outputs this action created in — then its history.
+///
+/// One function because it was two copies, and they had already drifted: the Bitcoin one
+/// never ran the hook, and appended history even when the state file could not be written.
+///
+/// A failure to write state is reported, not returned. The transaction is already out, and
+/// an error here would read as "nothing happened" when the opposite is true.
+pub(crate) fn record_broadcast(
+    rec: &BroadcastRecord,
+    txid: &str,
+    outputs: &[OutputDescriptor],
+    ctx: &mut ExecutionContext,
+    contract_state: &mut Option<ContractState>,
+) {
+    if let Some(hook) = &rec.action.on_post_broadcast {
+        ctx.set_param("broadcast_txid", txid);
+        run_hook_block(hook, ctx, "[on_post_broadcast]", None);
+    }
+
+    let mut new_state =
+        contract_state.take().unwrap_or_else(|| ContractState::new(rec.action_name));
+    new_state.last_action = rec.action_name.to_string();
+    new_state.instance = rec.instance.map(|p| p.display().to_string());
+    for inp in rec.action.inputs.as_deref().unwrap_or_default() {
+        if inp.utxo_type_name().is_some() {
+            if let Some(r) = ctx.get_input(&inp.id) {
+                new_state.remove_spent(&r.txid, r.vout);
+            }
+        }
+    }
+    record_covenant_outputs(&mut new_state, outputs, rec.covenant_outputs, txid);
+
+    if let Err(e) = new_state.write(rec.state_out) {
+        println!("  {} Could not write state file: {e}", style("[warn]").yellow());
+        return;
+    }
+    println!("  {} State written:    {}", style("✓").green(), rec.state_out.display());
+
+    let hist_path = history_path(rec.history_seed);
+    let entry = HistoryEntry {
+        action: rec.action_name.to_string(),
+        txid: txid.to_string(),
+        utxos: new_state.utxos.clone(),
+    };
+    match StateHistory::load(&hist_path).and_then(|mut h| h.append(entry, &hist_path)) {
+        Ok(()) => println!("  {} History appended: {}", style("✓").green(), hist_path.display()),
+        Err(e) => println!("  {} Could not write history file: {e}", style("[warn]").yellow()),
+    }
+}
 
 /// A covenant output this action creates, tracked so the state file can name it once the
 /// transaction is broadcast and its vouts are known.
