@@ -2065,6 +2065,11 @@ pub fn run(
                     &action_params_snap,
                     wallet_snap.as_ref(),
                     &compile_opts,
+                    action
+                        .intent
+                        .as_deref()
+                        .map(|s| crate::preview::interpolate(s, &ctx))
+                        .as_deref(),
                 ) {
                     Ok(Some(broadcast)) => {
                         // Record the covenant UTXOs this action created, so the next one
@@ -2118,8 +2123,8 @@ pub fn run(
                             println!("  {} Cannot append history: {e}", style("[warn]").yellow());
                         }
                     }
-                    // Exported rather than broadcast: nothing exists on chain yet, so there
-                    // is no state to record.
+                    // Exported, or declined at the prompt: nothing exists on chain yet, so
+                    // there is no state to record.
                     Ok(None) => {}
                     Err(e) => {
                         println!("  {} Bitcoin build failed:", style("[error]").red());
@@ -5390,6 +5395,10 @@ pub(crate) struct CovenantSpendSpec {
     pub witness_spec: Option<serde_json::Value>,
 }
 
+/// Build, sign and finalize a Bitcoin transaction, show what it does, and broadcast it
+/// once the user confirms.
+///
+/// `Ok(None)` when nothing was sent — exported to `export_path`, or declined at the prompt.
 #[allow(clippy::too_many_arguments)]
 fn run_bitcoin_build(
     req: &pset_builder::BuildPsetRequest,
@@ -5400,6 +5409,7 @@ fn run_bitcoin_build(
     action_params: &std::collections::HashMap<String, String>,
     wallet: Option<&WalletFile>,
     compile_opts: &covenant::CompileOpts,
+    intent: Option<&str>,
 ) -> Result<Option<BitcoinBroadcast>> {
     use crate::psbt_builder;
 
@@ -5542,6 +5552,20 @@ fn run_bitcoin_build(
         })
         .collect();
 
+    // The last look before the money moves, read off the finalized transaction rather than
+    // the manifest: every output with its destination, which of them come back to this
+    // wallet, and the real fee rate. Shown for an export too — it describes exactly what
+    // whoever relays the file will send.
+    crate::bitcoin_review::TxReview::new(
+        &tx,
+        &psbt_req.inputs,
+        &run.wallet,
+        run.network,
+        run.change_index,
+        run.receive_start,
+    )?
+    .render(intent);
+
     if let Some(path) = export_path {
         let hex = lwk_wollet::elements::bitcoin::consensus::encode::serialize_hex(&tx);
         let doc = serde_json::json!({ "txid": tx.compute_txid().to_string(), "tx_hex": hex });
@@ -5551,6 +5575,15 @@ fn run_bitcoin_build(
         // Reported as broadcast-less: the covenant exists only once the transaction is
         // relayed, and writing it into the state file now would name a UTXO that does not
         // exist and may never.
+        return Ok(None);
+    }
+
+    // The same question the Elements path asks, with the same default. This used to go
+    // straight to `broadcast`, on every network including mainnet: the Bitcoin path leaves
+    // `run` before the Elements preview and prompt, and nothing here replaced them.
+    println!();
+    if !crate::prompt::confirm_broadcast()? {
+        println!("  {} Not broadcast.", style("·").dim());
         return Ok(None);
     }
 

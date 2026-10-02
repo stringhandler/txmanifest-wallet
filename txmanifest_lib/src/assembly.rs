@@ -110,7 +110,7 @@ pub fn parse_destination(address: &str, network: Network) -> Result<ParsedDestin
 }
 
 /// The `rust-bitcoin` network for one of our Bitcoin networks.
-fn bitcoin_network(network: Network) -> Result<lwk_wollet::elements::bitcoin::Network> {
+pub(crate) fn bitcoin_network(network: Network) -> Result<lwk_wollet::elements::bitcoin::Network> {
     use lwk_wollet::elements::bitcoin as btc;
     Ok(match network {
         Network::Bitcoin => btc::Network::Bitcoin,
