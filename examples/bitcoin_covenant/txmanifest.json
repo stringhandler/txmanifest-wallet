@@ -51,14 +51,12 @@
       "intent": "Unlock the covenant and send to {params.dest}",
       "$comment": "No change output: the amount formula accounts for the fee exactly, so any surplus would be an error rather than a silently invented output.",
       "params": {
-        "PUB_KEY": { "type": "pubkey", "description": "Key the covenant requires." },
-        "dest": { "type": "string", "description": "Where the unlocked coins go." }
+        "PUB_KEY": { "type": "pubkey", "description": "Key the covenant requires." }
       },
       "inputs": [
         {
           "id": "vault_in",
           "utxo_source": { "utxo_type": "p2pk_vault", "args": { "PUB_KEY": "params.PUB_KEY" } },
-          "asset": "lbtc",
           "$comment": "The witness the program reads. `type: Signature` means the engine computes sig_all_hash from the transaction it just built and signs it with the named key — so the value signed is by construction the one the program checks.",
           "witnesses": {
             "SIGNATURE": {
@@ -74,8 +72,7 @@
         {
           "id": "unlocked",
           "amount_sat": "vault_in.amount_sat - fee",
-          "asset": "lbtc",
-          "destination": "params.dest",
+          "destination": "wallet",
           "ui": { "label": "unlocked coins", "role": "payment" }
         }
       ]

@@ -1,6 +1,5 @@
 {
-  "PUB_KEY": "01c9ddb4afa94686e478099078ef54a2d6db788a20005578354d0b8f460597bd",
+  "PUB_KEY": "9b55fc3882d53c09168106b2699e4f4fcb24f67c5b6e089a376f74e1768eead1",
   "amount_sat": "1000000",
-  "dest": "bcrt1pfvvc7hp4hxtq25mhmpem7m2g2lv2lw30klmemkhryplysy97ntjstd05xu",
-  "fee_rate": "2"
+  "fee_rate": "0.1"
 }

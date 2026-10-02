@@ -362,6 +362,14 @@ fn cmd_config(key: Option<&str>, value: Option<&str>) -> Result<()> {
                     };
                     println!("  bitcoin_rpc_auth: {}", style(auth).yellow());
                     println!(
+                        "  checkpoint      : {}",
+                        style(cfg.bitcoin_checkpoint.as_ref().map_or_else(
+                            || "(none)".to_string(),
+                            |c| format!("{} @ {}", c.hash, c.height)
+                        ))
+                        .yellow()
+                    );
+                    println!(
                         "  simplicity      : {}",
                         style(match cfg.simplicity_activated {
                             Some(true) => "activated",
@@ -845,6 +853,63 @@ fn cmd_describe(manifest_path: &Path, action_name: Option<&str>) -> Result<()> {
     describe::describe(&manifest, action_name)
 }
 
+/// Bind this process to the wallet it operates on.
+///
+/// Three steps, in order: use the `config.json` beside the wallet when no `--config` was
+/// given; refuse a config or `--network` naming a different chain from the wallet's; then
+/// make the wallet's network the target for every later config load.
+///
+/// The refusal is what makes the other two safe. Without it, a wallet created on one chain
+/// and a config written for another combined silently — a Liquid address printed under a
+/// `bitcoin-signet` label, from a signet wallet beside the global Liquid config.
+fn bind_wallet(explicit_config: bool, wallet_path: &Path, network_flag: Option<&str>) -> Result<()> {
+    use tx_manifest_lib::chain::Network;
+
+    if !explicit_config {
+        if let Some(path) = config::config_beside(wallet_path) {
+            announce_config(&path);
+            config::set_config_path(path)?;
+        }
+    }
+
+    // A missing wallet is left to the command, which reports it in context — and a `run`
+    // that only previews has no need of one.
+    if !wallet_path.is_file() {
+        return Ok(());
+    }
+    let w = wallet::load_wallet(wallet_path)?;
+    // A name this build does not know gives nothing to bind to; `is_mainnet` already treats
+    // such a wallet as the dangerous case.
+    let Some(wallet_net) = w.network() else { return Ok(()) };
+
+    if let Some(config_net) = config::declared_network()? {
+        if config_net != wallet_net {
+            anyhow::bail!(
+                "{} is a {wallet_net} wallet, but the config at {} is for {config_net}; pass \
+                 --config with a {wallet_net} config, or put one beside the wallet",
+                wallet_path.display(),
+                config::config_path().display()
+            );
+        }
+    }
+    if let Some(flag) = network_flag {
+        let flag_net: Network = flag.parse().map_err(|e| anyhow::anyhow!("{e} (in --network)"))?;
+        if flag_net != wallet_net {
+            anyhow::bail!(
+                "--network {flag} does not match {}, which is a {wallet_net} wallet",
+                wallet_path.display()
+            );
+        }
+    }
+    config::set_wallet_network(wallet_net)
+}
+
+/// Say which config was picked up implicitly. On stderr, so `--json` output stays clean.
+fn announce_config(path: &Path) {
+    use console::style;
+    eprintln!("{} {}", style("using config").dim(), style(path.display()).dim());
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -858,6 +923,27 @@ fn main() -> Result<()> {
             );
         }
         config::set_config_path(path.clone())?;
+    }
+
+    // Likewise before anything reads the config: which file it is can depend on where the
+    // wallet lives, and what network it targets depends on the wallet.
+    let explicit_config = cli.config.is_some();
+    match &cli.command {
+        Commands::Run { wallet, network, .. } => {
+            bind_wallet(explicit_config, wallet, network.as_deref())?
+        }
+        Commands::Info { wallet }
+        | Commands::Sync { wallet, .. }
+        | Commands::Prepare { wallet, .. }
+        | Commands::GetBalance { wallet, .. }
+        | Commands::Split { wallet, .. } => bind_wallet(explicit_config, wallet, None)?,
+        Commands::CreateWallet { out, .. } if !explicit_config => {
+            if let Some(path) = config::config_in_dir_of(out) {
+                announce_config(&path);
+                config::set_config_path(path)?;
+            }
+        }
+        _ => {}
     }
 
     match cli.command {

@@ -26,7 +26,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use lwk_wollet::elements::bitcoin::{
-    consensus::encode::serialize_hex, Address, OutPoint, ScriptBuf, Transaction, Txid,
+    consensus::encode::serialize_hex, Address, OutPoint, ScriptBuf, Transaction, TxOut, Txid,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -170,6 +170,34 @@ impl RpcClient {
             anyhow::bail!("node accepted {returned}, but the sent transaction is {expected}");
         }
         Ok(returned)
+    }
+
+    /// An unspent output, or `None` when it does not exist or is already spent.
+    ///
+    /// `gettxout` rather than `getrawtransaction`: it needs no `-txindex`, and it reads the
+    /// UTXO set, so a spent outpoint comes back empty instead of looking spendable.
+    pub fn txout(&self, outpoint: OutPoint) -> Result<Option<TxOut>> {
+        let v = self.call("gettxout", json!([outpoint.txid.to_string(), outpoint.vout, true]))?;
+        if v.is_null() {
+            return Ok(None);
+        }
+        let value = v
+            .get("value")
+            .ok_or_else(|| anyhow::anyhow!("gettxout carries no value"))?;
+        // Decimal BTC, parsed as text for the reason `scan_scripts` gives.
+        let sats = btc_string_to_sats(&value.to_string())
+            .with_context(|| format!("cannot read amount {value}"))?;
+        let spk = v
+            .get("scriptPubKey")
+            .and_then(|s| s.get("hex"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("gettxout carries no scriptPubKey"))?;
+        Ok(Some(TxOut {
+            value: lwk_wollet::elements::bitcoin::Amount::from_sat(sats),
+            script_pubkey: ScriptBuf::from_bytes(
+                bytes_of_hex(spk).context("bad scriptPubKey hex")?,
+            ),
+        }))
     }
 
     /// Mine `blocks` blocks paying `address`. Regtest only.

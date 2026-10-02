@@ -4,12 +4,18 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::BackendKind;
+use crate::bitcoin_backend::Checkpoint;
 use crate::chain::{Activation, Capabilities, Capability, Network};
 use crate::wallet::default_data_dir;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
-    /// "testnet" or "mainnet"
+    /// The network to target when no wallet says otherwise — any name [`Network`] parses.
+    ///
+    /// A loaded wallet's own network takes precedence (see [`set_wallet_network`]), so this
+    /// matters mainly to `create-wallet`. May be omitted, which makes the file purely
+    /// backend settings for whichever wallet it sits beside; it then reads as `testnet`.
+    #[serde(default = "legacy_default_network")]
     pub default_network: String,
     /// Override Esplora URL. If None, a sensible default is chosen from `default_network`.
     pub default_esplora: Option<String>,
@@ -54,12 +60,23 @@ pub struct Config {
     /// `user:password` for nodes configured with `rpcauth` instead of a cookie.
     #[serde(default)]
     pub bitcoin_rpc_auth: Option<String>,
+    /// A block the Bitcoin chain must contain, checked each time a backend connects.
+    ///
+    /// The only setting that tells one signet from another: they share a genesis block,
+    /// a name and an address encoding. Without it a wrong URL is found out — if at all —
+    /// when the coins are not there.
+    #[serde(default)]
+    pub bitcoin_checkpoint: Option<Checkpoint>,
+}
+
+fn legacy_default_network() -> String {
+    "testnet".to_string()
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            default_network: "testnet".to_string(),
+            default_network: legacy_default_network(),
             default_esplora: None,
             default_backend: None,
             default_electrum: None,
@@ -69,6 +86,7 @@ impl Default for Config {
             bitcoin_rpc_url: None,
             bitcoin_rpc_cookie: None,
             bitcoin_rpc_auth: None,
+            bitcoin_checkpoint: None,
         }
     }
 }
@@ -177,15 +195,50 @@ impl Config {
 }
 
 impl Config {
-    /// Connect to whichever Bitcoin backend this config selects.
+    /// Connect to whichever Bitcoin backend this config selects, and confirm it is on the
+    /// chain the config means.
     pub fn bitcoin_chain(&self, network: Network) -> Result<crate::bitcoin_backend::BitcoinChain> {
-        use crate::bitcoin_backend::{BitcoinBackendKind, BitcoinChain, EsploraClient};
-        use crate::bitcoin_rpc::RpcClient;
+        use crate::bitcoin_backend::BitcoinBackendKind;
 
         let kind = self
             .bitcoin_backend
             .as_deref()
             .map_or(BitcoinBackendKind::Esplora, BitcoinBackendKind::parse);
+
+        // A signet with Simplicity is a specific signet, and the Esplora default is not it:
+        // it is the default signet, which has not activated the soft fork. So a config that
+        // opts in and leaves the URL to the default has forgotten the line naming its chain
+        // — and has likely forgotten a checkpoint too, which is why this is checked here
+        // rather than left to one.
+        if network == Network::BitcoinSignet
+            && kind == BitcoinBackendKind::Esplora
+            && self.default_esplora.is_none()
+            && self.activation(network)?.simplicity
+        {
+            anyhow::bail!(
+                "simplicity_activated is set for bitcoin-signet but default_esplora is not, so \
+                 this would use the default signet ({}), which has not activated Simplicity; \
+                 set default_esplora to the signet that has",
+                self.esplora_url()
+            );
+        }
+
+        let chain = self.connect_bitcoin(kind, network)?;
+        if let Some(checkpoint) = &self.bitcoin_checkpoint {
+            chain
+                .verify_checkpoint(checkpoint)
+                .with_context(|| format!("bitcoin_checkpoint does not hold on {chain:?}"))?;
+        }
+        Ok(chain)
+    }
+
+    fn connect_bitcoin(
+        &self,
+        kind: crate::bitcoin_backend::BitcoinBackendKind,
+        network: Network,
+    ) -> Result<crate::bitcoin_backend::BitcoinChain> {
+        use crate::bitcoin_backend::{BitcoinBackendKind, BitcoinChain, EsploraClient};
+        use crate::bitcoin_rpc::RpcClient;
 
         match kind {
             BitcoinBackendKind::Esplora => Ok(BitcoinChain::Esplora(EsploraClient::new(
@@ -254,16 +307,105 @@ pub fn config_path() -> PathBuf {
     default_data_dir().join("config.json")
 }
 
+/// The `config.json` beside a wallet file, if there is one.
+///
+/// Beside the *wallet*, not in the current directory. The objection to reading a config from
+/// wherever you happen to stand is that the chain then depends on your shell; a config
+/// that travels with one wallet file is bound to that wallet instead, and the wallet's
+/// network is checked against it regardless (see [`declared_network`]). Only offered for
+/// a wallet that exists, so a mistyped `--wallet` cannot pick up a stray config.
+pub fn config_beside(wallet_path: &std::path::Path) -> Option<PathBuf> {
+    if !wallet_path.is_file() {
+        return None;
+    }
+    config_in_dir_of(wallet_path)
+}
+
+/// The `config.json` in the directory a wallet file is, or is about to be, written to.
+///
+/// [`config_beside`] without the existence check, for `create-wallet`: writing a config
+/// into a fresh directory and then creating the wallet there is how a wallet gets made for
+/// the chain that config names.
+pub fn config_in_dir_of(wallet_path: &std::path::Path) -> Option<PathBuf> {
+    let dir = match wallet_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+    let candidate = dir.join("config.json");
+    (candidate.is_file() && candidate != wallet_path).then_some(candidate)
+}
+
+/// The network the config file names explicitly, if any.
+///
+/// Read from the raw file, because [`Config`] fills an absent `default_network` with a
+/// legacy default, and a config that never mentioned a network must not be reported as
+/// disagreeing with the wallet. Unlike [`load`], a file that is present but malformed is an
+/// error: this runs once at startup, and it is the one chance to say so before every later
+/// load quietly substitutes the defaults.
+pub fn declared_network() -> Result<Option<Network>> {
+    declared_network_at(&config_path())
+}
+
+fn declared_network_at(path: &std::path::Path) -> Result<Option<Network>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("Cannot read config: {}", path.display()))?;
+    serde_json::from_str::<Config>(&raw)
+        .with_context(|| format!("Cannot parse config: {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)?;
+    match value.get("default_network").and_then(serde_json::Value::as_str) {
+        None => Ok(None),
+        Some(name) => name
+            .parse()
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!("{e} (in default_network of {})", path.display())),
+    }
+}
+
+/// The network of the wallet this process is operating, set once at startup.
+///
+/// Process-global for the same reason [`CONFIG_PATH_OVERRIDE`] is: `load` has a dozen
+/// callers and no arguments. The wallet decides the chain because it is the one thing that
+/// cannot be wrong about it — its keys and addresses were made for that network — while a
+/// config is just settings, and may have been written for another wallet entirely.
+static WALLET_NETWORK: std::sync::OnceLock<Network> = std::sync::OnceLock::new();
+
+/// Make `network` the target of every later [`load`], whatever the file's `default_network`.
+///
+/// Callers check first that the config does not name a *different* network
+/// ([`declared_network`]): its URLs, checkpoint and activation were written for that one,
+/// and carrying them onto this network would be wrong in ways nothing downstream detects.
+pub fn set_wallet_network(network: Network) -> Result<()> {
+    match WALLET_NETWORK.set(network) {
+        Ok(()) => Ok(()),
+        Err(_) if WALLET_NETWORK.get() == Some(&network) => Ok(()),
+        Err(_) => anyhow::bail!(
+            "wallet network already set to {}",
+            WALLET_NETWORK.get().map_or_else(String::new, ToString::to_string)
+        ),
+    }
+}
+
 /// Load config from disk. Returns `Config::default()` if the file doesn't exist yet.
+///
+/// When a wallet has been bound with [`set_wallet_network`], its network replaces
+/// `default_network`.
 pub fn load() -> Config {
     let path = config_path();
-    if !path.exists() {
-        return Config::default();
+    let mut cfg = if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    } else {
+        Config::default()
+    };
+    if let Some(net) = WALLET_NETWORK.get() {
+        cfg.default_network = net.to_string();
     }
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+    cfg
 }
 
 pub fn save(config: &Config) -> Result<()> {
@@ -376,6 +518,102 @@ mod tests {
             ..cfg("bitcoin-signet")
         };
         assert_eq!(overridden.esplora_url(), "http://localhost:3000");
+    }
+
+    /// Opting into Simplicity on signet while leaving the URL to the default would aim the
+    /// wallet at a chain that cannot run its covenants. Every case here is refused or passed
+    /// before any connection is made, so none of them touches the network.
+    #[test]
+    fn simplicity_on_the_default_signet_is_refused() {
+        let opted_in = Config { simplicity_activated: Some(true), ..cfg("bitcoin-signet") };
+        let err = opted_in.bitcoin_chain(Network::BitcoinSignet).unwrap_err().to_string();
+        assert!(err.contains("default_esplora") && err.contains("blockstream.info/signet"), "{err}");
+
+        // Naming the chain, or not claiming Simplicity, or using a node: all fine.
+        let named = Config {
+            default_esplora: Some("https://signet.example.invalid/api".to_string()),
+            ..opted_in
+        };
+        assert!(named.bitcoin_chain(Network::BitcoinSignet).is_ok());
+        assert!(cfg("bitcoin-signet").bitcoin_chain(Network::BitcoinSignet).is_ok());
+        let node = Config {
+            simplicity_activated: Some(true),
+            bitcoin_backend: Some("rpc".to_string()),
+            bitcoin_rpc_url: Some("http://127.0.0.1:38332".to_string()),
+            ..cfg("bitcoin-signet")
+        };
+        assert!(node.bitcoin_chain(Network::BitcoinSignet).is_ok());
+    }
+
+    #[test]
+    fn a_checkpoint_is_read_from_the_config_file() {
+        let raw = r#"{"default_network": "bitcoin-signet", "default_esplora": null,
+                      "bitcoin_checkpoint": {"height": 1296, "hash": "00ab"}}"#;
+        let parsed: Config = serde_json::from_str(raw).expect("parses");
+        let cp = parsed.bitcoin_checkpoint.expect("present");
+        assert_eq!((cp.height, cp.hash.as_str()), (1296, "00ab"));
+    }
+
+    /// A fresh directory under the system temp dir, unique to one test.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("txm-config-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_config_is_found_beside_an_existing_wallet_only() {
+        let dir = scratch_dir("beside");
+        let wallet = dir.join("wallet.json");
+        let config = dir.join("config.json");
+        std::fs::write(&config, "{}").unwrap();
+
+        // No wallet yet: `config_beside` declines, `config_in_dir_of` (create-wallet) does not.
+        assert_eq!(config_beside(&wallet), None);
+        assert_eq!(config_in_dir_of(&wallet), Some(config.clone()));
+
+        std::fs::write(&wallet, "{}").unwrap();
+        assert_eq!(config_beside(&wallet), Some(config.clone()));
+
+        std::fs::remove_file(&config).unwrap();
+        assert_eq!(config_beside(&wallet), None);
+    }
+
+    /// Only an explicit `default_network` is a declaration. The legacy default that fills
+    /// an absent one would otherwise read as "testnet" and refuse every non-Liquid wallet.
+    #[test]
+    fn only_an_explicit_network_is_declared() {
+        let dir = scratch_dir("declared");
+        let path = dir.join("config.json");
+
+        assert_eq!(declared_network_at(&path).unwrap(), None, "no file");
+
+        std::fs::write(&path, r#"{"default_esplora": "https://example.invalid/api"}"#).unwrap();
+        assert_eq!(declared_network_at(&path).unwrap(), None, "backend settings only");
+
+        std::fs::write(&path, r#"{"default_network": "signet"}"#).unwrap();
+        assert_eq!(declared_network_at(&path).unwrap(), Some(Network::BitcoinSignet));
+
+        std::fs::write(&path, r#"{"default_network": "liquid-signet"}"#).unwrap();
+        let err = declared_network_at(&path).unwrap_err().to_string();
+        assert!(err.contains("default_network"), "{err}");
+    }
+
+    /// `load` substitutes defaults for a file it cannot parse; this is where that is caught.
+    #[test]
+    fn a_malformed_config_is_an_error_not_the_defaults() {
+        let dir = scratch_dir("malformed");
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"default_network": "bitcoin-signet",
+                "bitcoin_checkpoint": {"height": "1296", "hash": "00"}}"#,
+        )
+        .unwrap();
+        let err = format!("{:#}", declared_network_at(&path).unwrap_err());
+        assert!(err.contains("Cannot parse config"), "{err}");
     }
 
     #[test]

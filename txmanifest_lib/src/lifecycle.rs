@@ -118,6 +118,37 @@ fn fetch_onchain_txout(
     }
 }
 
+/// [`fetch_onchain_txout`] for a Bitcoin run: the amount of `txid:vout`, read through the
+/// run's backend, paired with the asset id Bitcoin amounts carry in the shared assembly.
+fn fetch_bitcoin_txout(
+    client: &crate::bitcoin_backend::BitcoinChain,
+    txid: &str,
+    vout: u32,
+) -> Option<(u64, String)> {
+    let asset = crate::assembly::bitcoin_policy_asset().to_string();
+    let result = txid
+        .parse()
+        .map_err(|e| anyhow::anyhow!("bad txid: {e}"))
+        .and_then(|txid| client.txout(lwk_wollet::elements::bitcoin::OutPoint { txid, vout }));
+    match result {
+        Ok(Some(out)) => Some((out.value.to_sat(), asset)),
+        Ok(None) => {
+            println!(
+                "  {} {txid}:{vout} is not on chain, or already spent — falling back to the declared amount.",
+                style("[warn]").yellow()
+            );
+            None
+        }
+        Err(e) => {
+            println!(
+                "  {} Cannot read {txid}:{vout} from the chain ({e:#}) — falling back to the declared amount.",
+                style("[warn]").yellow()
+            );
+            None
+        }
+    }
+}
+
 /// The blinding key for an address destination, honouring the output's `confidential` flag.
 ///
 /// A confidential address carries its own blinding key, and using it is the right default.
@@ -765,12 +796,18 @@ pub fn run(
                 // fact about the chain, so reading the amount and asset off it beats any
                 // number the manifest or the operator supplies — those can be wrong, and
                 // a wrong amount is the value the sighash commits to.
-                let onchain = fetch_onchain_txout(
-                    &ov.txid,
-                    ov.vout,
-                    loaded_wallet.as_ref().map(wallet::elements_network)
-                        .unwrap_or(ElementsNetwork::LiquidTestnet),
-                );
+                let onchain = match &bitcoin_run {
+                    // Through the run's own backend. The Elements lookup below asks the
+                    // Elements backend, which knows nothing of a Bitcoin txid: it failed,
+                    // every fallback was empty, and the input resolved to 0 sat.
+                    Some(r) => fetch_bitcoin_txout(&r.client, &ov.txid, ov.vout),
+                    None => fetch_onchain_txout(
+                        &ov.txid,
+                        ov.vout,
+                        loaded_wallet.as_ref().map(wallet::elements_network)
+                            .unwrap_or(ElementsNetwork::LiquidTestnet),
+                    ),
+                };
                 let asset = onchain
                     .as_ref()
                     .map(|(_, asset)| asset.clone())

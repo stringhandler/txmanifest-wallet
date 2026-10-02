@@ -22,9 +22,9 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use lwk_wollet::elements::bitcoin::{
     consensus::encode::{deserialize, serialize_hex},
-    Address, Amount, OutPoint, ScriptBuf, Transaction, TxOut, Txid,
+    Address, Amount, BlockHash, OutPoint, ScriptBuf, Transaction, TxOut, Txid,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::bitcoin_wallet::{BitcoinWallet, Branch};
 use crate::chain::Network;
@@ -594,6 +594,46 @@ mod tests {
         assert!(hex_to_bytes("abc").is_err(), "odd length");
         assert!(hex_to_bytes("zz").is_err(), "non-hex digits");
     }
+
+    /// Block 1296 on the Simplicity signet and on the default signet, read from their
+    /// explorers. Same height, same genesis, same address encoding — and different hashes,
+    /// which is the whole of what a checkpoint relies on.
+    const SIMPLICITY_SIGNET_1296: &str =
+        "00000091e713448edf2f57f61a9d9e03a5c35ac0902be6c89b0cc5ea8e7b8564";
+    const DEFAULT_SIGNET_1296: &str =
+        "000002e26c908a30660ae43b556ddf53fd87886c632843be9ed49ac32a5350e2";
+
+    fn checkpoint() -> Checkpoint {
+        Checkpoint { height: 1296, hash: SIMPLICITY_SIGNET_1296.to_string() }
+    }
+
+    #[test]
+    fn a_checkpoint_accepts_its_own_chain() {
+        let found = SIMPLICITY_SIGNET_1296.parse().unwrap();
+        checkpoint().check(Some(found)).expect("same chain");
+    }
+
+    #[test]
+    fn a_checkpoint_refuses_the_default_signet() {
+        let found = DEFAULT_SIGNET_1296.parse().unwrap();
+        let err = checkpoint().check(Some(found)).unwrap_err().to_string();
+        assert!(err.contains("wrong chain") && err.contains(DEFAULT_SIGNET_1296), "{err}");
+    }
+
+    #[test]
+    fn a_chain_short_of_the_checkpoint_is_refused() {
+        let err = checkpoint().check(None).unwrap_err().to_string();
+        assert!(err.contains("1296"), "{err}");
+    }
+
+    /// A typo in the config must not read as "this chain is wrong".
+    #[test]
+    fn a_malformed_checkpoint_hash_is_blamed_on_the_config() {
+        let bad = Checkpoint { height: 1296, hash: "00000091e7".to_string() };
+        let found = SIMPLICITY_SIGNET_1296.parse().unwrap();
+        let err = bad.check(Some(found)).unwrap_err().to_string();
+        assert!(err.contains("bitcoin_checkpoint.hash"), "{err}");
+    }
 }
 
 
@@ -712,6 +752,85 @@ impl BitcoinChain {
                     // BTC/kvB on the wire; sat/vB everywhere in this crate.
                     .map(|btc_per_kvb| (btc_per_kvb * 100_000.0) as f32))
             }
+        }
+    }
+
+    /// The hash of the block at `height`, or `None` when this chain has not reached it.
+    ///
+    /// The tip is asked first so that "too short" is an answer rather than a failure: the
+    /// two backends report an out-of-range height differently (an HTTP 404, an RPC error),
+    /// and neither error says which of "no such block" or "broken backend" it means.
+    pub fn block_hash(&self, height: u32) -> Result<Option<BlockHash>> {
+        if height > self.tip_height()? {
+            return Ok(None);
+        }
+        let raw = match self {
+            BitcoinChain::Esplora(c) => c.get(&format!("block-height/{height}"))?,
+            BitcoinChain::Rpc(c) => c
+                .call("getblockhash", serde_json::json!([height]))?
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow::anyhow!("getblockhash did not return a string"))?,
+        };
+        raw.trim()
+            .parse()
+            .map(Some)
+            .with_context(|| format!("backend returned a malformed hash for block {height}"))
+    }
+
+    /// One output of an on-chain transaction, read from the chain itself.
+    ///
+    /// The two backends answer slightly different questions. Esplora reads the transaction,
+    /// so a spent output is still returned; a node reads its UTXO set, so a spent one is
+    /// `None`. Either way the value is the chain's, not a number someone typed.
+    pub fn txout(&self, outpoint: OutPoint) -> Result<Option<TxOut>> {
+        match self {
+            BitcoinChain::Esplora(c) => c.txout(outpoint),
+            BitcoinChain::Rpc(c) => c.txout(outpoint),
+        }
+    }
+
+    /// Fail unless this backend's chain contains `checkpoint`.
+    pub fn verify_checkpoint(&self, checkpoint: &Checkpoint) -> Result<()> {
+        checkpoint.check(self.block_hash(checkpoint.height)?)
+    }
+}
+
+/// A block the configured chain must contain, pinned by height and hash.
+///
+/// Identifies a chain where nothing else can. Every signet shares one genesis block,
+/// reports itself to RPC as `signet`, and encodes its addresses as `tb1…`, so a wallet
+/// pointed at the wrong signet scans, derives and builds without complaint — against a
+/// chain where its coins do not exist and its covenants are not executed. One hash past
+/// the point where the chains diverge tells them apart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub height: u32,
+    /// In the usual display byte order, as explorers and `getblockhash` print it.
+    pub hash: String,
+}
+
+impl Checkpoint {
+    /// Judge what a backend reported at `self.height`.
+    fn check(&self, actual: Option<BlockHash>) -> Result<()> {
+        let expected: BlockHash = self
+            .hash
+            .trim()
+            .parse()
+            .with_context(|| format!("bitcoin_checkpoint.hash is not a block hash: {:?}", self.hash))?;
+        match actual {
+            Some(found) if found == expected => Ok(()),
+            Some(found) => anyhow::bail!(
+                "wrong chain: block {} is {found}, but bitcoin_checkpoint expects {expected}",
+                self.height
+            ),
+            // Short is not proof of a wrong chain — a node still syncing is short too — but
+            // either way nothing it says about our coins can be trusted yet.
+            None => anyhow::bail!(
+                "chain has not reached bitcoin_checkpoint height {}; it is a different chain \
+                 or one still syncing",
+                self.height
+            ),
         }
     }
 }
