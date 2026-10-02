@@ -144,7 +144,7 @@ pub const DATA_DIR_ENV: &str = "TX_MANIFEST_DATA_DIR";
 
 pub fn default_data_dir() -> PathBuf {
     // Honouring an override here rather than only on the CLI's `--data-dir`, because
-    // `config::load` reads this too and takes no arguments. Without it the config is at a
+    // `config::default_path` is under this directory too. Without it the config is at a
     // fixed global path, so pointing the wallet at a regtest means overwriting the config
     // a user's real funds are reached through — which makes the thing untestable by anyone
     // who also uses it.

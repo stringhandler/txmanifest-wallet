@@ -12,8 +12,8 @@ use crate::wallet::default_data_dir;
 pub struct Config {
     /// The network to target when no wallet says otherwise — any name [`Network`] parses.
     ///
-    /// A loaded wallet's own network takes precedence (see [`set_wallet_network`]), so this
-    /// matters mainly to `create-wallet`. May be omitted, which makes the file purely
+    /// A loaded wallet's own network takes precedence (see [`crate::target::Target::bind`]),
+    /// so this matters mainly to `create-wallet`. May be omitted, which makes the file purely
     /// backend settings for whichever wallet it sits beside; it then reads as `testnet`.
     #[serde(default = "legacy_default_network")]
     pub default_network: String,
@@ -272,40 +272,14 @@ impl Config {
     }
 }
 
-/// An explicit config path, set once at startup by the CLI's `--config`.
+/// Where the config lives when nothing names another file: `config.json` in
+/// [`default_data_dir`], which honours [`crate::wallet::DATA_DIR_ENV`].
 ///
-/// Process-global rather than threaded through every call site: `load` is reached from a
-/// dozen places, several of them deep inside the lifecycle, and none of them has anything
-/// useful to say about where the config lives. A `OnceLock` also makes the override
-/// single-assignment, so nothing can quietly repoint the config mid-run.
-static CONFIG_PATH_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-
-/// Point every later [`load`] and [`save`] at `path`.
-///
-/// Returns an error if a different path was already set, which can only happen by
-/// programming mistake — but a config silently moving after something has read the old one
-/// is the kind of mistake worth refusing rather than tolerating.
-pub fn set_config_path(path: PathBuf) -> Result<()> {
-    match CONFIG_PATH_OVERRIDE.set(path.clone()) {
-        Ok(()) => Ok(()),
-        Err(_) if CONFIG_PATH_OVERRIDE.get() == Some(&path) => Ok(()),
-        Err(_) => anyhow::bail!(
-            "config path already set to {}",
-            CONFIG_PATH_OVERRIDE.get().map_or_else(String::new, |p| p.display().to_string())
-        ),
-    }
-}
-
-/// Where the config is read from and written to.
-///
-/// Precedence: an explicit `--config`, then [`crate::wallet::DATA_DIR_ENV`] via
-/// [`default_data_dir`], then the platform data directory. Deliberately *not* the current
-/// directory: a config that activates based on where you happen to be standing is how a
-/// mainnet transaction gets broadcast from the wrong folder.
-pub fn config_path() -> PathBuf {
-    if let Some(explicit) = CONFIG_PATH_OVERRIDE.get() {
-        return explicit.clone();
-    }
+/// Deliberately *not* the current directory: a config that activates based on where you
+/// happen to be standing is how a mainnet transaction gets broadcast from the wrong folder.
+/// Choosing among this, `--config` and [`config_beside`] is the caller's business — the
+/// library reads the file it is handed and nothing else.
+pub fn default_path() -> PathBuf {
     default_data_dir().join("config.json")
 }
 
@@ -314,8 +288,8 @@ pub fn config_path() -> PathBuf {
 /// Beside the *wallet*, not in the current directory. The objection to reading a config from
 /// wherever you happen to stand is that the chain then depends on your shell; a config
 /// that travels with one wallet file is bound to that wallet instead, and the wallet's
-/// network is checked against it regardless (see [`declared_network`]). Only offered for
-/// a wallet that exists, so a mistyped `--wallet` cannot pick up a stray config.
+/// network is checked against it regardless (see [`crate::target::Target::bind`]). Only
+/// offered for a wallet that exists, so a mistyped `--wallet` cannot pick up a stray config.
 pub fn config_beside(wallet_path: &std::path::Path) -> Option<PathBuf> {
     if !wallet_path.is_file() {
         return None;
@@ -337,88 +311,56 @@ pub fn config_in_dir_of(wallet_path: &std::path::Path) -> Option<PathBuf> {
     (candidate.is_file() && candidate != wallet_path).then_some(candidate)
 }
 
-/// The network the config file names explicitly, if any.
-///
-/// Read from the raw file, because [`Config`] fills an absent `default_network` with a
-/// legacy default, and a config that never mentioned a network must not be reported as
-/// disagreeing with the wallet. Unlike [`load`], a file that is present but malformed is an
-/// error: this runs once at startup, and it is the one chance to say so before every later
-/// load quietly substitutes the defaults.
-pub fn declared_network() -> Result<Option<Network>> {
-    declared_network_at(&config_path())
+/// A config file as read from disk.
+#[derive(Debug)]
+pub struct LoadedConfig {
+    pub config: Config,
+    /// The network the file names explicitly, if any.
+    ///
+    /// Kept apart from `config.default_network`, which a file that never mentions a network
+    /// fills with a legacy default — and a config that said nothing about networks must not
+    /// be reported as disagreeing with a wallet.
+    pub declared_network: Option<Network>,
+    /// The file it came from; `None` when there was none and these are the defaults.
+    pub path: Option<PathBuf>,
 }
 
-fn declared_network_at(path: &std::path::Path) -> Result<Option<Network>> {
+/// Read the config at `path`.
+///
+/// A missing file is the defaults. A file that is present but does not parse is an error:
+/// a config now carries RPC credentials, a checkpoint and an activation claim, and silently
+/// replacing a malformed one with the defaults turns a signet wallet into a Liquid testnet
+/// one with no word said.
+pub fn load_from(path: &std::path::Path) -> Result<LoadedConfig> {
     if !path.exists() {
-        return Ok(None);
+        return Ok(LoadedConfig { config: Config::default(), declared_network: None, path: None });
     }
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("Cannot read config: {}", path.display()))?;
-    serde_json::from_str::<Config>(&raw)
+    let config: Config = serde_json::from_str(&raw)
         .with_context(|| format!("Cannot parse config: {}", path.display()))?;
     let value: serde_json::Value = serde_json::from_str(&raw)?;
-    match value.get("default_network").and_then(serde_json::Value::as_str) {
-        None => Ok(None),
-        Some(name) => name
-            .parse()
-            .map(Some)
-            .map_err(|e| anyhow::anyhow!("{e} (in default_network of {})", path.display())),
-    }
-}
-
-/// The network of the wallet this process is operating, set once at startup.
-///
-/// Process-global for the same reason [`CONFIG_PATH_OVERRIDE`] is: `load` has a dozen
-/// callers and no arguments. The wallet decides the chain because it is the one thing that
-/// cannot be wrong about it — its keys and addresses were made for that network — while a
-/// config is just settings, and may have been written for another wallet entirely.
-static WALLET_NETWORK: std::sync::OnceLock<Network> = std::sync::OnceLock::new();
-
-/// Make `network` the target of every later [`load`], whatever the file's `default_network`.
-///
-/// Callers check first that the config does not name a *different* network
-/// ([`declared_network`]): its URLs, checkpoint and activation were written for that one,
-/// and carrying them onto this network would be wrong in ways nothing downstream detects.
-pub fn set_wallet_network(network: Network) -> Result<()> {
-    match WALLET_NETWORK.set(network) {
-        Ok(()) => Ok(()),
-        Err(_) if WALLET_NETWORK.get() == Some(&network) => Ok(()),
-        Err(_) => anyhow::bail!(
-            "wallet network already set to {}",
-            WALLET_NETWORK.get().map_or_else(String::new, ToString::to_string)
+    let declared_network = match value.get("default_network").and_then(serde_json::Value::as_str)
+    {
+        None => None,
+        Some(name) => Some(
+            name.parse()
+                .map_err(|e| anyhow::anyhow!("{e} (in default_network of {})", path.display()))?,
         ),
-    }
-}
-
-/// Load config from disk. Returns `Config::default()` if the file doesn't exist yet.
-///
-/// When a wallet has been bound with [`set_wallet_network`], its network replaces
-/// `default_network`.
-pub fn load() -> Config {
-    let path = config_path();
-    let mut cfg = if path.exists() {
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
-    } else {
-        Config::default()
     };
-    if let Some(net) = WALLET_NETWORK.get() {
-        cfg.default_network = net.to_string();
-    }
-    cfg
+    Ok(LoadedConfig { config, declared_network, path: Some(path.to_path_buf()) })
 }
 
-pub fn save(config: &Config) -> Result<()> {
-    let path = config_path();
+/// Write `config` to `path`, creating its directory if needed.
+pub fn save_to(path: &std::path::Path, config: &Config) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Cannot create config dir: {}", parent.display()))?;
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Cannot create config dir: {}", parent.display()))?;
+        }
     }
     let raw = serde_json::to_string_pretty(config)?;
-    std::fs::write(&path, raw)
-        .with_context(|| format!("Cannot write config: {}", path.display()))
+    std::fs::write(path, raw).with_context(|| format!("Cannot write config: {}", path.display()))
 }
 
 #[cfg(test)]
@@ -491,9 +433,7 @@ mod tests {
     /// not consulted.
     #[test]
     fn the_default_config_path_is_not_the_current_directory() {
-        // `set_config_path` is process-global and this test must not claim it, so this
-        // checks the un-overridden shape rather than calling `config_path`.
-        let default = crate::wallet::default_data_dir().join("config.json");
+        let default = default_path();
         assert_eq!(default.file_name().unwrap(), "config.json");
         assert!(
             default.parent().is_some_and(|p| p != std::path::Path::new("")),
@@ -590,16 +530,16 @@ mod tests {
         let dir = scratch_dir("declared");
         let path = dir.join("config.json");
 
-        assert_eq!(declared_network_at(&path).unwrap(), None, "no file");
+        assert_eq!(load_from(&path).unwrap().declared_network, None, "no file");
 
         std::fs::write(&path, r#"{"default_esplora": "https://example.invalid/api"}"#).unwrap();
-        assert_eq!(declared_network_at(&path).unwrap(), None, "backend settings only");
+        assert_eq!(load_from(&path).unwrap().declared_network, None, "backend settings only");
 
         std::fs::write(&path, r#"{"default_network": "signet"}"#).unwrap();
-        assert_eq!(declared_network_at(&path).unwrap(), Some(Network::BitcoinSignet));
+        assert_eq!(load_from(&path).unwrap().declared_network, Some(Network::BitcoinSignet));
 
         std::fs::write(&path, r#"{"default_network": "liquid-signet"}"#).unwrap();
-        let err = declared_network_at(&path).unwrap_err().to_string();
+        let err = load_from(&path).unwrap_err().to_string();
         assert!(err.contains("default_network"), "{err}");
     }
 
@@ -614,7 +554,7 @@ mod tests {
                 "bitcoin_checkpoint": {"height": "1296", "hash": "00"}}"#,
         )
         .unwrap();
-        let err = format!("{:#}", declared_network_at(&path).unwrap_err());
+        let err = format!("{:#}", load_from(&path).unwrap_err());
         assert!(err.contains("Cannot parse config"), "{err}");
     }
 

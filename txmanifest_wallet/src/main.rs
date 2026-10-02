@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tx_manifest_lib::lifecycle::OutpointOverride;
+use tx_manifest_lib::target::Target;
 use tx_manifest_lib::{manifest, config, describe, instance, lifecycle, prepare, validate, wallet};
 
 /// Build the input-override map from `--input id=txid:vout` flags and an optional
@@ -265,9 +266,8 @@ enum Commands {
 /// goes straight to the chain. Left alone they reported "Wallet has no UTXOs … run `sync`
 /// first" against a wallet holding a hundred of them, which sends the reader off to fix
 /// their funding instead of their expectations.
-fn refuse_on_bitcoin(command: &str) -> Result<()> {
-    let cfg = config::load();
-    if cfg.network().is_ok_and(|n| n.family() == tx_manifest_lib::chain::ChainFamily::Bitcoin) {
+fn refuse_on_bitcoin(command: &str, target: &Target) -> Result<()> {
+    if target.network.family() == tx_manifest_lib::chain::ChainFamily::Bitcoin {
         anyhow::bail!(
             "`{command}` is not implemented for Bitcoin yet — it works through the Elements \
              wallet database, which a Bitcoin run does not use. `sync` reports the balance; \
@@ -284,9 +284,10 @@ fn cmd_prepare(
     esplora: Option<&str>,
     data_dir: Option<&std::path::Path>,
     split_amount: u64,
+    target: &Target,
 ) -> Result<()> {
-    refuse_on_bitcoin("prepare")?;
-    let cfg = config::load();
+    refuse_on_bitcoin("prepare", target)?;
+    let cfg = &target.config;
     let backend_kind = cfg.backend_kind();
     let server_url = esplora.unwrap_or_else(|| cfg.backend_url());
     use console::style;
@@ -314,10 +315,9 @@ fn cmd_prepare(
     })
 }
 
-fn cmd_config(key: Option<&str>, value: Option<&str>) -> Result<()> {
+fn cmd_config(path: &Path, key: Option<&str>, value: Option<&str>) -> Result<()> {
     use console::style;
-    let path = config::config_path();
-    let mut cfg = config::load();
+    let mut cfg = config::load_from(path)?.config;
 
     match (key, value) {
         (None, _) => {
@@ -391,7 +391,7 @@ fn cmd_config(key: Option<&str>, value: Option<&str>) -> Result<()> {
             v.parse::<tx_manifest_lib::chain::Network>()
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             cfg.default_network = v.to_string();
-            config::save(&cfg)?;
+            config::save_to(path, &cfg)?;
             println!("  default_network → {}", style(v).yellow());
         }
         (Some("default_backend"), Some(v)) => {
@@ -399,12 +399,12 @@ fn cmd_config(key: Option<&str>, value: Option<&str>) -> Result<()> {
                 anyhow::bail!("default_backend must be 'esplora' or 'electrum'");
             }
             cfg.default_backend = if v.is_empty() { None } else { Some(v.to_string()) };
-            config::save(&cfg)?;
+            config::save_to(path, &cfg)?;
             println!("  default_backend → {}", style(v).yellow());
         }
         (Some("default_esplora"), Some(v)) => {
             cfg.default_esplora = if v.is_empty() { None } else { Some(v.to_string()) };
-            config::save(&cfg)?;
+            config::save_to(path, &cfg)?;
             println!(
                 "  default_esplora → {}",
                 style(cfg.default_esplora.as_deref().unwrap_or("(auto)")).yellow()
@@ -412,7 +412,7 @@ fn cmd_config(key: Option<&str>, value: Option<&str>) -> Result<()> {
         }
         (Some("default_electrum"), Some(v)) => {
             cfg.default_electrum = if v.is_empty() { None } else { Some(v.to_string()) };
-            config::save(&cfg)?;
+            config::save_to(path, &cfg)?;
             println!(
                 "  default_electrum → {}",
                 style(cfg.default_electrum.as_deref().unwrap_or("(auto)")).yellow()
@@ -423,12 +423,11 @@ fn cmd_config(key: Option<&str>, value: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_create_wallet(out: &Path, mainnet: Option<bool>) -> Result<()> {
+fn cmd_create_wallet(out: &Path, mainnet: Option<bool>, cfg: &config::Config) -> Result<()> {
     use console::style;
     // Take the configured network whole, not just its mainnet-ness. `--mainnet` still
     // overrides, but only to choose between Liquid and its testnet: it is a two-valued flag
     // and cannot name bitcoin-regtest, so it cannot express what the config already does.
-    let cfg = config::load();
     let w = match (mainnet, cfg.network()) {
         (Some(true), _) => wallet::create_wallet_for(tx_manifest_lib::chain::Network::Liquid)?,
         (Some(false), _) => {
@@ -451,16 +450,12 @@ fn cmd_create_wallet(out: &Path, mainnet: Option<bool>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_info(wallet_path: &Path) -> Result<()> {
+fn cmd_info(wallet_path: &Path, target: &Target) -> Result<()> {
     use console::style;
     let w = wallet::load_wallet(wallet_path)?;
-    // The configured network, not the wallet file's mainnet flag: the receive address is
-    // the one line a user acts on, and it has to name the chain this wallet is pointed at.
-    let cfg = config::load();
-    let info = match cfg.network() {
-        Ok(net) => wallet::wallet_info_for(&w, net)?,
-        Err(_) => wallet::wallet_info(&w)?,
-    };
+    // The bound network, not the wallet file's mainnet flag: the receive address is the one
+    // line a user acts on, and it has to name the chain this wallet is pointed at.
+    let info = wallet::wallet_info_for(&w, target.network)?;
     println!();
     println!("{}", style("Wallet Info").bold().cyan());
     println!("  Network     : {}", style(&info.network).cyan());
@@ -486,14 +481,19 @@ fn cmd_info(wallet_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_sync(wallet_path: &Path, esplora: Option<&str>, data_dir: Option<&std::path::Path>) -> Result<()> {
-    let cfg = config::load();
+fn cmd_sync(
+    wallet_path: &Path,
+    esplora: Option<&str>,
+    data_dir: Option<&std::path::Path>,
+    target: &Target,
+) -> Result<()> {
+    let cfg = &target.config;
     // Dispatch before anything else. Without this, a Bitcoin config took the Elements path
     // wholesale: an `elwpkh`/`slip77` descriptor, a `tex1q…` Liquid address, and a request
     // to whatever the Elements Esplora setting happened to name. Nothing about that failed
     // for a reason a reader could connect to the config they had written.
-    if cfg.network().is_ok_and(|n| n.family() == tx_manifest_lib::chain::ChainFamily::Bitcoin) {
-        return cmd_sync_bitcoin(wallet_path, &cfg);
+    if target.network.family() == tx_manifest_lib::chain::ChainFamily::Bitcoin {
+        return cmd_sync_bitcoin(wallet_path, target);
     }
     let backend_kind = cfg.backend_kind();
     let server_url = esplora.unwrap_or_else(|| cfg.backend_url());
@@ -523,15 +523,15 @@ fn cmd_sync(wallet_path: &Path, esplora: Option<&str>, data_dir: Option<&std::pa
 /// distinct step from reading the balance. Bitcoin support has no such database — every
 /// run scans from the descriptor — so this is a scan and a report, and nothing later
 /// depends on having run it.
-fn cmd_sync_bitcoin(wallet_path: &Path, cfg: &config::Config) -> Result<()> {
+fn cmd_sync_bitcoin(wallet_path: &Path, target: &Target) -> Result<()> {
     use console::style;
     use tx_manifest_lib::bitcoin_backend::{BitcoinChain, DEFAULT_GAP_LIMIT};
     use tx_manifest_lib::bitcoin_wallet::BitcoinWallet;
 
     let w = wallet::load_wallet(wallet_path)?;
-    let network = cfg.network().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let network = target.network;
     let btc = BitcoinWallet::from_mnemonic(&w.mnemonic, network)?;
-    let chain: BitcoinChain = cfg.bitcoin_chain(network)?;
+    let chain: BitcoinChain = target.config.bitcoin_chain(network)?;
 
     println!();
     println!("{}", style("Scanning wallet…").bold().cyan());
@@ -581,14 +581,17 @@ fn cmd_sync_bitcoin(wallet_path: &Path, cfg: &config::Config) -> Result<()> {
     Ok(())
 }
 
-fn cmd_get_balance(wallet_path: &Path, data_dir: Option<&std::path::Path>) -> Result<()> {
+fn cmd_get_balance(
+    wallet_path: &Path,
+    data_dir: Option<&std::path::Path>,
+    target: &Target,
+) -> Result<()> {
     use console::style;
-    let cfg = config::load();
     // The Bitcoin path keeps no database, so there is no "last known" balance to read back
     // — the scan is the only source. Sending the user to `sync` is honest; printing an
     // empty Elements balance would not be.
-    if cfg.network().is_ok_and(|n| n.family() == tx_manifest_lib::chain::ChainFamily::Bitcoin) {
-        return cmd_sync_bitcoin(wallet_path, &cfg);
+    if target.network.family() == tx_manifest_lib::chain::ChainFamily::Bitcoin {
+        return cmd_sync_bitcoin(wallet_path, target);
     }
     let w = wallet::load_wallet(wallet_path)?;
     let data_dir = data_dir.map(|p| p.to_path_buf()).unwrap_or_else(wallet::default_data_dir);
@@ -650,8 +653,9 @@ fn cmd_split(
     wallet_path: &Path,
     esplora: Option<&str>,
     data_dir: Option<&std::path::Path>,
+    target: &Target,
 ) -> Result<()> {
-    refuse_on_bitcoin("split")?;
+    refuse_on_bitcoin("split", target)?;
     use console::style;
     use lwk_common::Signer;
     use lwk_wollet::FsPersister;
@@ -661,7 +665,7 @@ fn cmd_split(
         anyhow::bail!("--count must be at least 1");
     }
 
-    let cfg = config::load();
+    let cfg = &target.config;
     let backend_kind = cfg.backend_kind();
     let server_url = esplora.unwrap_or_else(|| cfg.backend_url());
     let w = wallet::load_wallet(wallet_path)?;
@@ -853,55 +857,30 @@ fn cmd_describe(manifest_path: &Path, action_name: Option<&str>) -> Result<()> {
     describe::describe(&manifest, action_name)
 }
 
-/// Bind this process to the wallet it operates on.
+/// Bind a command to the wallet it operates on, returning the [`Target`] it runs against.
 ///
-/// Three steps, in order: use the `config.json` beside the wallet when no `--config` was
-/// given; refuse a config or `--network` naming a different chain from the wallet's; then
-/// make the wallet's network the target for every later config load.
-///
-/// The refusal is what makes the other two safe. Without it, a wallet created on one chain
-/// and a config written for another combined silently — a Liquid address printed under a
-/// `bitcoin-signet` label, from a signet wallet beside the global Liquid config.
-fn bind_wallet(explicit_config: bool, wallet_path: &Path, network_flag: Option<&str>) -> Result<()> {
-    use tx_manifest_lib::chain::Network;
-
-    if !explicit_config {
-        if let Some(path) = config::config_beside(wallet_path) {
-            announce_config(&path);
-            config::set_config_path(path)?;
-        }
-    }
-
+/// Chooses the config file — `--config`, else the `config.json` beside the wallet, else the
+/// default — reads it strictly, and hands it to [`Target::bind`], which refuses a config or
+/// `--network` naming a different chain from the wallet's. That refusal is what makes the
+/// config-beside-the-wallet lookup safe: without it, a wallet created on one chain and a
+/// config written for another combined silently — a Liquid address printed under a
+/// `bitcoin-signet` label.
+fn bind(explicit_config: Option<&Path>, wallet_path: &Path, network_flag: Option<&str>) -> Result<Target> {
+    let path = match explicit_config {
+        Some(p) => p.to_path_buf(),
+        None => match config::config_beside(wallet_path) {
+            Some(p) => {
+                announce_config(&p);
+                p
+            }
+            None => config::default_path(),
+        },
+    };
+    let loaded = config::load_from(&path)?;
     // A missing wallet is left to the command, which reports it in context — and a `run`
     // that only previews has no need of one.
-    if !wallet_path.is_file() {
-        return Ok(());
-    }
-    let w = wallet::load_wallet(wallet_path)?;
-    // A name this build does not know gives nothing to bind to; `is_mainnet` already treats
-    // such a wallet as the dangerous case.
-    let Some(wallet_net) = w.network() else { return Ok(()) };
-
-    if let Some(config_net) = config::declared_network()? {
-        if config_net != wallet_net {
-            anyhow::bail!(
-                "{} is a {wallet_net} wallet, but the config at {} is for {config_net}; pass \
-                 --config with a {wallet_net} config, or put one beside the wallet",
-                wallet_path.display(),
-                config::config_path().display()
-            );
-        }
-    }
-    if let Some(flag) = network_flag {
-        let flag_net: Network = flag.parse().map_err(|e| anyhow::anyhow!("{e} (in --network)"))?;
-        if flag_net != wallet_net {
-            anyhow::bail!(
-                "--network {flag} does not match {}, which is a {wallet_net} wallet",
-                wallet_path.display()
-            );
-        }
-    }
-    config::set_wallet_network(wallet_net)
+    let wallet = if wallet_path.is_file() { Some(wallet::load_wallet(wallet_path)?) } else { None };
+    Target::bind(loaded, wallet.as_ref().map(|w| (wallet_path, w)), network_flag)
 }
 
 /// Say which config was picked up implicitly. On stderr, so `--json` output stays clean.
@@ -913,7 +892,6 @@ fn announce_config(path: &Path) {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Before anything reads the config, including the lifecycle's own `config::load`.
     if let Some(path) = &cli.config {
         if !path.exists() {
             anyhow::bail!(
@@ -922,29 +900,8 @@ fn main() -> Result<()> {
                 path.display()
             );
         }
-        config::set_config_path(path.clone())?;
     }
-
-    // Likewise before anything reads the config: which file it is can depend on where the
-    // wallet lives, and what network it targets depends on the wallet.
-    let explicit_config = cli.config.is_some();
-    match &cli.command {
-        Commands::Run { wallet, network, .. } => {
-            bind_wallet(explicit_config, wallet, network.as_deref())?
-        }
-        Commands::Info { wallet }
-        | Commands::Sync { wallet, .. }
-        | Commands::Prepare { wallet, .. }
-        | Commands::GetBalance { wallet, .. }
-        | Commands::Split { wallet, .. } => bind_wallet(explicit_config, wallet, None)?,
-        Commands::CreateWallet { out, .. } if !explicit_config => {
-            if let Some(path) = config::config_in_dir_of(out) {
-                announce_config(&path);
-                config::set_config_path(path)?;
-            }
-        }
-        _ => {}
-    }
+    let explicit_config = cli.config.as_deref();
 
     match cli.command {
         Commands::Run {
@@ -964,8 +921,7 @@ fn main() -> Result<()> {
             export_pset,
             debug_jets,
         } => {
-            let cfg = config::load();
-            let network = network.as_deref().unwrap_or(&cfg.default_network).to_string();
+            let target = bind(explicit_config, &wallet, network.as_deref())?;
             let data_dir = data_dir.unwrap_or_else(wallet::default_data_dir);
 
             // Instance/state INPUT files are never auto-discovered from the manifest stem:
@@ -984,7 +940,7 @@ fn main() -> Result<()> {
             lifecycle::run(
                 &manifest_file,
                 &action_name,
-                Some(&network),
+                &target,
                 params.as_deref(),
                 loaded_instance.as_ref(),
                 instance.as_deref(),       // instance_in_path
@@ -1007,15 +963,41 @@ fn main() -> Result<()> {
         Commands::Describe { manifest_file, action_name } => {
             cmd_describe(&manifest_file, action_name.as_deref())
         }
-        Commands::Config { key, value } => cmd_config(key.as_deref(), value.as_deref()),
-        Commands::Prepare { manifest_file, action_name, wallet, esplora, data_dir, split_amount } =>
-            cmd_prepare(&manifest_file, &action_name, &wallet, esplora.as_deref(), data_dir.as_deref(), split_amount),
-        Commands::CreateWallet { out, mainnet } => cmd_create_wallet(&out, mainnet),
-        Commands::Info { wallet } => cmd_info(&wallet),
-        Commands::Sync { wallet, esplora, data_dir } => cmd_sync(&wallet, esplora.as_deref(), data_dir.as_deref()),
-        Commands::GetBalance { wallet, data_dir } => cmd_get_balance(&wallet, data_dir.as_deref()),
-        Commands::Split { count, asset, amount_each, wallet, esplora, data_dir } =>
-            cmd_split(count, &asset, amount_each, &wallet, esplora.as_deref(), data_dir.as_deref()),
+        Commands::Config { key, value } => {
+            let path = explicit_config.map_or_else(config::default_path, Path::to_path_buf);
+            cmd_config(&path, key.as_deref(), value.as_deref())
+        }
+        Commands::Prepare { manifest_file, action_name, wallet, esplora, data_dir, split_amount } => {
+            let target = bind(explicit_config, &wallet, None)?;
+            cmd_prepare(&manifest_file, &action_name, &wallet, esplora.as_deref(), data_dir.as_deref(), split_amount, &target)
+        }
+        Commands::CreateWallet { out, mainnet } => {
+            // The config in the directory the wallet is about to be written to, so a wallet is
+            // made for the chain that config names.
+            let path = match explicit_config {
+                Some(p) => p.to_path_buf(),
+                None => config::config_in_dir_of(&out)
+                    .inspect(|p| announce_config(p))
+                    .unwrap_or_else(config::default_path),
+            };
+            cmd_create_wallet(&out, mainnet, &config::load_from(&path)?.config)
+        }
+        Commands::Info { wallet } => {
+            let target = bind(explicit_config, &wallet, None)?;
+            cmd_info(&wallet, &target)
+        }
+        Commands::Sync { wallet, esplora, data_dir } => {
+            let target = bind(explicit_config, &wallet, None)?;
+            cmd_sync(&wallet, esplora.as_deref(), data_dir.as_deref(), &target)
+        }
+        Commands::GetBalance { wallet, data_dir } => {
+            let target = bind(explicit_config, &wallet, None)?;
+            cmd_get_balance(&wallet, data_dir.as_deref(), &target)
+        }
+        Commands::Split { count, asset, amount_each, wallet, esplora, data_dir } => {
+            let target = bind(explicit_config, &wallet, None)?;
+            cmd_split(count, &asset, amount_each, &wallet, esplora.as_deref(), data_dir.as_deref(), &target)
+        }
     }
 }
 

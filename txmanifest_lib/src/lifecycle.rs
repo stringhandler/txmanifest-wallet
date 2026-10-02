@@ -15,7 +15,7 @@ use crate::params::ParamOverrides;
 use crate::preview;
 use crate::prompt;
 use crate::wallet::{self, WalletFile};
-use crate::{config, covenant, eval, pset_builder};
+use crate::{covenant, eval, pset_builder};
 
 // BIP68 nSequence encoding bits.
 const SEQUENCE_LOCKTIME_DISABLE_FLAG: u32 = 1 << 31;
@@ -83,6 +83,7 @@ fn resolve_input_sequence(inp: &Input, ctx: &ExecutionContext) -> Result<Option<
 /// failure warns and returns `None` rather than aborting — but when the chain does answer,
 /// it wins over everything else, because it is the only source that cannot be wrong.
 fn fetch_onchain_txout(
+    cfg: &crate::config::Config,
     txid: &str,
     vout: u32,
     network: ElementsNetwork,
@@ -90,7 +91,6 @@ fn fetch_onchain_txout(
     use crate::backend::{Backend, BackendKind};
 
     let parsed = lwk_wollet::elements::Txid::from_str(txid).ok()?;
-    let cfg = crate::config::load();
     let kind = cfg.backend_kind();
     let url = match kind {
         BackendKind::Esplora => cfg.esplora_url().to_string(),
@@ -330,7 +330,9 @@ impl OutpointOverride {
 pub fn run(
     manifest_file: &Path,
     action_name: &str,
-    network: Option<&str>,
+    // The network and config this run targets, bound by `Target::bind`. Nothing below
+    // reads a config of its own.
+    target: &crate::target::Target,
     params_file: Option<&Path>,
     instance: Option<&InstanceFile>,
     // Path the instance was loaded from (INPUT). Never auto-discovered; recorded into the
@@ -368,7 +370,7 @@ pub fn run(
     // Refuse before anything is derived, signed or broadcast if the target cannot run
     // this manifest. `validate` cannot do this: it is offline and has no idea which node
     // the wallet points at, and Simplicity on Bitcoin is a property of the node.
-    check_target_capabilities(&manifest, network)?;
+    check_target_capabilities(&manifest, target)?;
 
     // How every `.simf` in this run compiles: debug symbols (which affect every CMR and
     // address, so interop targets like simplicity-lending can be matched without
@@ -418,7 +420,8 @@ pub fn run(
         _ => None,
     };
 
-    let overrides = ParamOverrides::load(manifest_file, network, params_file, instance)?;
+    let overrides =
+        ParamOverrides::load(manifest_file, Some(&target.network_label), params_file, instance)?;
 
     let loaded_wallet: Option<WalletFile> = if wallet_path.exists() {
         Some(wallet::load_wallet(wallet_path)?)
@@ -430,6 +433,18 @@ pub fn run(
         );
         None
     };
+    // A target bound to one wallet must not run another. `Target::bind` checks the wallet it
+    // is given; this checks it was given this one, since a library caller binds and runs
+    // in separate steps.
+    if let Some(w_net) = loaded_wallet.as_ref().and_then(WalletFile::network) {
+        if w_net != target.network {
+            anyhow::bail!(
+                "{} is a {w_net} wallet, but this run is bound to {}",
+                wallet_path.display(),
+                target.network
+            );
+        }
+    }
 
     // The Bitcoin counterpart of `wollet_opt`. Built before UTXO loading because input
     // selection needs the scan's results, and its
@@ -440,20 +455,19 @@ pub fn run(
         let w = loaded_wallet
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no wallet loaded; a Bitcoin run needs one to sign"))?;
-        let cfg = crate::config::load();
-        let target = network.unwrap_or(&cfg.default_network).parse::<crate::chain::Network>()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let btc_wallet = crate::bitcoin_wallet::BitcoinWallet::from_mnemonic(&w.mnemonic, target)?;
-        let client = cfg.bitcoin_chain(target)?;
+        let cfg = &target.config;
+        let net = target.network;
+        let btc_wallet = crate::bitcoin_wallet::BitcoinWallet::from_mnemonic(&w.mnemonic, net)?;
+        let client = cfg.bitcoin_chain(net)?;
         // The capability gate above believed the config; this asks the chain. Before the
         // scan and before any covenant address exists — see `confirm_simplicity` for why a
         // wrong belief here costs the coins rather than a broadcast.
         if manifest.requires.contains(&crate::chain::Capability::SIMPLICITY) {
-            client.confirm_simplicity(target, cfg.bitcoin_checkpoint.is_some())?;
-            println!("  {} Simplicity confirmed on {}", style("✓").green(), target);
+            client.confirm_simplicity(net, cfg.bitcoin_checkpoint.is_some())?;
+            println!("  {} Simplicity confirmed on {}", style("✓").green(), net);
         }
 
-        println!("  {} Scanning {} for wallet UTXOs…", style("·").dim(), target);
+        println!("  {} Scanning {} for wallet UTXOs…", style("·").dim(), net);
         let utxos = client
             .scan(&btc_wallet, crate::bitcoin_backend::DEFAULT_GAP_LIMIT)
             .context("Cannot scan for wallet UTXOs")?;
@@ -472,7 +486,7 @@ pub fn run(
         let (_, receive_start) =
             client.next_unused(&btc_wallet, crate::bitcoin_wallet::Branch::Receive)?;
 
-        Some(BitcoinRun { network: target, wallet: btc_wallet, client, utxos, change_index, receive_start })
+        Some(BitcoinRun { network: net, wallet: btc_wallet, client, utxos, change_index, receive_start })
     } else {
         None
     };
@@ -809,6 +823,7 @@ pub fn run(
                     // every fallback was empty, and the input resolved to 0 sat.
                     Some(r) => fetch_bitcoin_txout(&r.client, &ov.txid, ov.vout),
                     None => fetch_onchain_txout(
+                        &target.config,
                         &ov.txid,
                         ov.vout,
                         loaded_wallet.as_ref().map(wallet::elements_network)
@@ -2849,8 +2864,7 @@ pub fn run(
                             &tx_hex[..128]
                         );
                     }
-                    let cfg = config::load();
-                    match broadcast_finalized_tx(&cfg, &tx, &tx_hex, net_for_hash) {
+                    match broadcast_finalized_tx(&target.config, &tx, &tx_hex, net_for_hash) {
                         Ok(txid) => {
                                 broadcast_txid = Some(txid.clone());
                                 println!(
@@ -4063,11 +4077,15 @@ pub struct HeadlessResult {
 /// `NEW_STATE_BYTES`, `NETWORK_FEE`) plus `fee_rate` (sat/vb as a float
 /// string) to prevent the interactive fee prompt.
 /// The instance file at `instance_path` must supply all compile params.
+///
+/// Takes a [`crate::target::Target`] rather than a network name: the config it reaches
+/// the chain through is the caller's to choose, not a global this function reads.
 #[allow(clippy::too_many_arguments)]
 pub fn run_headless(
     manifest_path: &Path,
     action_name: &str,
-    network: &str,
+    // Bound by `Target::bind` against the wallet at `wallet_path`; `run` re-checks that.
+    target: &crate::target::Target,
     instance_path: Option<&Path>,
     wallet_path: &Path,
     data_dir: &Path,
@@ -4124,7 +4142,7 @@ pub fn run_headless(
     let run_result = run(
         manifest_path,
         action_name,
-        Some(network),
+        target,
         Some(&params_path),
         loaded_instance.as_ref(),
         instance_path,          // instance_in_path
@@ -5312,12 +5330,9 @@ mod tests {
 /// Placed before any address derivation, signing or broadcast. A capability gap discovered
 /// later shows up as a rejected transaction, by which point a covenant address may already
 /// hold funds that nothing on that chain can spend.
-fn check_target_capabilities(manifest: &Manifest, network: Option<&str>) -> Result<()> {
-    let cfg = crate::config::load();
-    let network_name = network.unwrap_or(&cfg.default_network);
-    let target: crate::chain::Network = network_name
-        .parse()
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+fn check_target_capabilities(manifest: &Manifest, bound: &crate::target::Target) -> Result<()> {
+    let cfg = &bound.config;
+    let target = bound.network;
 
     // The manifest declares a family; the wallet points at a network. Disagreement is
     // caught here rather than deep in address derivation, where the message would be about

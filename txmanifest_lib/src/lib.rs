@@ -22,5 +22,6 @@ pub mod psbt_builder;
 pub mod pset_builder;
 pub mod schema;
 pub mod state;
+pub mod target;
 pub mod validate;
 pub mod wallet;
