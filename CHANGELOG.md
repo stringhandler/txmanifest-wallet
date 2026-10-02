@@ -111,11 +111,14 @@ the aliases `liquid` and `btc`. It was a free-form string that nothing read;
   `scantxoutset` finds our coins from descriptors with no wallet, no import and
   no rescan, and `generatetoaddress` funds a regtest wallet without a faucet.
 
-  Amounts are converted from Bitcoin Core's decimal BTC **textually**, never
-  through `f64`. A BTC amount is a decimal fraction with eight places, which
-  binary floating point cannot hold exactly; `0.1` BTC via a float lands just
-  under 10,000,000 and truncates to 9,999,999, and an amount one satoshi off
-  invalidates every signature committing to it.
+  Amounts are read from Bitcoin Core's decimal BTC with rust-bitcoin's
+  `amount::serde::as_btc`, which formats the parsed float back to its shortest
+  decimal and parses that exactly. A naive conversion is a satoshi off for
+  values like `0.1` BTC (just under 10,000,000, truncated to 9,999,999), and an
+  amount one satoshi off invalidates every signature committing to it. An
+  earlier hand-rolled parser fed by `serde_json::Number::to_string()` refused
+  anything under 1,000 sat — serde_json renders those as `5.46e-6` — so a single
+  dust-sized coin failed every scan.
 
   The two backends differ in what bounds a scan, which is worth knowing: Esplora
   reads address *history* and finds coins beyond a gap of spent addresses, while

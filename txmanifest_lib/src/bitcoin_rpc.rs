@@ -26,8 +26,21 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use lwk_wollet::elements::bitcoin::{
-    consensus::encode::serialize_hex, Address, OutPoint, ScriptBuf, Transaction, TxOut, Txid,
+    consensus::encode::serialize_hex, Address, Amount, OutPoint, ScriptBuf, Transaction, TxOut,
+    Txid,
 };
+// Bitcoin Core reports amounts as JSON numbers in BTC, and they are read with rust-bitcoin's
+// own helper: it takes the `f64` serde_json produces, prints it with Rust's `Display`
+// (shortest round-trip, never exponent notation) and parses that decimal text exactly, so
+// every amount Core can send arrives to the satoshi.
+//
+// What this replaced looked right, which is why it is recorded. The amount was kept as a
+// `serde_json::Number` on the belief that its original text survived, and that text was
+// parsed by hand. It survives only under serde_json's `arbitrary_precision` feature, which
+// this build does not enable — so the text was re-rendered from an `f64`, serde_json renders
+// anything under 1e-5 BTC in exponent form (`5.46e-6`), and the parser refused it. One
+// output under 1,000 sat anywhere in the wallet failed every scan.
+use lwk_wollet::elements::bitcoin::amount::serde::as_btc as btc_amount;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -181,21 +194,11 @@ impl RpcClient {
         if v.is_null() {
             return Ok(None);
         }
-        let value = v
-            .get("value")
-            .ok_or_else(|| anyhow::anyhow!("gettxout carries no value"))?;
-        // Decimal BTC, parsed as text for the reason `scan_scripts` gives.
-        let sats = btc_string_to_sats(&value.to_string())
-            .with_context(|| format!("cannot read amount {value}"))?;
-        let spk = v
-            .get("scriptPubKey")
-            .and_then(|s| s.get("hex"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("gettxout carries no scriptPubKey"))?;
+        let wire: WireTxOut = serde_json::from_value(v).context("cannot decode gettxout")?;
         Ok(Some(TxOut {
-            value: lwk_wollet::elements::bitcoin::Amount::from_sat(sats),
+            value: wire.value,
             script_pubkey: ScriptBuf::from_bytes(
-                bytes_of_hex(spk).context("bad scriptPubKey hex")?,
+                bytes_of_hex(&wire.script_pub_key.hex).context("bad scriptPubKey hex")?,
             ),
         }))
     }
@@ -244,12 +247,7 @@ impl RpcClient {
                     script_pubkey: ScriptBuf::from_bytes(
                         bytes_of_hex(&u.script_pub_key).context("bad scriptPubKey hex")?,
                     ),
-                    // Bitcoin Core reports this in BTC as a JSON number. Converting through
-                    // a float is how an amount ends up a satoshi off, and one satoshi
-                    // invalidates every signature over it — so the raw text is parsed as a
-                    // decimal instead.
-                    value: btc_string_to_sats(&u.amount.to_string())
-                        .with_context(|| format!("cannot read amount {}", u.amount))?,
+                    value: u.amount.to_sat(),
                     height: u.height,
                     coinbase: u.coinbase.then(|| crate::bitcoin_backend::CoinbaseInfo {
                         // A coinbase with no confirmation count is treated as brand new
@@ -325,9 +323,9 @@ struct WireScanUnspent {
     vout: u32,
     #[serde(rename = "scriptPubKey")]
     script_pub_key: String,
-    /// BTC, as a JSON number. Kept as `serde_json::Number` so its exact text survives —
-    /// see the note in `scan_scripts`.
-    amount: serde_json::Number,
+    /// BTC, as a JSON number; see the note on `btc_amount` at the top of this module.
+    #[serde(with = "btc_amount")]
+    amount: Amount,
     #[serde(default)]
     height: Option<u32>,
     /// Whether this output is a block reward. Core reports it; Esplora does not.
@@ -366,35 +364,18 @@ fn parse_rpc_error(body: &str) -> Option<String> {
     Some(format!("node error {code}: {msg}"))
 }
 
-/// Convert a BTC amount written as a decimal string into satoshis.
-///
-/// Deliberately textual. `0.1 + 0.2` is the standard demonstration that binary floating
-/// point cannot hold decimal fractions exactly, and a BTC amount is a decimal fraction with
-/// eight places. Going through `f64` rounds, and an amount off by one satoshi makes every
-/// signature committing to it invalid.
-fn btc_string_to_sats(s: &str) -> Result<u64> {
-    let s = s.trim();
-    let (whole, frac) = match s.split_once('.') {
-        Some((w, f)) => (w, f),
-        None => (s, ""),
-    };
-    if frac.len() > 8 {
-        anyhow::bail!("{s} has more precision than a satoshi");
-    }
-    let whole: u64 = whole.parse().with_context(|| format!("bad BTC amount {s}"))?;
-    let mut frac_digits = frac.to_string();
-    while frac_digits.len() < 8 {
-        frac_digits.push('0');
-    }
-    let frac: u64 = if frac_digits.is_empty() {
-        0
-    } else {
-        frac_digits.parse().with_context(|| format!("bad BTC amount {s}"))?
-    };
-    whole
-        .checked_mul(100_000_000)
-        .and_then(|w| w.checked_add(frac))
-        .ok_or_else(|| anyhow::anyhow!("{s} overflows a satoshi count"))
+/// The output fields this crate reads from `gettxout`.
+#[derive(Debug, Deserialize)]
+struct WireTxOut {
+    #[serde(with = "btc_amount")]
+    value: Amount,
+    #[serde(rename = "scriptPubKey")]
+    script_pub_key: WireScriptPubKey,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireScriptPubKey {
+    hex: String,
 }
 
 fn hex_of(bytes: &[u8]) -> String {
@@ -426,24 +407,60 @@ fn basic_auth(user: &str, pass: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The conversion that must not go through a float.
+    /// Decode a `gettxout` body carrying `value`, and return its satoshis.
+    fn gettxout_sats(value: &str) -> Result<u64, serde_json::Error> {
+        let body = format!(r#"{{"value": {value}, "scriptPubKey": {{"hex": "5120ab"}}}}"#);
+        serde_json::from_str::<WireTxOut>(&body).map(|w| w.value.to_sat())
+    }
+
+    /// Every amount Core can send arrives to the satoshi.
     #[test]
-    fn btc_amounts_convert_exactly() {
-        assert_eq!(btc_string_to_sats("1.0").unwrap(), 100_000_000);
-        assert_eq!(btc_string_to_sats("0.00000001").unwrap(), 1);
-        assert_eq!(btc_string_to_sats("50").unwrap(), 5_000_000_000);
-        assert_eq!(btc_string_to_sats("0").unwrap(), 0);
-        assert_eq!(btc_string_to_sats("21000000.0").unwrap(), 2_100_000_000_000_000);
+    fn btc_amounts_decode_exactly() {
+        // Under 1e-5 BTC: serde_json renders these as `5.46e-6`, `1e-8` — the cases that
+        // used to fail. 546 and 330 are the dust limits, so the wallet makes such outputs
+        // itself.
+        assert_eq!(gettxout_sats("0.00000546").unwrap(), 546);
+        assert_eq!(gettxout_sats("0.00000330").unwrap(), 330);
+        assert_eq!(gettxout_sats("0.00000001").unwrap(), 1);
+        assert_eq!(gettxout_sats("0.00000999").unwrap(), 999);
 
-        // The values a float gets wrong. 0.1 BTC is exactly 10_000_000 sat; via `f64` the
-        // multiplication lands just below and truncates to 9_999_999.
-        assert_eq!(btc_string_to_sats("0.1").unwrap(), 10_000_000);
-        assert_eq!(btc_string_to_sats("0.29").unwrap(), 29_000_000);
-        assert_eq!(btc_string_to_sats("1.1").unwrap(), 110_000_000);
-        assert_eq!(btc_string_to_sats("25.06084842").unwrap(), 2_506_084_842);
+        // The values a naive float conversion gets wrong: 0.1 BTC times 1e8 lands just
+        // below 10_000_000 and truncates.
+        assert_eq!(gettxout_sats("0.1").unwrap(), 10_000_000);
+        assert_eq!(gettxout_sats("0.29").unwrap(), 29_000_000);
+        assert_eq!(gettxout_sats("1.1").unwrap(), 110_000_000);
+        assert_eq!(gettxout_sats("25.06084842").unwrap(), 2_506_084_842);
 
-        assert!(btc_string_to_sats("0.000000001").is_err(), "sub-satoshi precision");
-        assert!(btc_string_to_sats("not a number").is_err());
+        assert_eq!(gettxout_sats("0").unwrap(), 0);
+        assert_eq!(gettxout_sats("50").unwrap(), 5_000_000_000);
+        assert_eq!(gettxout_sats("20999999.99999999").unwrap(), 2_099_999_999_999_999);
+
+        assert!(gettxout_sats("-0.1").is_err(), "negative");
+        assert!(gettxout_sats("0.000000001").is_err(), "sub-satoshi precision");
+    }
+
+    /// The one-satoshi step is exact across the whole range of small amounts — the range
+    /// that broke, and the one a spot check is most likely to miss.
+    #[test]
+    fn every_amount_below_a_thousand_sat_decodes() {
+        for sats in 0..=1_000u64 {
+            let btc = format!("0.{sats:08}");
+            assert_eq!(gettxout_sats(&btc).unwrap(), sats, "{btc}");
+        }
+    }
+
+    /// A small coin in a `scantxoutset` result decodes rather than failing the whole scan.
+    #[test]
+    fn a_dust_sized_utxo_does_not_fail_a_scan() {
+        let body = r#"[
+          {"txid":"2d3f2a2a71f12377fd502c2555be9f43e12b207bbc48c9905814e824034dc348",
+           "vout":0,"scriptPubKey":"5120ab","amount":0.00000546},
+          {"txid":"2d3f2a2a71f12377fd502c2555be9f43e12b207bbc48c9905814e824034dc348",
+           "vout":1,"scriptPubKey":"5120ab","amount":0.5}
+        ]"#;
+        let wire: Vec<WireScanUnspent> = serde_json::from_str(body).expect("decodes");
+        assert_eq!(wire[0].amount.to_sat(), 546);
+        assert_eq!(wire[1].amount.to_sat(), 50_000_000);
     }
 
     /// A node reports an application error in the body, not only in the status.
@@ -489,8 +506,7 @@ mod tests {
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0].vout, 0);
         assert_eq!(wire[0].height, Some(101));
-        // The amount survives as text, so it converts exactly.
-        assert_eq!(btc_string_to_sats(&wire[0].amount.to_string()).unwrap(), 2_506_084_842);
+        assert_eq!(wire[0].amount.to_sat(), 2_506_084_842);
     }
 
     /// Core reports `coinbase` and `confirmations`; both must survive decoding, since
@@ -509,9 +525,8 @@ mod tests {
         assert!(wire[0].coinbase);
         assert_eq!(wire[0].confirmations, Some(47));
         assert!(!wire[1].coinbase);
-        // ...and the amounts still convert exactly.
-        assert_eq!(btc_string_to_sats(&wire[0].amount.to_string()).unwrap(), 625_000_000);
-        assert_eq!(btc_string_to_sats(&wire[1].amount.to_string()).unwrap(), 50_000_000);
+        assert_eq!(wire[0].amount.to_sat(), 625_000_000);
+        assert_eq!(wire[1].amount.to_sat(), 50_000_000);
     }
 
     #[test]
