@@ -626,6 +626,30 @@ mod tests {
         assert!(err.contains("1296"), "{err}");
     }
 
+    fn esplora() -> BitcoinChain {
+        // Never contacted: every case below is decided before a request would be made.
+        BitcoinChain::Esplora(EsploraClient::new("https://esplora.invalid/api"))
+    }
+
+    /// Nothing has activated Simplicity on mainnet, so no config makes a covenant there
+    /// anything but a gift to miners — whatever the backend, however the chain is pinned.
+    #[test]
+    fn a_covenant_on_bitcoin_mainnet_is_refused() {
+        let err = esplora().confirm_simplicity(Network::Bitcoin, true).unwrap_err().to_string();
+        assert!(err.contains("mainnet") && err.contains("any miner"), "{err}");
+    }
+
+    /// Esplora cannot report a deployment, so a covenant needs the chain pinned.
+    #[test]
+    fn esplora_needs_a_checkpoint_to_vouch_for_simplicity() {
+        let err = esplora()
+            .confirm_simplicity(Network::BitcoinSignet, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bitcoin_checkpoint"), "{err}");
+        esplora().confirm_simplicity(Network::BitcoinSignet, true).expect("pinned chain");
+    }
+
     /// A typo in the config must not read as "this chain is wrong".
     #[test]
     fn a_malformed_checkpoint_hash_is_blamed_on_the_config() {
@@ -788,6 +812,52 @@ impl BitcoinChain {
             BitcoinChain::Esplora(c) => c.txout(outpoint),
             BitcoinChain::Rpc(c) => c.txout(outpoint),
         }
+    }
+
+    /// Fail unless this chain demonstrably executes Simplicity tapleaves.
+    ///
+    /// The config's `simplicity_activated` is a claim, and getting it wrong is not a
+    /// rejected broadcast. On a chain without the soft fork, leaf version `0xbe` is an
+    /// *unknown* leaf version, which BIP341 makes valid unconditionally: the funding
+    /// transaction is an ordinary P2TR payment that every node accepts, and the covenant
+    /// output it creates is spendable by any miner. So the claim is checked against the
+    /// chain before a covenant address is derived:
+    ///
+    /// - Bitcoin mainnet is refused outright — nothing has activated there.
+    /// - A node is asked (`getdeploymentinfo`).
+    /// - Esplora has no way to report a deployment, so the chain must be pinned by
+    ///   `bitcoin_checkpoint` (`checkpoint_pinned`), already verified on connect. That
+    ///   ties the operator's claim to one specific chain, rather than to whichever chain the
+    ///   URL happens to reach.
+    pub fn confirm_simplicity(&self, network: Network, checkpoint_pinned: bool) -> Result<()> {
+        if network.is_mainnet() {
+            anyhow::bail!(
+                "refusing a Simplicity covenant on Bitcoin mainnet: the soft fork is not \
+                 active there, so the covenant output would be spendable by any miner"
+            );
+        }
+        match self {
+            BitcoinChain::Rpc(c) => {
+                if !c.deployment_active("simplicity")? {
+                    anyhow::bail!(
+                        "the node does not report Simplicity as active (getdeploymentinfo), so \
+                         a covenant output would be spendable by any miner; \
+                         simplicity_activated in the config is not enough on its own"
+                    );
+                }
+            }
+            BitcoinChain::Esplora(_) => {
+                if !checkpoint_pinned {
+                    anyhow::bail!(
+                        "Esplora cannot report whether Simplicity is active, so the chain must \
+                         be pinned: set bitcoin_checkpoint to a block of the chain you know \
+                         runs Simplicity. Without the soft fork, a covenant output would be \
+                         spendable by any miner."
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Fail unless this backend's chain contains `checkpoint`.

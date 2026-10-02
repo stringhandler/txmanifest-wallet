@@ -30,12 +30,14 @@ pub struct Config {
     /// Whether the node this wallet talks to executes Simplicity tapleaves.
     ///
     /// Only consulted on Bitcoin networks; Elements has Simplicity live regardless. `None`
-    /// means "take the network's default", which is off for Bitcoin — no public Bitcoin
-    /// network has activated the BINANA 2026-0003 soft fork, so a user running a patched
-    /// node opts in rather than every other user opting out.
+    /// means "take the network's default", which is off for Bitcoin — the BINANA 2026-0003
+    /// soft fork is active only on chains that chose it (a patched regtest, the Simplicity
+    /// signet), so a user on one opts in rather than every other user opting out.
     ///
-    /// Configuration, not discovery: nothing probes the node. Setting it wrongly costs a
-    /// rejected broadcast, not a coin.
+    /// Necessary but not sufficient: a covenant run also checks the chain itself (see
+    /// `BitcoinChain::confirm_simplicity`). Setting this wrongly is not a rejected
+    /// broadcast — on a chain without the soft fork, a Simplicity leaf is an unknown leaf
+    /// version, and the covenant output is spendable by any miner.
     #[serde(default)]
     pub simplicity_activated: Option<bool>,
     /// Namespaced capabilities (`custom::my-feature`) the operator asserts this target

@@ -445,6 +445,13 @@ pub fn run(
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let btc_wallet = crate::bitcoin_wallet::BitcoinWallet::from_mnemonic(&w.mnemonic, target)?;
         let client = cfg.bitcoin_chain(target)?;
+        // The capability gate above believed the config; this asks the chain. Before the
+        // scan and before any covenant address exists — see `confirm_simplicity` for why a
+        // wrong belief here costs the coins rather than a broadcast.
+        if manifest.requires.contains(&crate::chain::Capability::SIMPLICITY) {
+            client.confirm_simplicity(target, cfg.bitcoin_checkpoint.is_some())?;
+            println!("  {} Simplicity confirmed on {}", style("✓").green(), target);
+        }
 
         println!("  {} Scanning {} for wallet UTXOs…", style("·").dim(), target);
         let utxos = client

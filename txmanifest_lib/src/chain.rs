@@ -615,8 +615,10 @@ impl std::error::Error for UnknownNetwork {}
 /// What the node the wallet is talking to provides, beyond its network's base rules.
 ///
 /// Configuration, not discovery: nothing here probes the node. A wallet pointed at a
-/// patched signet sets `simplicity: true` and takes responsibility for that claim; the
-/// failure mode if it is wrong is a rejected broadcast, not a lost coin.
+/// patched signet sets `simplicity: true` to claim it, and a covenant run then checks that
+/// claim against the chain before deriving any covenant address — because if it is wrong
+/// the cost is the coins, not a rejected broadcast: a Simplicity leaf on a chain without
+/// the soft fork is an unknown leaf version, which consensus accepts unconditionally.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Activation {
     /// Whether the node executes Simplicity tapleaves. Ignored on Elements networks,
