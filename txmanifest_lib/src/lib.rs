@@ -21,6 +21,7 @@ pub mod prompt;
 pub mod psbt_builder;
 pub mod pset_builder;
 pub mod schema;
+pub mod session;
 pub mod state;
 pub mod target;
 pub mod validate;

@@ -75,80 +75,6 @@ fn resolve_input_sequence(inp: &Input, ctx: &ExecutionContext) -> Result<Option<
     Ok(Some(seq))
 }
 
-/// Read a pinned outpoint's explicit amount and asset from the chain.
-///
-/// Best-effort by design: this is one network round-trip in the middle of input
-/// resolution, and a run that is offline, pointed at a lagging server, or spending a
-/// still-unconfirmed output must keep working from the manifest's declared values. So a
-/// failure warns and returns `None` rather than aborting — but when the chain does answer,
-/// it wins over everything else, because it is the only source that cannot be wrong.
-fn fetch_onchain_txout(
-    cfg: &crate::config::Config,
-    txid: &str,
-    vout: u32,
-    network: ElementsNetwork,
-) -> Option<(u64, String)> {
-    use crate::backend::{Backend, BackendKind};
-
-    let parsed = lwk_wollet::elements::Txid::from_str(txid).ok()?;
-    let kind = cfg.backend_kind();
-    let url = match kind {
-        BackendKind::Esplora => cfg.esplora_url().to_string(),
-        BackendKind::Electrum => cfg.electrum_url().to_string(),
-    };
-
-    let result = Backend::connect(kind, &url, network)
-        .and_then(|backend| backend.fetch_explicit_txout(parsed, vout));
-    match result {
-        Ok(Some((amount, asset))) => Some((amount, asset.to_string())),
-        Ok(None) => {
-            println!(
-                "  {} {txid}:{vout} is confidential — falling back to the declared amount and asset.",
-                style("[warn]").yellow()
-            );
-            None
-        }
-        Err(e) => {
-            println!(
-                "  {} Cannot read {txid}:{vout} from the chain ({e}) — falling back to the declared amount and asset.",
-                style("[warn]").yellow()
-            );
-            None
-        }
-    }
-}
-
-/// [`fetch_onchain_txout`] for a Bitcoin run: the amount of `txid:vout`, read through the
-/// run's backend, paired with the asset id Bitcoin amounts carry in the shared assembly.
-fn fetch_bitcoin_txout(
-    client: &crate::bitcoin_backend::BitcoinChain,
-    txid: &str,
-    vout: u32,
-) -> Option<(u64, String)> {
-    let asset = crate::assembly::bitcoin_policy_asset().to_string();
-    let result = txid
-        .parse()
-        .map_err(|e| anyhow::anyhow!("bad txid: {e}"))
-        .and_then(|txid| client.txout(lwk_wollet::elements::bitcoin::OutPoint { txid, vout }));
-    match result {
-        Ok(Some(out)) => Some((out.value.to_sat(), asset)),
-        Ok(None) => {
-            println!(
-                "  {} {txid}:{vout} is not on chain, or already spent — falling back to the declared amount.",
-                style("[warn]").yellow()
-            );
-            None
-        }
-        Err(e) => {
-            println!(
-                "  {} Cannot read {txid}:{vout} from the chain ({e:#}) — falling back to the declared amount.",
-                style("[warn]").yellow()
-            );
-            None
-        }
-    }
-}
-
 /// The blinding key for an address destination, honouring the output's `confidential` flag.
 ///
 /// A confidential address carries its own blinding key, and using it is the right default.
@@ -446,90 +372,14 @@ pub fn run(
         }
     }
 
-    // The Bitcoin counterpart of `wollet_opt`. Built before UTXO loading because input
-    // selection needs the scan's results, and its
-    // absence there is fatal rather than a warning: the Elements path can still do useful
-    // work without a wallet (resolving, previewing), but a Bitcoin run that reached this
-    // point has already passed the capability gate and has nothing to fall back to.
-    let bitcoin_run: Option<BitcoinRun> = if manifest.chain_family() == crate::chain::ChainFamily::Bitcoin {
-        let w = loaded_wallet
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("no wallet loaded; a Bitcoin run needs one to sign"))?;
-        let cfg = &target.config;
-        let net = target.network;
-        let btc_wallet = crate::bitcoin_wallet::BitcoinWallet::from_mnemonic(&w.mnemonic, net)?;
-        let client = cfg.bitcoin_chain(net)?;
-        // The capability gate above believed the config; this asks the chain. Before the
-        // scan and before any covenant address exists — see `confirm_simplicity` for why a
-        // wrong belief here costs the coins rather than a broadcast.
-        if manifest.requires.contains(&crate::chain::Capability::SIMPLICITY) {
-            client.confirm_simplicity(net, cfg.bitcoin_checkpoint.is_some())?;
-            println!("  {} Simplicity confirmed on {}", style("✓").green(), net);
-        }
+    // The chain this run is on, chosen once; every chain-specific question below is a
+    // method on it. Opened before UTXO loading, because on Bitcoin input selection needs the
+    // scan.
+    let session = crate::session::ChainSession::open(&manifest, target, loaded_wallet.as_ref())?;
 
-        println!("  {} Scanning {} for wallet UTXOs…", style("·").dim(), net);
-        let utxos = client
-            .scan(&btc_wallet, crate::bitcoin_backend::DEFAULT_GAP_LIMIT)
-            .context("Cannot scan for wallet UTXOs")?;
-        let total: u64 = utxos.iter().map(|u| u.value).sum();
-        println!(
-            "  {} {} UTXO(s), {} sat",
-            style("✓").green(),
-            utxos.len(),
-            style(total).yellow()
-        );
-
-        // Change and receive both go to the first unused index on their branch, so a run
-        // does not reuse an address that already has history.
-        let (_, change_index) =
-            client.next_unused(&btc_wallet, crate::bitcoin_wallet::Branch::Change)?;
-        let (_, receive_start) =
-            client.next_unused(&btc_wallet, crate::bitcoin_wallet::Branch::Receive)?;
-
-        Some(BitcoinRun { network: net, wallet: btc_wallet, client, utxos, change_index, receive_start })
-    } else {
-        None
-    };
-
-    // The network this run targets. Input selection derives both the asset it matches on
-    // and its address parser from this, so neither can drift from the other or from the
-    // UTXOs `available_utxos` below carries.
-    let run_network: Option<crate::chain::Network> = match &bitcoin_run {
-        Some(r) => Some(r.network),
-        None => loaded_wallet
-            .as_ref()
-            .map(|w| crate::chain::Network::from(wallet::elements_network(w))),
-    };
-
-    // Load UTXOs for auto-selection: from persisted LWK state on Elements, from the scan
-    // above on Bitcoin. Both arrive in the same shape so input selection is shared — see
-    // `assembly::bitcoin_spendable_utxos` for what is real and what is synthesized.
-    let available_utxos: Vec<lwk_wollet::WalletTxOut> = match &bitcoin_run {
-        Some(r) => {
-            // Immature coinbase outputs are filtered here rather than at the scan, so the
-            // scan stays a faithful report of what the wallet holds and only *selection*
-            // is restricted. The two are different questions: a freshly mined coin is
-            // genuinely ours, and a balance that omitted it would be wrong.
-            let (spendable, immature): (Vec<_>, Vec<_>) =
-                r.utxos.iter().cloned().partition(|u| u.is_spendable());
-            if !immature.is_empty() {
-                let held: u64 = immature.iter().map(|u| u.value).sum();
-                println!(
-                    "  {} Ignoring {} immature coinbase output(s) holding {} sat — \
-                     block rewards need {} confirmations before they can be spent.",
-                    style("·").dim(),
-                    immature.len(),
-                    held,
-                    crate::bitcoin_backend::COINBASE_MATURITY,
-                );
-            }
-            crate::assembly::bitcoin_spendable_utxos(&spendable)?
-        }
-        None => match &loaded_wallet {
-            Some(w) if data_dir.exists() => wallet::utxos(w, data_dir).unwrap_or_else(|_| vec![]),
-            _ => vec![],
-        },
-    };
+    let run_network: Option<crate::chain::Network> = session.network();
+    let available_utxos: Vec<lwk_wollet::WalletTxOut> =
+        session.spendable_utxos(loaded_wallet.as_ref(), data_dir)?;
     let available_explicit: Vec<lwk_wollet::ExternalUtxo> = match &loaded_wallet {
         Some(w) if data_dir.exists() => {
             wallet::explicit_utxos(w, data_dir).unwrap_or_else(|_| vec![])
@@ -817,19 +667,7 @@ pub fn run(
                 // fact about the chain, so reading the amount and asset off it beats any
                 // number the manifest or the operator supplies — those can be wrong, and
                 // a wrong amount is the value the sighash commits to.
-                let onchain = match &bitcoin_run {
-                    // Through the run's own backend. The Elements lookup below asks the
-                    // Elements backend, which knows nothing of a Bitcoin txid: it failed,
-                    // every fallback was empty, and the input resolved to 0 sat.
-                    Some(r) => fetch_bitcoin_txout(&r.client, &ov.txid, ov.vout),
-                    None => fetch_onchain_txout(
-                        &target.config,
-                        &ov.txid,
-                        ov.vout,
-                        loaded_wallet.as_ref().map(wallet::elements_network)
-                            .unwrap_or(ElementsNetwork::LiquidTestnet),
-                    ),
-                };
+                let onchain = session.txout(target, loaded_wallet.as_ref(), &ov.txid, ov.vout);
                 let asset = onchain
                     .as_ref()
                     .map(|(_, asset)| asset.clone())
@@ -1249,18 +1087,8 @@ pub fn run(
         // Everything chain-specific this block needs goes through here. See
         // `crate::assembly`: the assembly itself is shared, and only these seven
         // operations differ between Elements and Bitcoin.
-        let elements_ctx = crate::assembly::ElementsContext { wollet, network: net };
-        let bitcoin_ctx = bitcoin_run.as_ref().map(|r| crate::assembly::BitcoinContext {
-            wallet: &r.wallet,
-            network: r.network,
-            receive_start: r.receive_start,
-            change_index: r.change_index,
-            utxos: r.utxos.clone(),
-        });
-        let actx: &dyn crate::assembly::AssemblyContext = match &bitcoin_ctx {
-            Some(b) => b,
-            None => &elements_ctx,
-        };
+        let assembly_ctx = session.assembly_context(wollet, net);
+        let actx: &dyn crate::assembly::AssemblyContext = assembly_ctx.as_dyn();
 
         // ---- Populate input attrs for issuance inputs (needed by output asset resolution) ----
         for inp in action.inputs.as_deref().unwrap_or_default() {
@@ -1957,21 +1785,9 @@ pub fn run(
             // draft, then re-evaluate any output amount that referenced `fee`. The
             // amounts don't affect the tx vsize, so the draft gives the right size.
             if out_amount_formulas.iter().filter_map(|(_, f)| f.as_ref()).any(amount_uses_fee_keyword) {
-                // Estimating on the chain the transaction is actually for. This used to
-                // call the Elements estimator unconditionally, which on a Bitcoin run asks
-                // an LWK wallet about a UTXO it has never heard of. The `fee` keyword then
-                // cannot resolve, and every output amount that depends on it is wrong by
-                // exactly the fee.
-                let estimate = match &bitcoin_run {
-                    Some(r) => (|| -> Result<u64> {
-                        let change = r
-                            .wallet
-                            .script_pubkey(crate::bitcoin_wallet::Branch::Change, r.change_index)?;
-                        let psbt_req = crate::psbt_builder::from_pset_request(&req, Some(change))?;
-                        crate::psbt_builder::estimate_fee(&psbt_req)
-                    })(),
-                    None => pset_builder::estimate_fee(wollet, net, &req),
-                };
+                // On the chain the transaction is actually for; see
+                // `ChainSession::estimate_fee`.
+                let estimate = session.estimate_fee(wollet, net, &req);
                 match estimate {
                     Ok(est) => {
                         ctx.set_fee(est);
@@ -2078,9 +1894,12 @@ pub fn run(
                 let params_snap = compile_params_map.clone();
                 let action_params_snap = action_params_map.clone();
                 let wallet_snap = loaded_wallet.clone();
+                let bitcoin_run = session
+                    .bitcoin()
+                    .ok_or_else(|| anyhow::anyhow!("a Bitcoin build with no Bitcoin session"))?;
                 match run_bitcoin_build(
                     &req,
-                    &bitcoin_run,
+                    bitcoin_run,
                     export_pset_path,
                     &covenant_specs,
                     &params_snap,
@@ -5379,23 +5198,6 @@ fn check_target_capabilities(manifest: &Manifest, bound: &crate::target::Target)
 }
 
 
-/// What a Bitcoin run needs beyond the shared assembly: a wallet to sign with and a node
-/// to broadcast to.
-pub(crate) struct BitcoinRun {
-    /// The Bitcoin network this run targets.
-    ///
-    /// Carried rather than derived from `network_for_asset`, which is an `ElementsNetwork`
-    /// computed from the wallet file's mainnet flag and is meaningless here. Taking it from
-    /// there would hand the covenant derivation the wrong chain.
-    pub network: crate::chain::Network,
-    pub wallet: crate::bitcoin_wallet::BitcoinWallet,
-    /// Whichever backend the config selects — Esplora or a node's JSON-RPC.
-    pub client: crate::bitcoin_backend::BitcoinChain,
-    pub utxos: Vec<crate::bitcoin_backend::Utxo>,
-    pub change_index: u32,
-    pub receive_start: u32,
-}
-
 /// Build, sign and broadcast a Bitcoin transaction from the assembled request.
 ///
 /// The Elements path spreads these across several interactive steps because a PSET passes
@@ -5424,7 +5226,7 @@ pub(crate) struct CovenantSpendSpec {
 #[allow(clippy::too_many_arguments)]
 fn run_bitcoin_build(
     req: &pset_builder::BuildPsetRequest,
-    run: &Option<BitcoinRun>,
+    run: &crate::session::BitcoinRun,
     export_path: Option<&Path>,
     covenant_specs: &std::collections::HashMap<String, CovenantSpendSpec>,
     compile_params: &std::collections::HashMap<String, String>,
@@ -5434,10 +5236,6 @@ fn run_bitcoin_build(
     intent: Option<&str>,
 ) -> Result<Option<BitcoinBroadcast>> {
     use crate::psbt_builder;
-
-    let run = run
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("no Bitcoin wallet loaded for this run"))?;
 
     let change_script = run
         .wallet
