@@ -485,12 +485,18 @@ mod tests {
             crate::wallet::descriptor(&w).unwrap(),
         )
         .unwrap();
-        let c = ElementsContext { wollet: &wollet, network: lwk_wollet::ElementsNetwork::LiquidTestnet };
+        let c = ElementsContext {
+            wollet: &wollet,
+            network: lwk_wollet::ElementsNetwork::LiquidTestnet,
+        };
 
         let first = c.receive_address(None).unwrap();
         let second = c.receive_address(Some(first.index)).unwrap();
         let third = c.receive_address(Some(second.index)).unwrap();
-        assert_eq!((second.index, third.index), (first.index + 1, first.index + 2));
+        assert_eq!(
+            (second.index, third.index),
+            (first.index + 1, first.index + 2)
+        );
         assert_ne!(first.script_pubkey, second.script_pubkey);
         assert_ne!(second.script_pubkey, third.script_pubkey);
     }
