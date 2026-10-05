@@ -94,7 +94,11 @@ impl TxReview {
                 let destination = Address::from_script(&o.script_pubkey, btc_network)
                     .map(|a| a.to_string())
                     .unwrap_or_else(|_| format!("script {}", o.script_pubkey.to_hex_string()));
-                ReviewOutput { amount: o.value.to_sat(), destination, owner }
+                ReviewOutput {
+                    amount: o.value.to_sat(),
+                    destination,
+                    owner,
+                }
             })
             .collect::<Vec<_>>();
 
@@ -110,23 +114,42 @@ impl TxReview {
         // Recomputed from what the transaction spends and pays, not taken from the builder:
         // this screen is the last look before the money moves, so it should not inherit an
         // error from the code it is checking.
-        let total_in = inputs.iter().try_fold(0u64, |acc, i| acc.checked_add(i.amount));
-        let total_out = outputs.iter().try_fold(0u64, |acc, o| acc.checked_add(o.amount));
+        let total_in = inputs
+            .iter()
+            .try_fold(0u64, |acc, i| acc.checked_add(i.amount));
+        let total_out = outputs
+            .iter()
+            .try_fold(0u64, |acc, o| acc.checked_add(o.amount));
         let fee = match (total_in, total_out) {
             (Some(i), Some(o)) if i >= o => i - o,
             _ => anyhow::bail!("transaction pays out more than it spends"),
         };
 
-        Ok(TxReview { network, inputs, outputs, fee, vsize: tx.vsize() as u64 })
+        Ok(TxReview {
+            network,
+            inputs,
+            outputs,
+            fee,
+            vsize: tx.vsize() as u64,
+        })
     }
 
     /// What this wallet gains (positive) or loses (negative): outputs paying it, minus the
     /// inputs its keys spend. Covenant inputs are not counted as the wallet's — the coins
     /// were already locked away — so unlocking one to the wallet reads as a gain.
     pub fn wallet_net(&self) -> i64 {
-        let gained: u64 =
-            self.outputs.iter().filter(|o| o.owner.is_wallet()).map(|o| o.amount).sum();
-        let spent: u64 = self.inputs.iter().filter(|i| i.wallet).map(|i| i.amount).sum();
+        let gained: u64 = self
+            .outputs
+            .iter()
+            .filter(|o| o.owner.is_wallet())
+            .map(|o| o.amount)
+            .sum();
+        let spent: u64 = self
+            .inputs
+            .iter()
+            .filter(|i| i.wallet)
+            .map(|i| i.amount)
+            .sum();
         gained as i64 - spent as i64
     }
 
@@ -139,10 +162,15 @@ impl TxReview {
         println!();
         println!(
             "{}",
-            style(format!("=== Review transaction ({}) ===", self.network)).bold().cyan()
+            style(format!("=== Review transaction ({}) ===", self.network))
+                .bold()
+                .cyan()
         );
         if self.network.is_mainnet() {
-            println!("  {}", style("MAINNET — this spends real bitcoin.").bold().red());
+            println!(
+                "  {}",
+                style("MAINNET — this spends real bitcoin.").bold().red()
+            );
         }
         if let Some(intent) = intent {
             println!("  {}", style(intent).bold());
@@ -177,12 +205,25 @@ impl TxReview {
         println!(
             "  Fee  {}  {}",
             style(sats(self.fee)).yellow(),
-            style(format!("({:.2} sat/vB over {} vB)", self.fee_rate(), self.vsize)).dim()
+            style(format!(
+                "({:.2} sat/vB over {} vB)",
+                self.fee_rate(),
+                self.vsize
+            ))
+            .dim()
         );
 
         let net = self.wallet_net();
-        let net_text = format!("{}{}", if net >= 0 { "+" } else { "−" }, sats(net.unsigned_abs()));
-        let net_text = if net >= 0 { style(net_text).green() } else { style(net_text).red() };
+        let net_text = format!(
+            "{}{}",
+            if net >= 0 { "+" } else { "−" },
+            sats(net.unsigned_abs())
+        );
+        let net_text = if net >= 0 {
+            style(net_text).green()
+        } else {
+            style(net_text).red()
+        };
         println!("  Net effect on your wallet: {}", net_text.bold());
     }
 }
@@ -244,7 +285,10 @@ mod tests {
     }
 
     fn out(amount: u64, script_pubkey: ScriptBuf) -> TxOut {
-        TxOut { value: Amount::from_sat(amount), script_pubkey }
+        TxOut {
+            value: Amount::from_sat(amount),
+            script_pubkey,
+        }
     }
 
     /// A payment: the payee is "not your wallet", the change is, and the net effect is what
@@ -256,13 +300,24 @@ mod tests {
         let change = w.script_pubkey(Branch::Change, 4).unwrap();
         let t = tx(vec![out(150_000, payee), out(849_700, change)], 1);
 
-        let r = TxReview::new(&t, &[wallet_input(1_000_000, &w)], &w, Network::BitcoinSignet, 4, 0)
-            .unwrap();
+        let r = TxReview::new(
+            &t,
+            &[wallet_input(1_000_000, &w)],
+            &w,
+            Network::BitcoinSignet,
+            4,
+            0,
+        )
+        .unwrap();
         assert_eq!(r.outputs[0].owner, Owner::Other);
         assert_eq!(r.outputs[1].owner, Owner::Change(4));
         assert_eq!(r.fee, 300);
         assert_eq!(r.wallet_net(), -150_300);
-        assert!(r.outputs[0].destination.starts_with("tb1p"), "{}", r.outputs[0].destination);
+        assert!(
+            r.outputs[0].destination.starts_with("tb1p"),
+            "{}",
+            r.outputs[0].destination
+        );
     }
 
     /// Unlocking a covenant to the wallet is a gain: the covenant input is not the wallet's.
@@ -272,11 +327,16 @@ mod tests {
         let covenant = PsbtInput::Covenant {
             input_id: "vault_in".to_string(),
             outpoint: OutPoint::null(),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51, 0x20].into_iter().chain([9u8; 32]).collect()),
+            script_pubkey: ScriptBuf::from_bytes(
+                vec![0x51, 0x20].into_iter().chain([9u8; 32]).collect(),
+            ),
             amount: 1_000_000,
             sequence: None,
         };
-        let t = tx(vec![out(999_700, w.script_pubkey(Branch::Receive, 3).unwrap())], 1);
+        let t = tx(
+            vec![out(999_700, w.script_pubkey(Branch::Receive, 3).unwrap())],
+            1,
+        );
 
         let r = TxReview::new(&t, &[covenant], &w, Network::BitcoinSignet, 0, 3).unwrap();
         assert_eq!(r.outputs[0].owner, Owner::Receive(3));
@@ -288,18 +348,38 @@ mod tests {
     #[test]
     fn an_op_return_output_is_shown_as_its_script() {
         let w = wallet();
-        let t = tx(vec![out(0, ScriptBuf::from_bytes(vec![0x6a, 0x01, 0xff]))], 1);
-        let r = TxReview::new(&t, &[wallet_input(1_000, &w)], &w, Network::BitcoinSignet, 0, 0)
-            .unwrap();
+        let t = tx(
+            vec![out(0, ScriptBuf::from_bytes(vec![0x6a, 0x01, 0xff]))],
+            1,
+        );
+        let r = TxReview::new(
+            &t,
+            &[wallet_input(1_000, &w)],
+            &w,
+            Network::BitcoinSignet,
+            0,
+            0,
+        )
+        .unwrap();
         assert_eq!(r.outputs[0].destination, "script 6a01ff");
     }
 
     #[test]
     fn a_transaction_paying_out_more_than_it_spends_is_refused() {
         let w = wallet();
-        let t = tx(vec![out(2_000, w.script_pubkey(Branch::Change, 0).unwrap())], 1);
-        assert!(TxReview::new(&t, &[wallet_input(1_000, &w)], &w, Network::BitcoinSignet, 0, 0)
-            .is_err());
+        let t = tx(
+            vec![out(2_000, w.script_pubkey(Branch::Change, 0).unwrap())],
+            1,
+        );
+        assert!(TxReview::new(
+            &t,
+            &[wallet_input(1_000, &w)],
+            &w,
+            Network::BitcoinSignet,
+            0,
+            0
+        )
+        .is_err());
     }
 
     #[test]

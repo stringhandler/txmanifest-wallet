@@ -88,7 +88,12 @@ impl BitcoinWallet {
         let seed = parsed.to_seed("");
         let root = Xpriv::new_master(bitcoin_network(network), &seed)
             .map_err(|e| anyhow::anyhow!("cannot derive master key: {e}"))?;
-        Ok(Self { root, network, account: 0, secp: Secp256k1::new() })
+        Ok(Self {
+            root,
+            network,
+            account: 0,
+            secp: Secp256k1::new(),
+        })
     }
 
     pub fn network(&self) -> Network {
@@ -97,7 +102,11 @@ impl BitcoinWallet {
 
     /// `m/86'/coin'/account'` — the account this wallet's addresses hang off.
     pub fn account_path(&self) -> DerivationPath {
-        let coin = if self.network.is_mainnet() { COIN_MAINNET } else { COIN_TESTNET };
+        let coin = if self.network.is_mainnet() {
+            COIN_MAINNET
+        } else {
+            COIN_TESTNET
+        };
         DerivationPath::from(vec![
             hardened(PURPOSE),
             hardened(coin),
@@ -154,11 +163,18 @@ impl BitcoinWallet {
     /// output commits to. Signing with the internal key produces a well-formed BIP340
     /// signature that simply does not verify — which is why the tweak happens here rather
     /// than being left to the caller to remember.
-    pub fn sign_key_path(&self, branch: Branch, index: u32, sighash: &[u8; 32]) -> Result<[u8; 64]> {
+    pub fn sign_key_path(
+        &self,
+        branch: Branch,
+        index: u32,
+        sighash: &[u8; 32],
+    ) -> Result<[u8; 64]> {
         let keypair = self.keypair(branch, index)?;
         let tweaked: TweakedKeypair = keypair.tap_tweak(&self.secp, None);
         let msg = Message::from_digest(*sighash);
-        let sig = self.secp.sign_schnorr_no_aux_rand(&msg, &tweaked.to_keypair());
+        let sig = self
+            .secp
+            .sign_schnorr_no_aux_rand(&msg, &tweaked.to_keypair());
         Ok(sig.serialize())
     }
 
@@ -177,7 +193,10 @@ impl BitcoinWallet {
             .map_err(|e| anyhow::anyhow!("key derivation failed for '{path}': {e}"))?;
         let keypair = Keypair::from_secret_key(&self.secp, &xpriv.private_key);
         let msg = Message::from_digest(*sighash);
-        Ok(self.secp.sign_schnorr_no_aux_rand(&msg, &keypair).serialize())
+        Ok(self
+            .secp
+            .sign_schnorr_no_aux_rand(&msg, &keypair)
+            .serialize())
     }
 
     /// The x-only public key at an arbitrary path, as 64 hex chars.
@@ -321,7 +340,10 @@ mod tests {
         // Every test network shares coin type 1'.
         let regtest = BitcoinWallet::from_mnemonic(MNEMONIC, Network::BitcoinRegtest).unwrap();
         assert_eq!(regtest.account_path(), signet.account_path());
-        assert_eq!(wallet().key_path(Branch::Change, 7).to_string(), "86'/0'/0'/1/7");
+        assert_eq!(
+            wallet().key_path(Branch::Change, 7).to_string(),
+            "86'/0'/0'/1/7"
+        );
     }
 
     /// Test networks share a derivation path but not an address encoding, so the same key

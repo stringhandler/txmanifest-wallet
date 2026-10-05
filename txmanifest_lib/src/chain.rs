@@ -477,7 +477,10 @@ impl Capabilities {
         if self.is_empty() {
             return "none".to_string();
         }
-        self.iter().map(Capability::to_string).collect::<Vec<_>>().join(", ")
+        self.iter()
+            .map(Capability::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -789,19 +792,43 @@ mod tests {
 
     #[test]
     fn chain_family_accepts_the_spellings_already_in_use() {
-        assert_eq!("liquid".parse::<ChainFamily>().unwrap(), ChainFamily::Elements);
-        assert_eq!("elements".parse::<ChainFamily>().unwrap(), ChainFamily::Elements);
-        assert_eq!("Bitcoin".parse::<ChainFamily>().unwrap(), ChainFamily::Bitcoin);
-        assert_eq!("  BTC ".parse::<ChainFamily>().unwrap(), ChainFamily::Bitcoin);
+        assert_eq!(
+            "liquid".parse::<ChainFamily>().unwrap(),
+            ChainFamily::Elements
+        );
+        assert_eq!(
+            "elements".parse::<ChainFamily>().unwrap(),
+            ChainFamily::Elements
+        );
+        assert_eq!(
+            "Bitcoin".parse::<ChainFamily>().unwrap(),
+            ChainFamily::Bitcoin
+        );
+        assert_eq!(
+            "  BTC ".parse::<ChainFamily>().unwrap(),
+            ChainFamily::Bitcoin
+        );
         assert!("cross-chain".parse::<ChainFamily>().is_err());
     }
 
     #[test]
     fn taproot_tags_are_domain_separated_on_elements_only() {
-        assert_eq!(ChainFamily::Elements.taproot_tag(TaprootTag::Branch), "TapBranch/elements");
-        assert_eq!(ChainFamily::Bitcoin.taproot_tag(TaprootTag::Branch), "TapBranch");
-        assert_eq!(ChainFamily::Elements.taproot_tag(TaprootTag::Leaf), "TapLeaf/elements");
-        assert_eq!(ChainFamily::Bitcoin.taproot_tag(TaprootTag::Leaf), "TapLeaf");
+        assert_eq!(
+            ChainFamily::Elements.taproot_tag(TaprootTag::Branch),
+            "TapBranch/elements"
+        );
+        assert_eq!(
+            ChainFamily::Bitcoin.taproot_tag(TaprootTag::Branch),
+            "TapBranch"
+        );
+        assert_eq!(
+            ChainFamily::Elements.taproot_tag(TaprootTag::Leaf),
+            "TapLeaf/elements"
+        );
+        assert_eq!(
+            ChainFamily::Bitcoin.taproot_tag(TaprootTag::Leaf),
+            "TapLeaf"
+        );
     }
 
     /// The properties that replaced the old declarable capabilities. These are read off
@@ -840,7 +867,10 @@ mod tests {
 
         // The capabilities removed in favour of reading `chain` are refused the same way.
         for gone in ["multi-asset", "asset-issuance", "confidential-amounts"] {
-            assert!(gone.parse::<Capability>().is_err(), "{gone} should no longer parse");
+            assert!(
+                gone.parse::<Capability>().is_err(),
+                "{gone} should no longer parse"
+            );
         }
     }
 
@@ -866,7 +896,10 @@ mod tests {
     /// spellings would then be one capability here and possibly two to whoever defined it.
     #[test]
     fn only_core_names_are_normalized() {
-        assert_eq!("SIMPLICITY".parse::<Capability>().unwrap(), Capability::SIMPLICITY);
+        assert_eq!(
+            "SIMPLICITY".parse::<Capability>().unwrap(),
+            Capability::SIMPLICITY
+        );
         let a: Capability = "custom::my_feature".parse().unwrap();
         let b: Capability = "custom::my-feature".parse().unwrap();
         assert_ne!(a, b, "namespaced names must be taken verbatim");
@@ -882,7 +915,10 @@ mod tests {
             "custom::-leading-dash",
             "custom::has space",
         ] {
-            assert!(bad.parse::<Capability>().is_err(), "{bad:?} should not parse");
+            assert!(
+                bad.parse::<Capability>().is_err(),
+                "{bad:?} should not parse"
+            );
         }
     }
 
@@ -935,8 +971,8 @@ mod tests {
     fn a_covenant_manifest_is_gated_on_bitcoin_activation() {
         let requires = Capabilities::from_iter([Capability::SIMPLICITY]);
 
-        let stock = Network::BitcoinSignet
-            .capabilities(&Activation::default_for(Network::BitcoinSignet));
+        let stock =
+            Network::BitcoinSignet.capabilities(&Activation::default_for(Network::BitcoinSignet));
         assert_eq!(
             requires.missing_from(&stock),
             vec![Capability::SIMPLICITY],
@@ -954,14 +990,21 @@ mod tests {
     fn legacy_network_names_stay_bound_to_elements() {
         // A config written before Bitcoin support existed must not be reinterpreted.
         assert_eq!("mainnet".parse::<Network>().unwrap(), Network::Liquid);
-        assert_eq!("testnet".parse::<Network>().unwrap(), Network::LiquidTestnet);
+        assert_eq!(
+            "testnet".parse::<Network>().unwrap(),
+            Network::LiquidTestnet
+        );
         assert_eq!("signet".parse::<Network>().unwrap(), Network::BitcoinSignet);
         assert!("liquid-signet".parse::<Network>().is_err());
     }
 
     #[test]
     fn elements_networks_round_trip_through_lwk() {
-        for n in [Network::Liquid, Network::LiquidTestnet, Network::ElementsRegtest] {
+        for n in [
+            Network::Liquid,
+            Network::LiquidTestnet,
+            Network::ElementsRegtest,
+        ] {
             let lwk = n.elements_network().expect("elements network maps");
             assert_eq!(Network::from(lwk), n);
         }

@@ -1,0 +1,6 @@
+# The schema test compares the checked-in schema byte-for-byte against the string the
+# Rust model generates, which always uses LF. Without this, a Windows checkout rewrites
+# the file to CRLF and `checked_in_schema_matches_the_model` fails on that alone.
+*.json text eol=lf
+*.rs   text eol=lf
+*.yml  text eol=lf

@@ -84,7 +84,11 @@ impl RpcClient {
                 );
             }
         }
-        Ok(Self { url, auth, agent: ureq::AgentBuilder::new().build() })
+        Ok(Self {
+            url,
+            auth,
+            agent: ureq::AgentBuilder::new().build(),
+        })
     }
 
     /// A client reading credentials from a node's `.cookie` file.
@@ -119,8 +123,12 @@ impl RpcClient {
 
     /// Issue one JSON-RPC call and return its `result`.
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
-        let body = json!({"jsonrpc": "1.0", "id": "txmanifest", "method": method, "params": params});
-        let mut req = self.agent.post(&self.url).set("Content-Type", "application/json");
+        let body =
+            json!({"jsonrpc": "1.0", "id": "txmanifest", "method": method, "params": params});
+        let mut req = self
+            .agent
+            .post(&self.url)
+            .set("Content-Type", "application/json");
         if let Some((user, pass)) = &self.auth {
             req = req.set("Authorization", &basic_auth(user, pass));
         }
@@ -182,16 +190,26 @@ impl RpcClient {
             }
         }
 
-        let Some(deployments) = info.get("deployments") else { return Ok(false) };
+        let Some(deployments) = info.get("deployments") else {
+            return Ok(false);
+        };
         let Some(entry) = deployments.get(name).or_else(|| {
-            deployments
-                .as_object()
-                .and_then(|m| m.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v))
+            deployments.as_object().and_then(|m| {
+                m.iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .map(|(_, v)| v)
+            })
         }) else {
             return Ok(false);
         };
-        Ok(entry.get("active").and_then(Value::as_bool).unwrap_or(false)
-            || entry.get("bip9").and_then(|b| b.get("status")).and_then(Value::as_str)
+        Ok(entry
+            .get("active")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || entry
+                .get("bip9")
+                .and_then(|b| b.get("status"))
+                .and_then(Value::as_str)
                 == Some("active"))
     }
 
@@ -219,7 +237,10 @@ impl RpcClient {
     /// `gettxout` rather than `getrawtransaction`: it needs no `-txindex`, and it reads the
     /// UTXO set, so a spent outpoint comes back empty instead of looking spendable.
     pub fn txout(&self, outpoint: OutPoint) -> Result<Option<TxOut>> {
-        let v = self.call("gettxout", json!([outpoint.txid.to_string(), outpoint.vout, true]))?;
+        let v = self.call(
+            "gettxout",
+            json!([outpoint.txid.to_string(), outpoint.vout, true]),
+        )?;
         if v.is_null() {
             return Ok(None);
         }
@@ -237,7 +258,11 @@ impl RpcClient {
         let hashes = self.call("generatetoaddress", json!([blocks, address.to_string()]))?;
         Ok(hashes
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default())
     }
 
@@ -261,16 +286,18 @@ impl RpcClient {
         if result.get("success").and_then(Value::as_bool) == Some(false) {
             anyhow::bail!("scantxoutset did not complete");
         }
-        let wire: Vec<WireScanUnspent> = serde_json::from_value(
-            result.get("unspents").cloned().unwrap_or_else(|| json!([])),
-        )
-        .context("cannot decode scantxoutset unspents")?;
+        let wire: Vec<WireScanUnspent> =
+            serde_json::from_value(result.get("unspents").cloned().unwrap_or_else(|| json!([])))
+                .context("cannot decode scantxoutset unspents")?;
 
         wire.into_iter()
             .map(|u| {
                 Ok(ScannedOutput {
                     outpoint: OutPoint {
-                        txid: u.txid.parse().with_context(|| format!("bad txid {}", u.txid))?,
+                        txid: u
+                            .txid
+                            .parse()
+                            .with_context(|| format!("bad txid {}", u.txid))?,
                         vout: u.vout,
                     },
                     script_pubkey: ScriptBuf::from_bytes(
@@ -374,7 +401,10 @@ fn parse_rpc_result(body: &str) -> Result<Value> {
         .with_context(|| format!("response is not JSON: {}", body.trim()))?;
     if let Some(err) = v.get("error") {
         if !err.is_null() {
-            let msg = err.get("message").and_then(Value::as_str).unwrap_or("unknown error");
+            let msg = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error");
             let code = err.get("code").and_then(Value::as_i64).unwrap_or(0);
             anyhow::bail!("node error {code}: {msg}");
         }
@@ -408,7 +438,9 @@ impl RpcTarget {
             "http" => false,
             other => anyhow::bail!("bitcoin_rpc_url must be http or https, not {other}"),
         };
-        let host = url.host().ok_or_else(|| anyhow::anyhow!("bitcoin_rpc_url has no host"))?;
+        let host = url
+            .host()
+            .ok_or_else(|| anyhow::anyhow!("bitcoin_rpc_url has no host"))?;
         // By address, plus the one name that is loopback by definition (RFC 6761). Any other
         // name could resolve anywhere, so it does not count, however local it looks.
         let loopback = match &host {
@@ -416,7 +448,11 @@ impl RpcTarget {
             url::Host::Ipv6(ip) => ip.is_loopback(),
             url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
         };
-        Ok(Self { host: host.to_string(), loopback, https })
+        Ok(Self {
+            host: host.to_string(),
+            loopback,
+            https,
+        })
     }
 }
 
@@ -522,10 +558,16 @@ mod tests {
 
         assert_eq!(gettxout_sats("0").unwrap(), 0);
         assert_eq!(gettxout_sats("50").unwrap(), 5_000_000_000);
-        assert_eq!(gettxout_sats("20999999.99999999").unwrap(), 2_099_999_999_999_999);
+        assert_eq!(
+            gettxout_sats("20999999.99999999").unwrap(),
+            2_099_999_999_999_999
+        );
 
         assert!(gettxout_sats("-0.1").is_err(), "negative");
-        assert!(gettxout_sats("0.000000001").is_err(), "sub-satoshi precision");
+        assert!(
+            gettxout_sats("0.000000001").is_err(),
+            "sub-satoshi precision"
+        );
     }
 
     /// The one-satoshi step is exact across the whole range of small amounts — the range
@@ -555,12 +597,16 @@ mod tests {
     /// A node reports an application error in the body, not only in the status.
     #[test]
     fn rpc_errors_surface_the_nodes_own_message() {
-        let body = r#"{"result":null,"error":{"code":-26,"message":"min relay fee not met"},"id":"x"}"#;
+        let body =
+            r#"{"result":null,"error":{"code":-26,"message":"min relay fee not met"},"id":"x"}"#;
         let err = parse_rpc_result(body).unwrap_err().to_string();
         assert!(err.contains("min relay fee not met"), "{err}");
         assert!(err.contains("-26"), "{err}");
 
-        assert_eq!(parse_rpc_error(body).unwrap(), "node error -26: min relay fee not met");
+        assert_eq!(
+            parse_rpc_error(body).unwrap(),
+            "node error -26: min relay fee not met"
+        );
     }
 
     #[test]
@@ -682,7 +728,10 @@ mod tests {
         assert_eq!(parse_cookie("__cookie__:"), None, "empty password");
         assert_eq!(parse_cookie("tx:manifest"), None, "not a cookie user");
         assert_eq!(parse_cookie("__cookie__:not-hex!"), None);
-        assert_eq!(parse_cookie(&format!("__cookie__:{}", "a".repeat(129))), None);
+        assert_eq!(
+            parse_cookie(&format!("__cookie__:{}", "a".repeat(129))),
+            None
+        );
         // The attack this guards against: a wallet file read as a cookie.
         let wallet = r#"{"network":"bitcoin-signet","mnemonic":"abandon abandon about"}"#;
         assert_eq!(parse_cookie(wallet), None);
@@ -694,12 +743,21 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("txm-cookie-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("wallet.json");
-        std::fs::write(&path, r#"{"network":"bitcoin-signet","mnemonic":"zoo zoo wrong"}"#)
-            .unwrap();
+        std::fs::write(
+            &path,
+            r#"{"network":"bitcoin-signet","mnemonic":"zoo zoo wrong"}"#,
+        )
+        .unwrap();
 
-        let err = format!("{:#}", RpcClient::with_cookie("http://127.0.0.1:18443", &path).unwrap_err());
+        let err = format!(
+            "{:#}",
+            RpcClient::with_cookie("http://127.0.0.1:18443", &path).unwrap_err()
+        );
         assert!(err.contains("not a Bitcoin Core RPC cookie"), "{err}");
-        assert!(!err.contains("zoo"), "the file's contents leaked into the error: {err}");
+        assert!(
+            !err.contains("zoo"),
+            "the file's contents leaked into the error: {err}"
+        );
 
         let big = dir.join("big");
         std::fs::write(&big, format!("__cookie__:{}", "a".repeat(400))).unwrap();
@@ -720,7 +778,9 @@ mod tests {
         std::fs::write(&real, format!("__cookie__:{}", "c".repeat(64))).unwrap();
 
         for remote in ["https://node.example.com", "http://192.168.1.20:8332"] {
-            let err = RpcClient::with_cookie(remote, &real).unwrap_err().to_string();
+            let err = RpcClient::with_cookie(remote, &real)
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("this machine"), "{remote}: {err}");
         }
     }

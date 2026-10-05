@@ -60,12 +60,18 @@ impl Report {
 
     /// Number of error-severity issues.
     pub fn errors(&self) -> usize {
-        self.issues.iter().filter(|i| i.severity == Severity::Error).count()
+        self.issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .count()
     }
 
     /// Number of warning-severity issues.
     pub fn warnings(&self) -> usize {
-        self.issues.iter().filter(|i| i.severity == Severity::Warning).count()
+        self.issues
+            .iter()
+            .filter(|i| i.severity == Severity::Warning)
+            .count()
     }
 
     /// True when there are no errors (warnings are allowed).
@@ -100,12 +106,7 @@ fn param_types(
 /// hook fires at a fixed point in the flow, with no `.simf` path, network or wallet
 /// threaded through it. Rejecting the rest here — rather than at run time — keeps a
 /// manifest from parsing cleanly and then silently skipping an assignment.
-fn check_hook(
-    report: &mut Report,
-    loc: &str,
-    hook: &crate::manifest::HookBlock,
-    action: &Action,
-) {
+fn check_hook(report: &mut Report, loc: &str, hook: &crate::manifest::HookBlock, action: &Action) {
     use crate::manifest::ParamCompute;
     for (target, spec) in &hook.set {
         let tloc = format!("{loc}.set.{target}");
@@ -126,7 +127,9 @@ fn check_hook(
                 );
             }
         }
-        let Some(compute) = spec.as_spec() else { continue }; // bare expression: fine
+        let Some(compute) = spec.as_spec() else {
+            continue;
+        }; // bare expression: fine
         match compute {
             ParamCompute::Expr { .. } => {}
             ParamCompute::Wallet { .. } => report.error(
@@ -152,17 +155,26 @@ pub fn validate(manifest: &Manifest) -> Report {
     let mut report = Report::default();
 
     let no_types = std::collections::BTreeMap::new();
-    let utxo_types: &std::collections::BTreeMap<String, crate::manifest::UtxoType> = manifest
-        .utxo_types
-        .as_ref()
-        .unwrap_or(&no_types);
+    let utxo_types: &std::collections::BTreeMap<String, crate::manifest::UtxoType> =
+        manifest.utxo_types.as_ref().unwrap_or(&no_types);
 
     // Collect every action, whether top-level or a class method, tagged with a
     // dot-path location and its bare name (for lifecycle cross-checks).
-    let mut actions: Vec<(String, String, &Action, std::collections::BTreeMap<String, String>, bool)> =
-        Vec::new();
+    let mut actions: Vec<(
+        String,
+        String,
+        &Action,
+        std::collections::BTreeMap<String, String>,
+        bool,
+    )> = Vec::new();
     for (name, action) in &manifest.actions {
-        actions.push((format!("actions.{name}"), name.clone(), action, param_types(action, None), false));
+        actions.push((
+            format!("actions.{name}"),
+            name.clone(),
+            action,
+            param_types(action, None),
+            false,
+        ));
     }
     if let Some(contract_templates) = &manifest.contract_templates {
         for (cname, cdef) in contract_templates {
@@ -204,7 +216,14 @@ pub fn validate(manifest: &Manifest) -> Report {
     let mut referenced: BTreeSet<String> = BTreeSet::new();
 
     for (loc, _bare, action, field_types, in_template) in &actions {
-        check_action(&mut report, utxo_types, &mut referenced, loc, action, *in_template);
+        check_action(
+            &mut report,
+            utxo_types,
+            &mut referenced,
+            loc,
+            action,
+            *in_template,
+        );
         check_ui(&mut report, loc, action, field_types);
     }
 
@@ -245,8 +264,10 @@ pub fn validate_programs(manifest: &Manifest, base_dir: &std::path::Path) -> Rep
     // Witness list per utxo_type. Several types routinely share one `.simf` (deadcat's four
     // market states are one program under four tapdata leaves), so parse per source path and
     // let the types share the result.
-    let mut by_source: std::collections::BTreeMap<std::path::PathBuf, Result<std::collections::BTreeMap<String, String>, String>> =
-        std::collections::BTreeMap::new();
+    let mut by_source: std::collections::BTreeMap<
+        std::path::PathBuf,
+        Result<std::collections::BTreeMap<String, String>, String>,
+    > = std::collections::BTreeMap::new();
     let mut by_type: std::collections::BTreeMap<&str, &std::collections::BTreeMap<String, String>> =
         std::collections::BTreeMap::new();
 
@@ -268,7 +289,9 @@ pub fn validate_programs(manifest: &Manifest, base_dir: &std::path::Path) -> Rep
         });
     }
     for (name, ut) in utxo_types {
-        let Some(source) = ut.script.as_ref().and_then(|s| s.source.as_ref()) else { continue };
+        let Some(source) = ut.script.as_ref().and_then(|s| s.source.as_ref()) else {
+            continue;
+        };
         match by_source.get(&base_dir.join(source)) {
             Some(Ok(types)) => {
                 by_type.insert(name.as_str(), types);
@@ -299,8 +322,12 @@ pub fn validate_programs(manifest: &Manifest, base_dir: &std::path::Path) -> Rep
 
     for (loc, action) in actions {
         for input in action.inputs.iter().flatten() {
-            let Some(type_name) = input.utxo_type_name() else { continue };
-            let Some(program) = by_type.get(type_name.as_str()) else { continue };
+            let Some(type_name) = input.utxo_type_name() else {
+                continue;
+            };
+            let Some(program) = by_type.get(type_name.as_str()) else {
+                continue;
+            };
             check_witnesses_against_program(
                 &mut report,
                 &format!("{loc}.inputs.{}.witnesses", input.id),
@@ -328,7 +355,10 @@ fn check_witnesses_against_program(
     witnesses: &Option<Value>,
 ) {
     let empty = serde_json::Map::new();
-    let declared = witnesses.as_ref().and_then(Value::as_object).unwrap_or(&empty);
+    let declared = witnesses
+        .as_ref()
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
 
     // `taproot_leaf` selects which leaf to spend; the program never reads it.
     let is_leaf_selector =
@@ -383,23 +413,24 @@ fn check_action(
         let mut input_ids: BTreeSet<&str> = BTreeSet::new();
         for input in inputs {
             if !input_ids.insert(input.id.as_str()) {
-                report.error(format!("{loc}.inputs"), format!("duplicate input id '{}'", input.id));
+                report.error(
+                    format!("{loc}.inputs"),
+                    format!("duplicate input id '{}'", input.id),
+                );
             }
             let iloc = format!("{loc}.inputs.{}", input.id);
             match &input.utxo_source {
                 Value::String(s) if s == "wallet" => {}
-                Value::Object(m) if m.contains_key("utxo_type") => {
-                    match m["utxo_type"].as_str() {
-                        Some(name) => {
-                            referenced.insert(name.to_string());
-                            if !utxo_types.contains_key(name) {
-                                report.error(&iloc, format!("references unknown utxo_type '{name}'"));
-                            }
-                            check_utxo_site(report, utxo_types, &iloc, name, &input.utxo_source);
+                Value::Object(m) if m.contains_key("utxo_type") => match m["utxo_type"].as_str() {
+                    Some(name) => {
+                        referenced.insert(name.to_string());
+                        if !utxo_types.contains_key(name) {
+                            report.error(&iloc, format!("references unknown utxo_type '{name}'"));
                         }
-                        None => report.error(&iloc, "utxo_source.utxo_type is not a string"),
+                        check_utxo_site(report, utxo_types, &iloc, name, &input.utxo_source);
                     }
-                }
+                    None => report.error(&iloc, "utxo_source.utxo_type is not a string"),
+                },
                 Value::Object(m) if m.contains_key("if") => {} // conditional — not checked
                 // An error, not a warning: the engine refuses to build with one of these
                 // (it cannot tell where the UTXO comes from), so a warning would
@@ -423,15 +454,39 @@ fn check_action(
         let mut output_ids: BTreeSet<&str> = BTreeSet::new();
         for output in outputs {
             if !output_ids.insert(output.id.as_str()) {
-                report.error(format!("{loc}.outputs"), format!("duplicate output id '{}'", output.id));
+                report.error(
+                    format!("{loc}.outputs"),
+                    format!("duplicate output id '{}'", output.id),
+                );
             }
             let oloc = format!("{loc}.outputs.{}", output.id);
-            let requires_amount = check_destination(report, utxo_types, referenced, &oloc, &output.destination.0);
+            let requires_amount =
+                check_destination(report, utxo_types, referenced, &oloc, &output.destination.0);
             let optional = output.optional.unwrap_or(false);
             if requires_amount && output.amount_sat.is_none() && !optional {
                 report.error(oloc, "missing amount_sat (required for this destination)");
             }
         }
+    }
+
+    // --- Change and fee balance -------------------------------------------
+    // Only for an action that actually builds a transaction. One with no inputs or no
+    // outputs fails earlier, for a different reason, and would only collect a second
+    // error saying the same thing twice.
+    if action.inputs.iter().flatten().next().is_some()
+        && action.outputs.iter().flatten().next().is_some()
+        && !lbtc_surplus_has_a_home(action)
+    {
+        report.error(
+            loc,
+            "nowhere for an L-BTC surplus to go: no output declares \"destination\": \
+             \"change\", \"allow_change\" is \"none\", and no amount_sat is sized with the \
+             `fee` keyword. The inputs would then have to equal the outputs plus a fee that \
+             is only known once the transaction is built, so the build stops rather than \
+             handing the difference to a miner. Set \"allow_change\": \"lbtc_only\" (what a \
+             wallet-funded action usually wants), declare a change output, or size an output \
+             with `fee`.",
+        );
     }
 
     // --- Hooks ------------------------------------------------------------
@@ -445,7 +500,12 @@ fn check_action(
     }
     for input in action.inputs.iter().flatten() {
         if let Some(hook) = &input.on_resolved {
-            check_hook(report, &format!("{loc}.inputs.{}.on_resolved", input.id), hook, action);
+            check_hook(
+                report,
+                &format!("{loc}.inputs.{}.on_resolved", input.id),
+                hook,
+                action,
+            );
         }
     }
 
@@ -456,12 +516,20 @@ fn check_action(
     let hook_targets: BTreeSet<&str> = [&action.on_pre_broadcast, &action.on_post_broadcast]
         .into_iter()
         .flatten()
-        .chain(action.inputs.iter().flatten().filter_map(|i| i.on_resolved.as_ref()))
+        .chain(
+            action
+                .inputs
+                .iter()
+                .flatten()
+                .filter_map(|i| i.on_resolved.as_ref()),
+        )
         .flat_map(|h| h.set.keys())
         .filter_map(|t| t.strip_prefix("params."))
         .collect();
     for (name, def) in action.params.iter().flatten() {
-        if def.compute.as_ref().is_some_and(|c| c.is_hook()) && !hook_targets.contains(name.as_str()) {
+        if def.compute.as_ref().is_some_and(|c| c.is_hook())
+            && !hook_targets.contains(name.as_str())
+        {
             report.error(
                 format!("{loc}.params.{name}"),
                 "declares compute {\"type\": \"hook\"} but no hook in this action sets \
@@ -481,6 +549,37 @@ fn check_action(
             "create_instance is only legal on an action inside a contract template;              the instance created is always of that template",
         );
     }
+}
+
+/// Whether an L-BTC surplus this action produces would have somewhere to go.
+///
+/// Three spellings give it a home, and the builder accepts no others: an output with
+/// `"destination": "change"`, an `allow_change` setting that covers the policy asset, or an
+/// `amount_sat` that references the reserved `fee` keyword — which sizes an output to
+/// consume the inputs exactly, as a recursive covenant does.
+///
+/// With none of the three, the action builds only when its inputs happen to equal its
+/// outputs plus a fee nobody knows until the transaction is sized. Worth catching here
+/// because the failure otherwise arrives after coin selection and covenant compilation —
+/// and because before `allow_change` existed, that same manifest quietly paid the
+/// difference to a miner.
+///
+/// Deliberately lenient in one place: any declared change output counts, whatever asset it
+/// names. An `asset` is usually a reference (`instance.COLLATERAL_ASSET_ID`) that resolves
+/// only against a network, so refusing to guess is what keeps this from erroring on a
+/// manifest that works. An action that declares change for a token but not for L-BTC still
+/// gets caught — by the builder, where the assets are known.
+fn lbtc_surplus_has_a_home(action: &Action) -> bool {
+    if action.allow_change != crate::manifest::AllowChange::None {
+        return true;
+    }
+    action.outputs.iter().flatten().any(|output| {
+        output.destination.as_str() == Some("change")
+            || output
+                .amount_sat
+                .as_ref()
+                .is_some_and(crate::lifecycle::amount_uses_fee_keyword)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -599,7 +698,10 @@ fn check_ui(
         match modifier {
             Some("symbol") => worst += UI_TOKEN_SYMBOL_WIDTH,
             Some(other) => {
-                report.warn(&uloc, format!("unknown token modifier ':{other}' in '{{{token}}}'"));
+                report.warn(
+                    &uloc,
+                    format!("unknown token modifier ':{other}' in '{{{token}}}'"),
+                );
                 worst += UI_TOKEN_AMOUNT_WIDTH;
             }
             None if is_hashed => {
@@ -711,7 +813,10 @@ fn check_issuance(report: &mut Report, loc: &str, issuance: &Option<Value>) {
 fn check_witnesses(report: &mut Report, loc: &str, witnesses: &Option<Value>) {
     let Some(witnesses) = witnesses else { return };
     let Some(map) = witnesses.as_object() else {
-        report.error(loc.to_string(), "witnesses must be an object (name → definition)");
+        report.error(
+            loc.to_string(),
+            "witnesses must be an object (name → definition)",
+        );
         return;
     };
     for (name, def) in map {
@@ -735,14 +840,21 @@ fn check_witnesses(report: &mut Report, loc: &str, witnesses: &Option<Value>) {
         match obj.get("type").and_then(Value::as_str) {
             None => report.error(
                 wloc,
-                format!("witness '{name}' is missing a string \"type\" and will be ignored at run time"),
+                format!(
+                    "witness '{name}' is missing a string \"type\" and will be ignored at run time"
+                ),
             ),
             Some("simplicityhl") => {
-                let value_ok = obj.get("value").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty());
+                let value_ok = obj
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty());
                 if !value_ok {
                     report.error(
                         wloc,
-                        format!("simplicityhl witness '{name}' is missing a non-empty string \"value\""),
+                        format!(
+                            "simplicityhl witness '{name}' is missing a non-empty string \"value\""
+                        ),
                     );
                 }
             }
@@ -779,7 +891,9 @@ fn check_utxo_site(
     type_name: &str,
     site: &Value,
 ) {
-    let Some(ut) = utxo_types.get(type_name) else { return };
+    let Some(ut) = utxo_types.get(type_name) else {
+        return;
+    };
     let args = site
         .get(crate::manifest::SITE_ARGS_KEY)
         .and_then(Value::as_object);
@@ -790,9 +904,7 @@ fn check_utxo_site(
         if args.is_some() {
             report.error(
                 loc.to_string(),
-                format!(
-                    "'args' has nothing to bind: utxo_type '{type_name}' declares no `params`"
-                ),
+                format!("'args' has nothing to bind: utxo_type '{type_name}' declares no `params`"),
             );
         }
         return;
@@ -856,7 +968,10 @@ fn check_destination(
             if let Some(name) = m.get("utxo_type").and_then(Value::as_str) {
                 referenced.insert(name.to_string());
                 if !utxo_types.contains_key(name) {
-                    report.error(oloc.to_string(), format!("destination references unknown utxo_type '{name}'"));
+                    report.error(
+                        oloc.to_string(),
+                        format!("destination references unknown utxo_type '{name}'"),
+                    );
                 }
                 check_utxo_site(report, utxo_types, oloc, name, destination);
                 true
@@ -866,19 +981,28 @@ fn check_destination(
                 match t {
                     "op_return" | "burn" | "fee" => false,
                     other => {
-                        report.error(oloc.to_string(), format!("unknown destination type '{other}'"));
+                        report.error(
+                            oloc.to_string(),
+                            format!("unknown destination type '{other}'"),
+                        );
                         false
                     }
                 }
             } else if m.contains_key("if") {
                 false // conditional — not checked
             } else {
-                report.error(oloc.to_string(), format!("unrecognized destination: {destination}"));
+                report.error(
+                    oloc.to_string(),
+                    format!("unrecognized destination: {destination}"),
+                );
                 false
             }
         }
         other => {
-            report.error(oloc.to_string(), format!("destination must be a string or object, got {other}"));
+            report.error(
+                oloc.to_string(),
+                format!("destination must be a string or object, got {other}"),
+            );
             false
         }
     }
@@ -903,7 +1027,12 @@ mod tests {
     }
 
     fn messages(report: &Report) -> String {
-        report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n")
+        report
+            .issues
+            .iter()
+            .map(|i| i.message.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -945,16 +1074,30 @@ mod tests {
             .find(|i| i.message.contains("native assets"))
             .expect("asset mismatch must be reported");
         assert_eq!(issue.location, "actions.A.outputs.o0.asset");
-        assert!(issue.message.contains("chain 'bitcoin' has no native assets"), "{}", issue.message);
+        assert!(
+            issue
+                .message
+                .contains("chain 'bitcoin' has no native assets"),
+            "{}",
+            issue.message
+        );
         // Nothing suggests adding a capability, because no capability would help.
-        assert!(!messages(&report).contains("to `requires`"), "{}", messages(&report));
+        assert!(
+            !messages(&report).contains("to `requires`"),
+            "{}",
+            messages(&report)
+        );
     }
 
     /// Naming the policy asset is single-asset behaviour and stays clean on Bitcoin — this
     /// is how the portable examples in this repo are written.
     #[test]
     fn naming_the_policy_asset_is_fine_on_bitcoin() {
-        let report = validate(&caps_manifest("bitcoin", r#"["simplicity"]"#, r#", "asset": "lbtc""#));
+        let report = validate(&caps_manifest(
+            "bitcoin",
+            r#"["simplicity"]"#,
+            r#", "asset": "lbtc""#,
+        ));
         assert!(report.is_ok(), "{:?}", report.issues);
     }
 
@@ -976,11 +1119,18 @@ mod tests {
         assert!(msg.contains("has no confidential amounts"), "{msg}");
         // ...and all of it is clean on Elements, with no `requires` entries needed.
         let elements = Manifest::from_json_str(
-            &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../examples/deadcat_v3/txmanifest.json"))
-                .expect("read deadcat_v3"),
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../examples/deadcat_v3/txmanifest.json"
+            ))
+            .expect("read deadcat_v3"),
         )
         .expect("deadcat_v3 parses");
-        assert!(elements.chain_mismatches().is_empty(), "{:?}", elements.chain_mismatches());
+        assert!(
+            elements.chain_mismatches().is_empty(),
+            "{:?}",
+            elements.chain_mismatches()
+        );
     }
 
     #[test]
@@ -994,7 +1144,11 @@ mod tests {
         )
         .expect("manifest should parse");
         let report = validate(&m);
-        assert!(report.is_ok(), "overdeclaring must not block a run: {:?}", report.issues);
+        assert!(
+            report.is_ok(),
+            "overdeclaring must not block a run: {:?}",
+            report.issues
+        );
         assert!(
             messages(&report).contains("declares 'simplicity' but nothing"),
             "{}",
@@ -1062,19 +1216,30 @@ mod tests {
 
         // `DEBT` has no default and is not bound.
         let report = validate_site(r#"{ "utxo_type": "vault" }"#);
-        let msg = report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n");
+        let msg = report
+            .issues
+            .iter()
+            .map(|i| i.message.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(!report.is_ok(), "unbound required param must be an error");
         assert!(msg.contains("DEBT"), "{msg}");
         assert!(!msg.contains("STATE"), "STATE has a default: {msg}");
 
         // Bound → clean. `STATE` still takes its default.
-        let report = validate_site(r#"{ "utxo_type": "vault", "args": { "DEBT": "params.claim" } }"#);
+        let report =
+            validate_site(r#"{ "utxo_type": "vault", "args": { "DEBT": "params.claim" } }"#);
         assert!(report.is_ok(), "{:?}", report.issues);
 
         // A misspelled binding is an error, not a silent no-op.
         let report =
             validate_site(r#"{ "utxo_type": "vault", "args": { "DEBT": "1", "STAT": "0x00" } }"#);
-        let msg = report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n");
+        let msg = report
+            .issues
+            .iter()
+            .map(|i| i.message.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(msg.contains("STAT"), "{msg}");
 
         // `args` against a type with no interface binds nothing — say so.
@@ -1087,7 +1252,12 @@ mod tests {
         )
         .unwrap();
         let report = validate(&manifest);
-        let msg = report.issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>().join("\n");
+        let msg = report
+            .issues
+            .iter()
+            .map(|i| i.message.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(msg.contains("declares no `params`"), "{msg}");
     }
 
@@ -1153,7 +1323,10 @@ mod tests {
         let report = validate_with_input_witnesses(serde_json::json!({
             "ORACLE_SIGNATURE": "unusued"
         }));
-        assert!(has_error_at(&report, "actions.A.inputs.in0.witnesses.ORACLE_SIGNATURE"));
+        assert!(has_error_at(
+            &report,
+            "actions.A.inputs.in0.witnesses.ORACLE_SIGNATURE"
+        ));
     }
 
     /// The witness list a program declares, in the shape `validate_programs` reads it
@@ -1216,7 +1389,11 @@ mod tests {
                 "PTAH": { "type": "simplicityhl", "value": "Left(())" }
             }),
         );
-        assert!(has_error_at(&report, "loc.PTAH"), "got: {:?}", report.issues);
+        assert!(
+            has_error_at(&report, "loc.PTAH"),
+            "got: {:?}",
+            report.issues
+        );
     }
 
     #[test]
@@ -1276,17 +1453,20 @@ mod tests {
     /// Build a one-method contract template whose method carries the given `ui`,
     /// with `PRINCIPAL_ASSET_ID` (an asset) and `AMOUNT` (a u64) declared as fields.
     fn validate_with_ui(intent: Option<&str>, legs: Value) -> Report {
-        let manifest: Manifest = Manifest::from_json_str(&serde_json::json!({
-            "manifest_version": "0.3.0",
-            "protocol": "test",
-            "contract_templates": { "T": {
-                "fields": {
-                    "PRINCIPAL_ASSET_ID": { "type": "liquid.asset_id" },
-                    "AMOUNT": { "type": "u64" }
-                },
-                "actions": { "M": { "intent": intent, "outputs": legs } }
-            }}
-        }).to_string())
+        let manifest: Manifest = Manifest::from_json_str(
+            &serde_json::json!({
+                "manifest_version": "0.3.0",
+                "protocol": "test",
+                "contract_templates": { "T": {
+                    "fields": {
+                        "PRINCIPAL_ASSET_ID": { "type": "liquid.asset_id" },
+                        "AMOUNT": { "type": "u64" }
+                    },
+                    "actions": { "M": { "intent": intent, "outputs": legs } }
+                }}
+            })
+            .to_string(),
+        )
         .expect("test manifest should parse");
         validate(&manifest)
     }
@@ -1359,10 +1539,7 @@ mod tests {
         // Short template, but each bare numeric token can render 21 chars, so the
         // worst case is what must be measured.
         let tokens = "{instance.AMOUNT} ".repeat(8);
-        let report = validate_with_ui(
-            Some(tokens.as_str()),
-            serde_json::json!([]),
-        );
+        let report = validate_with_ui(Some(tokens.as_str()), serde_json::json!([]));
         let errs = errors_at(&report, "contract_templates.T.actions.M.intent");
         assert!(
             errs.iter().any(|m| m.contains("worst-case rendered")),
@@ -1544,6 +1721,118 @@ mod tests {
             report.issues
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Change / fee balance
+    // -----------------------------------------------------------------------
+
+    /// One action named `Fund`, whose body is spliced in verbatim.
+    fn report_for_action(body: &str) -> Report {
+        let manifest = Manifest::from_json_str(&format!(
+            r#"{{ "manifest_version": "0.3.0", "protocol": "t",
+                  "actions": {{ "Fund": {{ {body} }} }} }}"#
+        ))
+        .expect("manifest should parse");
+        validate(&manifest)
+    }
+
+    /// Only the surplus finding. The fixtures are minimal and trip other checks — an
+    /// asset reference with no template to resolve it, say — which are not what is
+    /// under test here.
+    fn surplus_errors(report: &Report) -> Vec<String> {
+        report
+            .issues
+            .iter()
+            .filter(|i| {
+                i.severity == Severity::Error && i.message.contains("nowhere for an L-BTC surplus")
+            })
+            .map(|i| i.message.clone())
+            .collect()
+    }
+
+    const WALLET_INPUT: &str = r#""inputs": [ { "id": "in0", "utxo_source": "wallet" } ],"#;
+
+    /// The mistake this check exists for: an action funded from a wallet UTXO, with
+    /// fixed-amount outputs and nothing that says where the rest goes. The builder
+    /// refuses it, but only after coin selection and covenant compilation — and before
+    /// `allow_change` existed it handed the difference to a miner without a word. Here it
+    /// is caught by a command that touches no wallet and no network.
+    #[test]
+    fn an_action_with_nowhere_to_put_a_surplus_is_an_error() {
+        let report = report_for_action(&format!(
+            r#"{WALLET_INPUT}
+               "outputs": [ {{ "id": "o0", "destination": "wallet", "amount_sat": "10000" }} ]"#
+        ));
+        let found = surplus_errors(&report);
+        assert_eq!(found.len(), 1, "{:?}", report.issues);
+        assert!(found[0].contains("allow_change"), "{}", found[0]);
+        assert!(found[0].contains("change output"), "{}", found[0]);
+    }
+
+    /// The three spellings that give a surplus a home. None may trip the check.
+    #[test]
+    fn allow_change_a_change_output_and_fee_sizing_each_satisfy_the_check() {
+        let fixed_out = r#"{ "id": "o0", "destination": "wallet", "amount_sat": "10000" }"#;
+        for body in [
+            // `allow_change`, in both spellings that cover the policy asset.
+            format!(r#""allow_change": "lbtc_only", {WALLET_INPUT} "outputs": [ {fixed_out} ]"#),
+            format!(r#""allow_change": "any", {WALLET_INPUT} "outputs": [ {fixed_out} ]"#),
+            // A declared change output. Its asset is a reference that resolves only
+            // against a network, and it counts anyway — see `lbtc_surplus_has_a_home`.
+            format!(
+                r#"{WALLET_INPUT} "outputs": [ {fixed_out},
+                   {{ "id": "chg", "destination": "change", "asset": "instance.COLLATERAL_ASSET_ID" }} ]"#
+            ),
+            // An output sized by the fee consumes the inputs exactly, which is how a
+            // covenant that pins the fee's output index balances without change.
+            format!(
+                r#"{WALLET_INPUT} "outputs": [ {{ "id": "o0", "destination": "wallet",
+                   "amount_sat": "inputs.in0.amount - fee" }} ]"#
+            ),
+        ] {
+            let report = report_for_action(&body);
+            assert!(
+                surplus_errors(&report).is_empty(),
+                "{body}\ngot: {:?}",
+                report.issues
+            );
+        }
+    }
+
+    /// `fee_rate` is not the `fee` keyword — the builder matches whole tokens, and a
+    /// check that read it more loosely would bless a manifest the build then refuses.
+    #[test]
+    fn a_fee_rate_reference_is_not_sizing_by_the_fee() {
+        let report = report_for_action(&format!(
+            r#"{WALLET_INPUT}
+               "outputs": [ {{ "id": "o0", "destination": "wallet",
+                              "amount_sat": "10000 * params.fee_rate" }} ]"#
+        ));
+        assert_eq!(surplus_errors(&report).len(), 1, "{:?}", report.issues);
+    }
+
+    /// An action missing its inputs or its outputs builds no transaction at all, and
+    /// already fails for that reason. A second error saying the same thing twice from a
+    /// different angle helps nobody.
+    #[test]
+    fn an_action_that_builds_no_transaction_is_left_alone() {
+        let outputs_only = report_for_action(
+            r#""outputs": [ { "id": "o0", "destination": "wallet", "amount_sat": "10000" } ]"#,
+        );
+        assert!(
+            surplus_errors(&outputs_only).is_empty(),
+            "{:?}",
+            outputs_only.issues
+        );
+
+        let inputs_only =
+            report_for_action(r#""inputs": [ { "id": "in0", "utxo_source": "wallet" } ]"#);
+        assert!(
+            surplus_errors(&inputs_only).is_empty(),
+            "{:?}",
+            inputs_only.issues
+        );
+    }
 }
 
 /// Cross-check `requires` against what the manifest uses, and the manifest against its chain.
@@ -1573,7 +1862,9 @@ fn check_capabilities(report: &mut Report, manifest: &Manifest) {
         if !declared.contains(used) {
             report.error(
                 "requires",
-                format!("manifest uses '{used}' but does not declare it; add \"{used}\" to `requires`"),
+                format!(
+                    "manifest uses '{used}' but does not declare it; add \"{used}\" to `requires`"
+                ),
             );
         }
     }
@@ -1593,10 +1884,7 @@ fn check_capabilities(report: &mut Report, manifest: &Manifest) {
     for m in manifest.chain_mismatches() {
         report.error(
             m.location.clone(),
-            format!(
-                "uses {} but chain '{family}' has no {}",
-                m.uses, m.missing
-            ),
+            format!("uses {} but chain '{family}' has no {}", m.uses, m.missing),
         );
     }
 }

@@ -90,8 +90,7 @@ fn a_scanned_utxo_becomes_a_signed_transaction() {
 
     // 3. Narrow to Bitcoin.
     let change = w.script_pubkey(Branch::Change, 0).expect("change spk");
-    let psbt_req =
-        psbt_builder::from_pset_request(&req, Some(change.clone())).expect("narrows");
+    let psbt_req = psbt_builder::from_pset_request(&req, Some(change.clone())).expect("narrows");
 
     // 4. Build.
     let mut built = psbt_builder::build_psbt(&psbt_req).expect("builds");
@@ -100,17 +99,34 @@ fn a_scanned_utxo_becomes_a_signed_transaction() {
     assert_eq!(built.change_index, Some(1));
 
     // The fee is a leftover on Bitcoin, so it is only right if it equals what is left.
-    let out_total: u64 = built.psbt.unsigned_tx.output.iter().map(|o| o.value.to_sat()).sum();
+    let out_total: u64 = built
+        .psbt
+        .unsigned_tx
+        .output
+        .iter()
+        .map(|o| o.value.to_sat())
+        .sum();
     assert_eq!(200_000 - out_total, built.fee);
-    assert!(built.fee > 0 && built.fee < 10_000, "implausible fee: {}", built.fee);
+    assert!(
+        built.fee > 0 && built.fee < 10_000,
+        "implausible fee: {}",
+        built.fee
+    );
 
     // The recipient gets exactly what was declared; change takes the rest.
     assert_eq!(built.psbt.unsigned_tx.output[0].script_pubkey, recipient());
-    assert_eq!(built.psbt.unsigned_tx.output[0].value, Amount::from_sat(120_000));
+    assert_eq!(
+        built.psbt.unsigned_tx.output[0].value,
+        Amount::from_sat(120_000)
+    );
     assert_eq!(built.psbt.unsigned_tx.output[1].script_pubkey, change);
 
     // 5. Sign.
-    let plan = [KeyPathSigner { input_index: 0, branch: Branch::Receive, index: 0 }];
+    let plan = [KeyPathSigner {
+        input_index: 0,
+        branch: Branch::Receive,
+        index: 0,
+    }];
     let sighash = psbt_builder::key_path_sighash(&built.psbt, 0).expect("sighash");
     psbt_builder::sign_key_path_inputs(&mut built.psbt, &w, &plan).expect("signs");
 
@@ -128,7 +144,11 @@ fn a_scanned_utxo_becomes_a_signed_transaction() {
     psbt_builder::finalize_key_path_inputs(&mut built.psbt).expect("finalizes");
     let tx = psbt_builder::extract_tx(built.psbt).expect("extracts");
     assert_eq!(tx.input.len(), 1);
-    assert_eq!(tx.input[0].witness.len(), 1, "one 64-byte key-path signature");
+    assert_eq!(
+        tx.input[0].witness.len(),
+        1,
+        "one 64-byte key-path signature"
+    );
     assert_eq!(tx.input[0].witness.iter().next().unwrap().len(), 64);
 
     // A signed transaction must serialize, or nothing can broadcast it.
@@ -178,7 +198,10 @@ fn utxos_from_both_branches_keep_their_derivation() {
     for (scanned, synth) in utxos.iter().zip(&spendable) {
         assert_eq!(synth.unblinded.value, scanned.value);
         assert_eq!(synth.wildcard_index, scanned.index);
-        assert_eq!(synth.script_pubkey.as_bytes(), scanned.script_pubkey.as_bytes());
+        assert_eq!(
+            synth.script_pubkey.as_bytes(),
+            scanned.script_pubkey.as_bytes()
+        );
         let expected_chain = match scanned.branch {
             Branch::Receive => lwk_wollet::Chain::External,
             Branch::Change => lwk_wollet::Chain::Internal,
@@ -242,7 +265,6 @@ fn a_covenant_input_is_refused_rather_than_left_unsigned() {
     );
 }
 
-
 /// Address parsing must follow the chain, and a failure must not be survivable.
 ///
 /// Both call sites used to parse every manifest address as an `elements::Address`, which
@@ -262,10 +284,15 @@ fn manifest_addresses_parse_for_the_chain_in_play() {
         parsed.script_pubkey.as_bytes(),
         w.script_pubkey(Branch::Receive, 0).unwrap().as_bytes()
     );
-    assert!(parsed.blinding_pubkey.is_none(), "Bitcoin addresses carry no blinding key");
+    assert!(
+        parsed.blinding_pubkey.is_none(),
+        "Bitcoin addresses carry no blinding key"
+    );
 
     // ...and it is genuinely what the Elements parser rejects, which is why this mattered.
-    assert!(signet_addr.parse::<lwk_wollet::elements::Address>().is_err());
+    assert!(signet_addr
+        .parse::<lwk_wollet::elements::Address>()
+        .is_err());
     assert!(parse_destination(&signet_addr, Network::LiquidTestnet).is_err());
 }
 
@@ -286,7 +313,6 @@ fn an_address_for_the_wrong_bitcoin_network_is_refused() {
         .to_string();
     assert!(err.contains("bitcoin-signet"), "{err}");
 }
-
 
 /// The `fee` keyword must be estimated on the chain the transaction is for.
 ///
@@ -317,10 +343,16 @@ fn the_fee_keyword_is_estimable_on_bitcoin() {
 
     let psbt_req = psbt_builder::from_pset_request(&req, None).expect("narrows");
     let fee = psbt_builder::estimate_fee(&psbt_req).expect("estimates");
-    assert!(fee > 0, "a transaction with an input costs something to relay");
+    assert!(
+        fee > 0,
+        "a transaction with an input costs something to relay"
+    );
     assert!(fee < 10_000, "implausible fee for one input: {fee}");
 
     // The rate is what was asked for, within the rounding a whole-vbyte size imposes.
     let vsize = fee as f32 / 2.0;
-    assert!(vsize > 50.0 && vsize < 200.0, "implied vsize {vsize} is not a real transaction");
+    assert!(
+        vsize > 50.0 && vsize < 200.0,
+        "implied vsize {vsize} is not a real transaction"
+    );
 }

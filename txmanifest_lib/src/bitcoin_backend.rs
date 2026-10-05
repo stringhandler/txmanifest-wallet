@@ -160,7 +160,12 @@ struct WireAddress {
 ///
 /// `script_pubkey`, `branch` and `index` come from the caller, because the response
 /// describes outputs without saying whose they are — the request already settled that.
-fn parse_utxos(body: &str, script_pubkey: &ScriptBuf, branch: Branch, index: u32) -> Result<Vec<Utxo>> {
+fn parse_utxos(
+    body: &str,
+    script_pubkey: &ScriptBuf,
+    branch: Branch,
+    index: u32,
+) -> Result<Vec<Utxo>> {
     let wire: Vec<WireUtxo> =
         serde_json::from_str(body).context("cannot decode Esplora UTXO listing")?;
     wire.into_iter()
@@ -168,14 +173,21 @@ fn parse_utxos(body: &str, script_pubkey: &ScriptBuf, branch: Branch, index: u32
             // Esplora prints txids in the reversed (display) order that `Txid`'s FromStr
             // expects, so parsing the string is correct where reading raw bytes would not
             // be.
-            let txid: Txid = u.txid.parse().with_context(|| format!("bad txid {:?}", u.txid))?;
+            let txid: Txid = u
+                .txid
+                .parse()
+                .with_context(|| format!("bad txid {:?}", u.txid))?;
             Ok(Utxo {
                 outpoint: OutPoint { txid, vout: u.vout },
                 value: u.value,
                 script_pubkey: script_pubkey.clone(),
                 branch,
                 index,
-                height: if u.status.confirmed { u.status.block_height } else { None },
+                height: if u.status.confirmed {
+                    u.status.block_height
+                } else {
+                    None
+                },
                 // Esplora's UTXO listing does not say whether an output is a coinbase.
                 coinbase: None,
             })
@@ -212,7 +224,9 @@ fn parse_fee_estimate(body: &str, target_blocks: u16) -> Result<Option<f32>> {
         serde_json::from_str(body).context("cannot decode Esplora fee estimates")?;
     let mut best: Option<(u16, f64)> = None;
     for (k, v) in map {
-        let Ok(blocks) = k.parse::<u16>() else { continue };
+        let Ok(blocks) = k.parse::<u16>() else {
+            continue;
+        };
         if blocks < target_blocks {
             continue;
         }
@@ -235,7 +249,9 @@ pub struct EsploraClient {
 
 impl std::fmt::Debug for EsploraClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EsploraClient").field("base_url", &self.base_url).finish()
+        f.debug_struct("EsploraClient")
+            .field("base_url", &self.base_url)
+            .finish()
     }
 }
 
@@ -312,7 +328,12 @@ impl EsploraClient {
     pub fn broadcast(&self, tx: &Transaction) -> Result<Txid> {
         let url = format!("{}/tx", self.base_url);
         let hex = serialize_hex(tx);
-        let resp = match self.agent.post(&url).set("Content-Type", "text/plain").send_string(&hex) {
+        let resp = match self
+            .agent
+            .post(&url)
+            .set("Content-Type", "text/plain")
+            .send_string(&hex)
+        {
             Ok(r) => r.into_string().unwrap_or_default(),
             Err(ureq::Error::Status(status, r)) => {
                 let body = r.into_string().unwrap_or_default();
@@ -331,7 +352,9 @@ impl EsploraClient {
         // does not exist.
         let expected = tx.compute_txid();
         if returned != expected {
-            anyhow::bail!("broadcast returned txid {returned}, but the sent transaction is {expected}");
+            anyhow::bail!(
+                "broadcast returned txid {returned}, but the sent transaction is {expected}"
+            );
         }
         Ok(returned)
     }
@@ -498,7 +521,9 @@ mod tests {
         let stats = r#"{"chain_stats":{"funded_txo_count":141,"spent_txo_count":141,"tx_count":153},
                         "mempool_stats":{"tx_count":0}}"#;
         assert!(parse_address_used(stats).unwrap());
-        assert!(parse_utxos("[]", &spk(), Branch::Receive, 0).unwrap().is_empty());
+        assert!(parse_utxos("[]", &spk(), Branch::Receive, 0)
+            .unwrap()
+            .is_empty());
     }
 
     /// Block rewards need 100 confirmations. Selecting one early builds a transaction the
@@ -506,7 +531,9 @@ mod tests {
     /// the default outcome rather than an edge case.
     #[test]
     fn immature_coinbase_outputs_are_not_spendable() {
-        let mut u = parse_utxos(UTXO_BODY, &spk(), Branch::Receive, 0).unwrap().remove(0);
+        let mut u = parse_utxos(UTXO_BODY, &spk(), Branch::Receive, 0)
+            .unwrap()
+            .remove(0);
 
         // Not a coinbase: always spendable.
         assert!(u.coinbase.is_none());
@@ -515,7 +542,9 @@ mod tests {
         u.coinbase = Some(CoinbaseInfo { confirmations: 99 });
         assert!(!u.is_spendable(), "one short of maturity");
 
-        u.coinbase = Some(CoinbaseInfo { confirmations: COINBASE_MATURITY });
+        u.coinbase = Some(CoinbaseInfo {
+            confirmations: COINBASE_MATURITY,
+        });
         assert!(u.is_spendable(), "exactly mature");
 
         u.coinbase = Some(CoinbaseInfo { confirmations: 0 });
@@ -604,7 +633,10 @@ mod tests {
         "000002e26c908a30660ae43b556ddf53fd87886c632843be9ed49ac32a5350e2";
 
     fn checkpoint() -> Checkpoint {
-        Checkpoint { height: 1296, hash: SIMPLICITY_SIGNET_1296.to_string() }
+        Checkpoint {
+            height: 1296,
+            hash: SIMPLICITY_SIGNET_1296.to_string(),
+        }
     }
 
     #[test]
@@ -617,7 +649,10 @@ mod tests {
     fn a_checkpoint_refuses_the_default_signet() {
         let found = DEFAULT_SIGNET_1296.parse().unwrap();
         let err = checkpoint().check(Some(found)).unwrap_err().to_string();
-        assert!(err.contains("wrong chain") && err.contains(DEFAULT_SIGNET_1296), "{err}");
+        assert!(
+            err.contains("wrong chain") && err.contains(DEFAULT_SIGNET_1296),
+            "{err}"
+        );
     }
 
     #[test]
@@ -635,8 +670,14 @@ mod tests {
     /// anything but a gift to miners — whatever the backend, however the chain is pinned.
     #[test]
     fn a_covenant_on_bitcoin_mainnet_is_refused() {
-        let err = esplora().confirm_simplicity(Network::Bitcoin, true).unwrap_err().to_string();
-        assert!(err.contains("mainnet") && err.contains("any miner"), "{err}");
+        let err = esplora()
+            .confirm_simplicity(Network::Bitcoin, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("mainnet") && err.contains("any miner"),
+            "{err}"
+        );
     }
 
     /// Esplora cannot report a deployment, so a covenant needs the chain pinned.
@@ -647,19 +688,23 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("bitcoin_checkpoint"), "{err}");
-        esplora().confirm_simplicity(Network::BitcoinSignet, true).expect("pinned chain");
+        esplora()
+            .confirm_simplicity(Network::BitcoinSignet, true)
+            .expect("pinned chain");
     }
 
     /// A typo in the config must not read as "this chain is wrong".
     #[test]
     fn a_malformed_checkpoint_hash_is_blamed_on_the_config() {
-        let bad = Checkpoint { height: 1296, hash: "00000091e7".to_string() };
+        let bad = Checkpoint {
+            height: 1296,
+            hash: "00000091e7".to_string(),
+        };
         let found = SIMPLICITY_SIGNET_1296.parse().unwrap();
         let err = bad.check(Some(found)).unwrap_err().to_string();
         assert!(err.contains("bitcoin_checkpoint.hash"), "{err}");
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Backend selection
@@ -883,11 +928,12 @@ pub struct Checkpoint {
 impl Checkpoint {
     /// Judge what a backend reported at `self.height`.
     fn check(&self, actual: Option<BlockHash>) -> Result<()> {
-        let expected: BlockHash = self
-            .hash
-            .trim()
-            .parse()
-            .with_context(|| format!("bitcoin_checkpoint.hash is not a block hash: {:?}", self.hash))?;
+        let expected: BlockHash = self.hash.trim().parse().with_context(|| {
+            format!(
+                "bitcoin_checkpoint.hash is not a block hash: {:?}",
+                self.hash
+            )
+        })?;
         match actual {
             Some(found) if found == expected => Ok(()),
             Some(found) => anyhow::bail!(

@@ -121,7 +121,11 @@ impl PsbtInput {
     pub fn witness_utxo(&self) -> TxOut {
         match self {
             PsbtInput::Wallet { witness_utxo, .. } => witness_utxo.clone(),
-            PsbtInput::Covenant { script_pubkey, amount, .. } => TxOut {
+            PsbtInput::Covenant {
+                script_pubkey,
+                amount,
+                ..
+            } => TxOut {
                 value: Amount::from_sat(*amount),
                 script_pubkey: script_pubkey.clone(),
             },
@@ -369,7 +373,11 @@ fn finish(
         *out = PsbtOutputData::default();
     }
 
-    Ok(BuildPsbtResult { psbt, fee, change_index })
+    Ok(BuildPsbtResult {
+        psbt,
+        fee,
+        change_index,
+    })
 }
 
 /// Minimum relayable value for an output paying `script_pubkey`.
@@ -450,14 +458,27 @@ mod tests {
     fn the_fee_is_the_leftover_and_nothing_else() {
         let r = req(
             vec![wallet_input("i0", 100_000)],
-            vec![PsbtOutputSpec { script_pubkey: p2tr(1), amount: 60_000 }],
+            vec![PsbtOutputSpec {
+                script_pubkey: p2tr(1),
+                amount: 60_000,
+            }],
         );
         let built = build_psbt(&r).expect("builds");
 
-        let out_total: u64 = built.psbt.unsigned_tx.output.iter().map(|o| o.value.to_sat()).sum();
+        let out_total: u64 = built
+            .psbt
+            .unsigned_tx
+            .output
+            .iter()
+            .map(|o| o.value.to_sat())
+            .sum();
         assert_eq!(100_000 - out_total, built.fee);
         // No fee output: Bitcoin has no such thing, and inventing one would be a burn.
-        assert_eq!(built.psbt.unsigned_tx.output.len(), 2, "declared output + change only");
+        assert_eq!(
+            built.psbt.unsigned_tx.output.len(),
+            2,
+            "declared output + change only"
+        );
     }
 
     #[test]
@@ -465,8 +486,14 @@ mod tests {
         let r = req(
             vec![wallet_input("i0", 100_000)],
             vec![
-                PsbtOutputSpec { script_pubkey: p2tr(1), amount: 10_000 },
-                PsbtOutputSpec { script_pubkey: p2tr(2), amount: 20_000 },
+                PsbtOutputSpec {
+                    script_pubkey: p2tr(1),
+                    amount: 10_000,
+                },
+                PsbtOutputSpec {
+                    script_pubkey: p2tr(2),
+                    amount: 20_000,
+                },
             ],
         );
         let built = build_psbt(&r).expect("builds");
@@ -483,10 +510,15 @@ mod tests {
     fn a_surplus_with_no_declared_change_is_refused() {
         let mut r = req(
             vec![wallet_input("i0", 100_000)],
-            vec![PsbtOutputSpec { script_pubkey: p2tr(1), amount: 10_000 }],
+            vec![PsbtOutputSpec {
+                script_pubkey: p2tr(1),
+                amount: 10_000,
+            }],
         );
         r.change_script = None;
-        let err = build_psbt(&r).expect_err("surplus with no change output").to_string();
+        let err = build_psbt(&r)
+            .expect_err("surplus with no change output")
+            .to_string();
         assert!(err.contains("declares no change output"), "{err}");
     }
 
@@ -498,7 +530,10 @@ mod tests {
         // Leave ~200 sat over: below the 330 sat P2TR dust threshold.
         let r = req(
             vec![wallet_input("i0", 10_000)],
-            vec![PsbtOutputSpec { script_pubkey: p2tr(1), amount: 9_600 }],
+            vec![PsbtOutputSpec {
+                script_pubkey: p2tr(1),
+                amount: 9_600,
+            }],
         );
         let built = build_psbt(&r).expect("builds");
         assert_eq!(built.change_index, None, "dust change must not be emitted");
@@ -518,7 +553,10 @@ mod tests {
         let inputs = 100_000u64;
         let mut probe = req(
             vec![wallet_input("i0", inputs)],
-            vec![PsbtOutputSpec { script_pubkey: p2tr(1), amount: 1 }],
+            vec![PsbtOutputSpec {
+                script_pubkey: p2tr(1),
+                amount: 1,
+            }],
         );
         probe.change_script = None;
         // What the fee will be for a transaction of this shape...
@@ -527,7 +565,10 @@ mod tests {
         // ...so declaring outputs that consume exactly the rest must build cleanly.
         let mut r = req(
             vec![wallet_input("i0", inputs)],
-            vec![PsbtOutputSpec { script_pubkey: p2tr(1), amount: inputs - fee }],
+            vec![PsbtOutputSpec {
+                script_pubkey: p2tr(1),
+                amount: inputs - fee,
+            }],
         );
         r.change_script = None;
         let built = build_psbt(&r).expect("exact accounting with no change must build");
@@ -540,7 +581,10 @@ mod tests {
     fn insufficient_funds_names_the_shortfall() {
         let r = req(
             vec![wallet_input("i0", 5_000)],
-            vec![PsbtOutputSpec { script_pubkey: p2tr(1), amount: 10_000 }],
+            vec![PsbtOutputSpec {
+                script_pubkey: p2tr(1),
+                amount: 10_000,
+            }],
         );
         let err = build_psbt(&r).expect_err("cannot fund").to_string();
         assert!(err.contains("short"), "{err}");
@@ -559,10 +603,16 @@ mod tests {
                 amount: 50_000,
                 sequence: None,
             }],
-            vec![PsbtOutputSpec { script_pubkey: p2tr(1), amount: 40_000 }],
+            vec![PsbtOutputSpec {
+                script_pubkey: p2tr(1),
+                amount: 40_000,
+            }],
         );
         let built = build_psbt(&r).expect("builds");
-        let utxo = built.psbt.inputs[0].witness_utxo.as_ref().expect("witness_utxo present");
+        let utxo = built.psbt.inputs[0]
+            .witness_utxo
+            .as_ref()
+            .expect("witness_utxo present");
         assert_eq!(utxo.value.to_sat(), 50_000);
         assert_eq!(utxo.script_pubkey, p2tr(4));
     }
@@ -573,20 +623,32 @@ mod tests {
             vec![PsbtInput::Wallet {
                 input_id: "i0".to_string(),
                 outpoint: outpoint(1),
-                witness_utxo: TxOut { value: Amount::from_sat(100_000), script_pubkey: p2tr(9) },
+                witness_utxo: TxOut {
+                    value: Amount::from_sat(100_000),
+                    script_pubkey: p2tr(9),
+                },
                 sequence: Some(144),
             }],
-            vec![PsbtOutputSpec { script_pubkey: p2tr(1), amount: 60_000 }],
+            vec![PsbtOutputSpec {
+                script_pubkey: p2tr(1),
+                amount: 60_000,
+            }],
         );
         r.lock_time = Some(800_000);
         let built = build_psbt(&r).expect("builds");
-        assert_eq!(built.psbt.unsigned_tx.input[0].sequence.to_consensus_u32(), 144);
+        assert_eq!(
+            built.psbt.unsigned_tx.input[0].sequence.to_consensus_u32(),
+            144
+        );
         assert_eq!(built.psbt.unsigned_tx.lock_time.to_consensus_u32(), 800_000);
 
         // Default: no relative timelock.
         let plain = build_psbt(&req(
             vec![wallet_input("i0", 100_000)],
-            vec![PsbtOutputSpec { script_pubkey: p2tr(1), amount: 60_000 }],
+            vec![PsbtOutputSpec {
+                script_pubkey: p2tr(1),
+                amount: 60_000,
+            }],
         ))
         .expect("builds");
         assert_eq!(plain.psbt.unsigned_tx.input[0].sequence, Sequence::MAX);
@@ -596,7 +658,12 @@ mod tests {
     /// fee underpays and the transaction will not relay.
     #[test]
     fn covenant_inputs_are_budgeted_more_witness_weight() {
-        let outputs = || vec![PsbtOutputSpec { script_pubkey: p2tr(1), amount: 40_000 }];
+        let outputs = || {
+            vec![PsbtOutputSpec {
+                script_pubkey: p2tr(1),
+                amount: 40_000,
+            }]
+        };
         let keyspend = estimate_fee(&req(vec![wallet_input("i0", 100_000)], outputs())).unwrap();
         let covenant = estimate_fee(&req(
             vec![PsbtInput::Covenant {
@@ -609,7 +676,10 @@ mod tests {
             outputs(),
         ))
         .unwrap();
-        assert!(covenant > keyspend, "covenant {covenant} should cost more than keyspend {keyspend}");
+        assert!(
+            covenant > keyspend,
+            "covenant {covenant} should cost more than keyspend {keyspend}"
+        );
     }
 
     // -- narrowing from the Elements request -------------------------------
@@ -635,7 +705,9 @@ mod tests {
         }
     }
 
-    fn covenant_pset_request(asset: lwk_wollet::elements::AssetId) -> crate::pset_builder::BuildPsetRequest {
+    fn covenant_pset_request(
+        asset: lwk_wollet::elements::AssetId,
+    ) -> crate::pset_builder::BuildPsetRequest {
         crate::pset_builder::BuildPsetRequest {
             inputs: vec![crate::pset_builder::PsetInput::Covenant {
                 input_id: "cov".to_string(),
@@ -669,7 +741,12 @@ mod tests {
 
         assert_eq!(psbt.inputs.len(), 1);
         assert_eq!(psbt.inputs[0].amount(), 100_000);
-        let PsbtInput::Covenant { script_pubkey, outpoint: op, .. } = &psbt.inputs[0] else {
+        let PsbtInput::Covenant {
+            script_pubkey,
+            outpoint: op,
+            ..
+        } = &psbt.inputs[0]
+        else {
             panic!("covenant input should stay a covenant input");
         };
         assert_eq!(script_pubkey.as_bytes(), el_script().as_bytes());
@@ -677,7 +754,10 @@ mod tests {
         assert_eq!(op.txid.to_string(), el_outpoint().txid.to_string());
 
         assert_eq!(psbt.outputs[0].amount, 60_000);
-        assert_eq!(psbt.outputs[0].script_pubkey.as_bytes(), el_script().as_bytes());
+        assert_eq!(
+            psbt.outputs[0].script_pubkey.as_bytes(),
+            el_script().as_bytes()
+        );
         assert_eq!(psbt.fee_rate, 2.0);
         assert_eq!(psbt.change_script, Some(p2tr(7)));
     }
@@ -700,25 +780,32 @@ mod tests {
         // A second asset, on an input.
         let mut pset = covenant_pset_request(other_asset());
         pset.outputs[0].asset = policy();
-        let err = from_pset_request(&pset, None).expect_err("second asset").to_string();
+        let err = from_pset_request(&pset, None)
+            .expect_err("second asset")
+            .to_string();
         assert!(err.contains("only one asset"), "{err}");
 
         // A second asset, on an output.
         let mut pset = covenant_pset_request(policy());
         pset.outputs[0].asset = other_asset();
-        let err = from_pset_request(&pset, None).expect_err("second asset").to_string();
+        let err = from_pset_request(&pset, None)
+            .expect_err("second asset")
+            .to_string();
         assert!(err.contains("only one asset"), "{err}");
 
         // A confidential output.
         let mut pset = covenant_pset_request(policy());
-        pset.outputs[0].blinding_key = Some(lwk_wollet::elements::bitcoin::PublicKey::from_slice(
-            &[
+        pset.outputs[0].blinding_key = Some(
+            lwk_wollet::elements::bitcoin::PublicKey::from_slice(&[
                 2, 0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35,
-                0xe9, 0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf,
-                0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
-            ],
-        ).unwrap());
-        let err = from_pset_request(&pset, None).expect_err("confidential").to_string();
+                0xe9, 0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee,
+                0x9a, 0xce, 0x80, 0x3a, 0xc0,
+            ])
+            .unwrap(),
+        );
+        let err = from_pset_request(&pset, None)
+            .expect_err("confidential")
+            .to_string();
         assert!(err.contains("always explicit"), "{err}");
 
         // Pinned blinding factors on a covenant input.
@@ -726,13 +813,17 @@ mod tests {
         if let crate::pset_builder::PsetInput::Covenant { blinding, .. } = &mut pset.inputs[0] {
             *blinding = Some(crate::pset_builder::PinnedBlinding::default());
         }
-        let err = from_pset_request(&pset, None).expect_err("blinding").to_string();
+        let err = from_pset_request(&pset, None)
+            .expect_err("blinding")
+            .to_string();
         assert!(err.contains("always explicit"), "{err}");
 
         // Change declared in a non-policy asset.
         let mut pset = covenant_pset_request(policy());
         pset.change_assets.insert(other_asset());
-        let err = from_pset_request(&pset, None).expect_err("change asset").to_string();
+        let err = from_pset_request(&pset, None)
+            .expect_err("change asset")
+            .to_string();
         assert!(err.contains("only one asset"), "{err}");
     }
 
@@ -742,8 +833,17 @@ mod tests {
         let pset = covenant_pset_request(policy());
         let psbt_req = from_pset_request(&pset, Some(p2tr(7))).expect("narrows");
         let built = build_psbt(&psbt_req).expect("builds");
-        assert_eq!(built.psbt.unsigned_tx.input[0].sequence.to_consensus_u32(), 144);
-        let total_out: u64 = built.psbt.unsigned_tx.output.iter().map(|o| o.value.to_sat()).sum();
+        assert_eq!(
+            built.psbt.unsigned_tx.input[0].sequence.to_consensus_u32(),
+            144
+        );
+        let total_out: u64 = built
+            .psbt
+            .unsigned_tx
+            .output
+            .iter()
+            .map(|o| o.value.to_sat())
+            .sum();
         assert_eq!(100_000 - total_out, built.fee);
     }
 
@@ -769,7 +869,10 @@ mod tests {
                 },
                 sequence: None,
             }],
-            outputs: vec![PsbtOutputSpec { script_pubkey: p2tr(1), amount: 60_000 }],
+            outputs: vec![PsbtOutputSpec {
+                script_pubkey: p2tr(1),
+                amount: 60_000,
+            }],
             fee_rate: 1.0,
             change_script: Some(w.script_pubkey(Branch::Change, 0).unwrap()),
             lock_time: None,
@@ -781,12 +884,16 @@ mod tests {
     /// over the wrong key is well-formed and simply never spends.
     #[test]
     fn key_path_signatures_verify_against_the_spent_output() {
-        use lwk_wollet::elements::bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
         use lwk_wollet::elements::bitcoin::key::TapTweak;
+        use lwk_wollet::elements::bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
 
         let w = signing_wallet();
         let mut built = build_psbt(&owned_request(&w)).expect("builds");
-        let plan = [KeyPathSigner { input_index: 0, branch: Branch::Receive, index: 0 }];
+        let plan = [KeyPathSigner {
+            input_index: 0,
+            branch: Branch::Receive,
+            index: 0,
+        }];
 
         let sighash = key_path_sighash(&built.psbt, 0).expect("sighash");
         sign_key_path_inputs(&mut built.psbt, &w, &plan).expect("signs");
@@ -808,7 +915,9 @@ mod tests {
         let w = signing_wallet();
         let mut built = build_psbt(&owned_request(&w)).expect("builds");
         built.psbt.inputs[0].witness_utxo = None;
-        let err = key_path_sighash(&built.psbt, 0).expect_err("must refuse").to_string();
+        let err = key_path_sighash(&built.psbt, 0)
+            .expect_err("must refuse")
+            .to_string();
         assert!(err.contains("commits to every spent output"), "{err}");
     }
 
@@ -831,15 +940,25 @@ mod tests {
         sign_key_path_inputs(
             &mut built.psbt,
             &w,
-            &[KeyPathSigner { input_index: 0, branch: Branch::Receive, index: 0 }],
+            &[KeyPathSigner {
+                input_index: 0,
+                branch: Branch::Receive,
+                index: 0,
+            }],
         )
         .expect("signs");
 
         assert!(built.psbt.inputs[0].tap_key_sig.is_some());
-        assert!(built.psbt.inputs[1].tap_key_sig.is_none(), "covenant input must be untouched");
+        assert!(
+            built.psbt.inputs[1].tap_key_sig.is_none(),
+            "covenant input must be untouched"
+        );
 
         finalize_key_path_inputs(&mut built.psbt).expect("finalizes");
-        let wit = built.psbt.inputs[0].final_script_witness.as_ref().expect("witness built");
+        let wit = built.psbt.inputs[0]
+            .final_script_witness
+            .as_ref()
+            .expect("witness built");
         // A SIGHASH_DEFAULT key-path witness is exactly one 64-byte signature.
         assert_eq!(wit.len(), 1);
         assert_eq!(wit.iter().next().unwrap().len(), 64);
@@ -856,15 +975,20 @@ mod tests {
     #[test]
     fn input_indices_track_request_order() {
         let r = req(
-            vec![wallet_input("first", 50_000), wallet_input("second", 50_000)],
-            vec![PsbtOutputSpec { script_pubkey: p2tr(1), amount: 60_000 }],
+            vec![
+                wallet_input("first", 50_000),
+                wallet_input("second", 50_000),
+            ],
+            vec![PsbtOutputSpec {
+                script_pubkey: p2tr(1),
+                amount: 60_000,
+            }],
         );
         let idx = input_indices(&r);
         assert_eq!(idx["first"], 0);
         assert_eq!(idx["second"], 1);
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Signing
@@ -903,7 +1027,10 @@ pub fn key_path_sighash(psbt: &Psbt, input_index: usize) -> Result<[u8; 32]> {
         .collect::<Result<_>>()?;
 
     if input_index >= prevouts.len() {
-        bail!("input {input_index} is out of range for a transaction with {} inputs", prevouts.len());
+        bail!(
+            "input {input_index} is out of range for a transaction with {} inputs",
+            prevouts.len()
+        );
     }
 
     let mut cache = SighashCache::new(&psbt.unsigned_tx);
@@ -932,8 +1059,9 @@ pub fn sign_key_path_inputs(
         let raw = wallet
             .sign_key_path(entry.branch, entry.index, &sighash)
             .with_context(|| format!("cannot sign input {}", entry.input_index))?;
-        let signature = lwk_wollet::elements::bitcoin::secp256k1::schnorr::Signature::from_slice(&raw)
-            .map_err(|e| anyhow::anyhow!("wallet produced an invalid signature: {e}"))?;
+        let signature =
+            lwk_wollet::elements::bitcoin::secp256k1::schnorr::Signature::from_slice(&raw)
+                .map_err(|e| anyhow::anyhow!("wallet produced an invalid signature: {e}"))?;
         psbt.inputs[entry.input_index].tap_key_sig = Some(TaprootSignature {
             signature,
             // Must match the sighash type the signature was computed over. Storing a
@@ -952,8 +1080,14 @@ pub fn sign_key_path_inputs(
 /// `covenant::finalize_covenant_input`.
 pub fn finalize_key_path_inputs(psbt: &mut Psbt) -> Result<()> {
     for (i, input) in psbt.inputs.iter_mut().enumerate() {
-        let Some(sig) = input.tap_key_sig.take() else { continue };
-        if !input.final_script_witness.as_ref().is_none_or(Witness::is_empty) {
+        let Some(sig) = input.tap_key_sig.take() else {
+            continue;
+        };
+        if !input
+            .final_script_witness
+            .as_ref()
+            .is_none_or(Witness::is_empty)
+        {
             bail!("input {i} already has a final witness");
         }
         let mut witness = Witness::new();
@@ -968,7 +1102,6 @@ pub fn extract_tx(psbt: Psbt) -> Result<Transaction> {
     psbt.extract_tx()
         .map_err(|e| anyhow::anyhow!("cannot extract transaction from PSBT: {e}"))
 }
-
 
 // ---------------------------------------------------------------------------
 // Narrowing from the Elements request
@@ -1004,7 +1137,12 @@ pub fn from_pset_request(
     for input in &pset.inputs {
         let id = input.input_id();
         match input {
-            EIn::Wallet { utxo, issuance, sequence, .. } => {
+            EIn::Wallet {
+                utxo,
+                issuance,
+                sequence,
+                ..
+            } => {
                 if issuance.is_some() {
                     bail!("input '{id}' carries an asset issuance, which Bitcoin has no way to express");
                 }
@@ -1024,7 +1162,16 @@ pub fn from_pset_request(
                     sequence: *sequence,
                 });
             }
-            EIn::Covenant { outpoint, script_pubkey, asset, amount, issuance, sequence, blinding, .. } => {
+            EIn::Covenant {
+                outpoint,
+                script_pubkey,
+                asset,
+                amount,
+                issuance,
+                sequence,
+                blinding,
+                ..
+            } => {
                 if issuance.is_some() {
                     bail!("input '{id}' carries a reissuance, which Bitcoin has no way to express");
                 }
@@ -1054,7 +1201,10 @@ pub fn from_pset_request(
             bail!("output #{i} pins blinding factors, which Bitcoin has no way to express");
         }
         if out.asset != policy {
-            bail!("output #{i} pays asset {}, but Bitcoin has only one asset", out.asset);
+            bail!(
+                "output #{i} pays asset {}, but Bitcoin has only one asset",
+                out.asset
+            );
         }
         outputs.push(PsbtOutputSpec {
             script_pubkey: convert_script(&out.script_pubkey),
@@ -1100,9 +1250,7 @@ fn convert_script(script: &lwk_wollet::elements::Script) -> ScriptBuf {
 fn convert_outpoint(outpoint: lwk_wollet::elements::OutPoint) -> OutPoint {
     use lwk_wollet::elements::bitcoin::hashes::Hash as _;
     OutPoint {
-        txid: lwk_wollet::elements::bitcoin::Txid::from_byte_array(
-            outpoint.txid.to_byte_array(),
-        ),
+        txid: lwk_wollet::elements::bitcoin::Txid::from_byte_array(outpoint.txid.to_byte_array()),
         vout: outpoint.vout,
     }
 }

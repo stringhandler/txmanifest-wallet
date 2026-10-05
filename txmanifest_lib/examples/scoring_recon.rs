@@ -139,7 +139,12 @@ fn compile(table: &HashMap<String, String>) -> CompiledProgram {
 }
 
 /// Run the covenant with one witness triple. `Ok(())` means the spend would be valid.
-fn run(program: &CompiledProgram, facts: &Facts, trait_id: u32, expected: u64) -> Result<(), String> {
+fn run(
+    program: &CompiledProgram,
+    facts: &Facts,
+    trait_id: u32,
+    expected: u64,
+) -> Result<(), String> {
     let types = program.witness_types();
     let mut map = HashMap::new();
     for (name, literal) in [
@@ -162,7 +167,9 @@ fn run(program: &CompiledProgram, facts: &Facts, trait_id: u32, expected: u64) -
     let redeem = satisfied.redeem();
     let env = dummy_env::dummy();
     let mut mac = BitMachine::for_program(redeem).map_err(|e| format!("bit machine: {e}"))?;
-    mac.exec(redeem, &env).map(|_| ()).map_err(|e| format!("exec: {e}"))
+    mac.exec(redeem, &env)
+        .map(|_| ())
+        .map_err(|e| format!("exec: {e}"))
 }
 
 fn main() {
@@ -174,8 +181,20 @@ fn main() {
     // MAX is the overflow probe: u32::MAX in every field is far outside anything Dota
     // produces, but FACTS is a witness and therefore attacker-chosen, so the documented
     // bound has to hold across the whole u32 range — not across plausible stat lines.
-    let zero = Facts { kills: 0, deaths: 0, assists: 0, last_hits: 0, gpm: 0 };
-    let typical = Facts { kills: 8, deaths: 3, assists: 14, last_hits: 260, gpm: 545 };
+    let zero = Facts {
+        kills: 0,
+        deaths: 0,
+        assists: 0,
+        last_hits: 0,
+        gpm: 0,
+    };
+    let typical = Facts {
+        kills: 8,
+        deaths: 3,
+        assists: 14,
+        last_hits: 260,
+        gpm: 545,
+    };
     let max = Facts {
         kills: u32::MAX,
         deaths: u32::MAX,
@@ -185,7 +204,13 @@ fn main() {
     };
     // Deaths dominate: the raw score goes negative and must floor at zero rather than
     // wrapping to ~1.8e19 fpoints.
-    let death_heavy = Facts { kills: 0, deaths: 12, assists: 1, last_hits: 4, gpm: 90 };
+    let death_heavy = Facts {
+        kills: 0,
+        deaths: 12,
+        assists: 1,
+        last_hits: 4,
+        gpm: 90,
+    };
 
     let vectors: [(&str, Facts, u32); 8] = [
         ("zero", zero, CORE),
@@ -251,7 +276,10 @@ fn main() {
              must fail the le_32 bound, or every id above 2 becomes a free extra role."
         );
     }
-    println!("{:<22} {:<8} {:>22}  {:>8}  {:>8}", "unknown role", "3", "-", "n/a", "ok");
+    println!(
+        "{:<22} {:<8} {:>22}  {:>8}  {:>8}",
+        "unknown role", "3", "-", "n/a", "ok"
+    );
 
     assert!(
         clamp_seen,

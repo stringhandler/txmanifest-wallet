@@ -333,14 +333,20 @@ pub struct LoadedConfig {
 /// one with no word said.
 pub fn load_from(path: &std::path::Path) -> Result<LoadedConfig> {
     if !path.exists() {
-        return Ok(LoadedConfig { config: Config::default(), declared_network: None, path: None });
+        return Ok(LoadedConfig {
+            config: Config::default(),
+            declared_network: None,
+            path: None,
+        });
     }
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("Cannot read config: {}", path.display()))?;
     let config: Config = serde_json::from_str(&raw)
         .with_context(|| format!("Cannot parse config: {}", path.display()))?;
     let value: serde_json::Value = serde_json::from_str(&raw)?;
-    let declared_network = match value.get("default_network").and_then(serde_json::Value::as_str)
+    let declared_network = match value
+        .get("default_network")
+        .and_then(serde_json::Value::as_str)
     {
         None => None,
         Some(name) => Some(
@@ -348,7 +354,11 @@ pub fn load_from(path: &std::path::Path) -> Result<LoadedConfig> {
                 .map_err(|e| anyhow::anyhow!("{e} (in default_network of {})", path.display()))?,
         ),
     };
-    Ok(LoadedConfig { config, declared_network, path: Some(path.to_path_buf()) })
+    Ok(LoadedConfig {
+        config,
+        declared_network,
+        path: Some(path.to_path_buf()),
+    })
 }
 
 /// Write `config` to `path`, creating its directory if needed.
@@ -368,7 +378,10 @@ mod tests {
     use super::*;
 
     fn cfg(network: &str) -> Config {
-        Config { default_network: network.to_string(), ..Config::default() }
+        Config {
+            default_network: network.to_string(),
+            ..Config::default()
+        }
     }
 
     /// A config file written before these fields existed must keep parsing, and must mean
@@ -388,19 +401,30 @@ mod tests {
     fn simplicity_activation_defaults_per_family() {
         let c = cfg("bitcoin-signet");
         let net = c.network().unwrap();
-        assert!(!c.activation(net).unwrap().simplicity, "must default off on Bitcoin");
+        assert!(
+            !c.activation(net).unwrap().simplicity,
+            "must default off on Bitcoin"
+        );
 
-        let opted_in = Config { simplicity_activated: Some(true), ..cfg("bitcoin-signet") };
+        let opted_in = Config {
+            simplicity_activated: Some(true),
+            ..cfg("bitcoin-signet")
+        };
         assert!(opted_in.activation(net).unwrap().simplicity);
 
         // Elements has it live regardless, so the capability set carries it either way.
         let c = cfg("liquid");
         let net = c.network().unwrap();
-        let off = Config { simplicity_activated: Some(false), ..cfg("liquid") };
+        let off = Config {
+            simplicity_activated: Some(false),
+            ..cfg("liquid")
+        };
         assert!(net
             .capabilities(&off.activation(net).unwrap())
             .contains(&Capability::SIMPLICITY));
-        assert!(net.capabilities(&c.activation(net).unwrap()).contains(&Capability::SIMPLICITY));
+        assert!(net
+            .capabilities(&c.activation(net).unwrap())
+            .contains(&Capability::SIMPLICITY));
     }
 
     #[test]
@@ -411,7 +435,9 @@ mod tests {
         };
         let net = c.network().unwrap();
         let want = Capabilities::from_iter(["custom::my-feature".parse().unwrap()]);
-        assert!(want.missing_from(&net.capabilities(&c.activation(net).unwrap())).is_empty());
+        assert!(want
+            .missing_from(&net.capabilities(&c.activation(net).unwrap()))
+            .is_empty());
     }
 
     /// A misspelled entry is an error, not a skip: it would otherwise satisfy nothing and
@@ -436,7 +462,9 @@ mod tests {
         let default = default_path();
         assert_eq!(default.file_name().unwrap(), "config.json");
         assert!(
-            default.parent().is_some_and(|p| p != std::path::Path::new("")),
+            default
+                .parent()
+                .is_some_and(|p| p != std::path::Path::new("")),
             "the config must live under a data directory, not at a bare relative path"
         );
     }
@@ -446,10 +474,19 @@ mod tests {
     /// would produce confusing decode failures rather than an obvious misconfiguration.
     #[test]
     fn esplora_defaults_follow_the_network() {
-        assert_eq!(cfg("liquid").esplora_url(), "https://blockstream.info/liquid/api");
-        assert_eq!(cfg("testnet").esplora_url(), "https://blockstream.info/liquidtestnet/api");
+        assert_eq!(
+            cfg("liquid").esplora_url(),
+            "https://blockstream.info/liquid/api"
+        );
+        assert_eq!(
+            cfg("testnet").esplora_url(),
+            "https://blockstream.info/liquidtestnet/api"
+        );
         assert_eq!(cfg("bitcoin").esplora_url(), "https://blockstream.info/api");
-        assert_eq!(cfg("bitcoin-signet").esplora_url(), "https://blockstream.info/signet/api");
+        assert_eq!(
+            cfg("bitcoin-signet").esplora_url(),
+            "https://blockstream.info/signet/api"
+        );
         assert_eq!(
             cfg("bitcoin-testnet").esplora_url(),
             "https://blockstream.info/testnet/api"
@@ -467,9 +504,18 @@ mod tests {
     /// before any connection is made, so none of them touches the network.
     #[test]
     fn simplicity_on_the_default_signet_is_refused() {
-        let opted_in = Config { simplicity_activated: Some(true), ..cfg("bitcoin-signet") };
-        let err = opted_in.bitcoin_chain(Network::BitcoinSignet).unwrap_err().to_string();
-        assert!(err.contains("default_esplora") && err.contains("blockstream.info/signet"), "{err}");
+        let opted_in = Config {
+            simplicity_activated: Some(true),
+            ..cfg("bitcoin-signet")
+        };
+        let err = opted_in
+            .bitcoin_chain(Network::BitcoinSignet)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("default_esplora") && err.contains("blockstream.info/signet"),
+            "{err}"
+        );
 
         // Naming the chain, or not claiming Simplicity, or using a node: all fine.
         let named = Config {
@@ -477,7 +523,9 @@ mod tests {
             ..opted_in
         };
         assert!(named.bitcoin_chain(Network::BitcoinSignet).is_ok());
-        assert!(cfg("bitcoin-signet").bitcoin_chain(Network::BitcoinSignet).is_ok());
+        assert!(cfg("bitcoin-signet")
+            .bitcoin_chain(Network::BitcoinSignet)
+            .is_ok());
         let node = Config {
             simplicity_activated: Some(true),
             bitcoin_backend: Some("rpc".to_string()),
@@ -498,8 +546,7 @@ mod tests {
 
     /// A fresh directory under the system temp dir, unique to one test.
     fn scratch_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("txm-config-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("txm-config-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -532,11 +579,22 @@ mod tests {
 
         assert_eq!(load_from(&path).unwrap().declared_network, None, "no file");
 
-        std::fs::write(&path, r#"{"default_esplora": "https://example.invalid/api"}"#).unwrap();
-        assert_eq!(load_from(&path).unwrap().declared_network, None, "backend settings only");
+        std::fs::write(
+            &path,
+            r#"{"default_esplora": "https://example.invalid/api"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_from(&path).unwrap().declared_network,
+            None,
+            "backend settings only"
+        );
 
         std::fs::write(&path, r#"{"default_network": "signet"}"#).unwrap();
-        assert_eq!(load_from(&path).unwrap().declared_network, Some(Network::BitcoinSignet));
+        assert_eq!(
+            load_from(&path).unwrap().declared_network,
+            Some(Network::BitcoinSignet)
+        );
 
         std::fs::write(&path, r#"{"default_network": "liquid-signet"}"#).unwrap();
         let err = load_from(&path).unwrap_err().to_string();
@@ -561,6 +619,9 @@ mod tests {
     #[test]
     fn an_unknown_network_names_the_accepted_spellings() {
         let err = cfg("liquid-signet").network().unwrap_err().to_string();
-        assert!(err.contains("default_network") && err.contains("bitcoin-signet"), "{err}");
+        assert!(
+            err.contains("default_network") && err.contains("bitcoin-signet"),
+            "{err}"
+        );
     }
 }

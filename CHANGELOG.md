@@ -404,6 +404,52 @@ the aliases `liquid` and `btc`. It was a free-form string that nothing read;
   closed core list and a namespace pattern, since an `enum` cannot express a set
   that is closed at one end and open at the other.
 
+## [0.2.1] - 2026-09-09
+
+A maintenance release. No format change: `manifest_version` stays `0.2.0` and
+every 0.2.0 manifest reads the same way it did.
+
+### Added
+
+- **CI.** `cargo test --workspace --locked` now runs on Linux and Windows for
+  every pull request and every push to `main`, with a `rustfmt` + `clippy` job
+  beside it that reports but does not yet gate. `--locked` on purpose: the
+  `simplicityhl` git dependency is pinned to an exact rev in the lock file, and
+  a run that silently updated it would not be testing what a release builds.
+- **`validate` now catches an action with nowhere to put a surplus.** An action
+  that declares no `"change"` output, leaves `allow_change` at `"none"` and sizes
+  no output with the `fee` keyword can only build if its inputs happen to equal
+  its outputs plus a fee that nobody knows until the transaction is sized. The
+  builder has refused that since 0.2.0, but only after coin selection and
+  covenant compilation; `validate` now reports it offline, from the manifest
+  alone. Any declared change output satisfies the check whatever asset it names —
+  an `asset` is usually a reference that resolves only against a network, and
+  guessing there would fail manifests that work.
+
+  This is a new **error**, so a manifest that passed `validate` under 0.2.0 can
+  fail under 0.2.1. That is the point: the shapes it now rejects are the ones the
+  builder was already refusing to build.
+- **Tests for the change/fee split.** The rule that an L-BTC surplus with no
+  declared change output and no `allow_change` is an error — the rule that keeps
+  an oversized input from being handed to a miner — shipped in 0.2.0 with no
+  test of its own. It now has eight, covering the strict default, the
+  one-satoshi case, both paths where change is permitted, and the two internal
+  passes that deliberately do not enforce it. Nothing about the rule changed;
+  what changed is that it can no longer be removed in silence.
+- **`.gitattributes`**, so a Windows checkout keeps LF endings on the checked-in
+  JSON, Rust and YAML. The schema test compares the file byte-for-byte against
+  the string the Rust model emits, which is always LF, and a CRLF checkout
+  failed on that alone. The test also normalizes line endings before comparing,
+  so it no longer depends on the checkout's configuration.
+
+### Changed
+
+- The L-BTC change/fee decision moved out of `build_inner` into
+  `resolve_lbtc_balance`, a pure function. Behaviour and error text are
+  unchanged. Reaching the rule through `build_pset` needs a funded wallet, and
+  this is the one calculation in the builder whose silent wrong answer is
+  measured in the user's satoshis, so it is worth being able to test on its own.
+
 ## [0.2.0] - 2026-08-20
 
 **Breaking:** a manifest that sets `utxo_type.confidential` no longer parses.

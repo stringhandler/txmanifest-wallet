@@ -43,7 +43,9 @@ pub fn next_version_path(state_path: &Path) -> std::path::PathBuf {
     // Find the highest existing `<base>.<N>.json` in the same directory.
     let mut max_n: u64 = 0;
     let dir = state_path.parent().filter(|p| !p.as_os_str().is_empty());
-    let read = dir.map(std::fs::read_dir).unwrap_or_else(|| std::fs::read_dir("."));
+    let read = dir
+        .map(std::fs::read_dir)
+        .unwrap_or_else(|| std::fs::read_dir("."));
     if let Ok(entries) = read {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
@@ -91,8 +93,7 @@ impl StateHistory {
 
     pub fn append(&mut self, entry: HistoryEntry, path: &Path) -> Result<()> {
         self.entries.push(entry);
-        let json = serde_json::to_string_pretty(self)
-            .context("Cannot serialise history file")?;
+        let json = serde_json::to_string_pretty(self).context("Cannot serialise history file")?;
         std::fs::write(path, json)
             .with_context(|| format!("Cannot write history file: {}", path.display()))
     }
@@ -127,7 +128,11 @@ pub struct ContractState {
 
 impl ContractState {
     pub fn new(last_action: &str) -> Self {
-        Self { instance: None, last_action: last_action.to_string(), utxos: Vec::new() }
+        Self {
+            instance: None,
+            last_action: last_action.to_string(),
+            utxos: Vec::new(),
+        }
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -138,15 +143,17 @@ impl ContractState {
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
-        let json = serde_json::to_string_pretty(self)
-            .context("Cannot serialise state file")?;
+        let json = serde_json::to_string_pretty(self).context("Cannot serialise state file")?;
         std::fs::write(path, json)
             .with_context(|| format!("Cannot write state file: {}", path.display()))
     }
 
     /// All UTXOs of a given utxo_type, ordered by vout.
     pub fn utxos_for_type(&self, utxo_type: &str) -> Vec<&StateUtxo> {
-        self.utxos.iter().filter(|u| u.utxo_type == utxo_type).collect()
+        self.utxos
+            .iter()
+            .filter(|u| u.utxo_type == utxo_type)
+            .collect()
     }
 
     /// Remove the UTXO at the given outpoint (spent as an input).
@@ -176,7 +183,12 @@ mod tests {
         assert_eq!(next_version_path(&state), dir.join("if.state.1.json"));
 
         // Create .1 and .2 plus decoy siblings that must NOT be counted.
-        for name in ["if.state.1.json", "if.state.2.json", "if.state.history.json", "if.state.json"] {
+        for name in [
+            "if.state.1.json",
+            "if.state.2.json",
+            "if.state.history.json",
+            "if.state.json",
+        ] {
             std::fs::write(dir.join(name), "{}").unwrap();
         }
         assert_eq!(next_version_path(&state), dir.join("if.state.3.json"));

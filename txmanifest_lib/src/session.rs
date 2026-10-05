@@ -86,7 +86,8 @@ impl ChainSession {
             });
         }
 
-        let w = wallet.ok_or_else(|| anyhow::anyhow!("no wallet loaded; a Bitcoin run needs one to sign"))?;
+        let w = wallet
+            .ok_or_else(|| anyhow::anyhow!("no wallet loaded; a Bitcoin run needs one to sign"))?;
         let cfg = &target.config;
         let net = target.network;
         let btc_wallet = crate::bitcoin_wallet::BitcoinWallet::from_mnemonic(&w.mnemonic, net)?;
@@ -104,7 +105,12 @@ impl ChainSession {
             .scan(&btc_wallet, crate::bitcoin_backend::DEFAULT_GAP_LIMIT)
             .context("Cannot scan for wallet UTXOs")?;
         let total: u64 = utxos.iter().map(|u| u.value).sum();
-        println!("  {} {} UTXO(s), {} sat", style("✓").green(), utxos.len(), style(total).yellow());
+        println!(
+            "  {} {} UTXO(s), {} sat",
+            style("✓").green(),
+            utxos.len(),
+            style(total).yellow()
+        );
 
         // Change and receive both go to the first unused index on their branch, so a run
         // does not reuse an address that already has history.
@@ -203,7 +209,9 @@ impl ChainSession {
                 &target.config,
                 txid,
                 vout,
-                wallet.map(wallet::elements_network).unwrap_or(ElementsNetwork::LiquidTestnet),
+                wallet
+                    .map(wallet::elements_network)
+                    .unwrap_or(ElementsNetwork::LiquidTestnet),
             ),
         }
     }
@@ -225,9 +233,10 @@ impl ChainSession {
                 change_index: r.change_index,
                 utxos: r.utxos.clone(),
             }),
-            ChainSession::Elements { .. } => {
-                AssemblyCtx::Elements(ElementsContext { wollet, network: net })
-            }
+            ChainSession::Elements { .. } => AssemblyCtx::Elements(ElementsContext {
+                wollet,
+                network: net,
+            }),
         }
     }
 

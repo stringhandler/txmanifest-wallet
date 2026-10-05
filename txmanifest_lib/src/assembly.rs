@@ -81,9 +81,9 @@ pub fn parse_destination(address: &str, network: Network) -> Result<ParsedDestin
     let trimmed = address.trim();
     match network.family() {
         ChainFamily::Elements => {
-            let addr: lwk_wollet::elements::Address = trimmed
-                .parse()
-                .map_err(|e| anyhow::anyhow!("'{trimmed}' is not a valid {network} address: {e}"))?;
+            let addr: lwk_wollet::elements::Address = trimmed.parse().map_err(|e| {
+                anyhow::anyhow!("'{trimmed}' is not a valid {network} address: {e}")
+            })?;
             Ok(ParsedDestination {
                 script_pubkey: addr.script_pubkey(),
                 blinding_pubkey: addr.blinding_pubkey.map(compressed),
@@ -98,9 +98,9 @@ pub fn parse_destination(address: &str, network: Network) -> Result<ParsedDestin
             // signet run parses perfectly well and would send real-network funds nowhere
             // recoverable.
             let btc_net = bitcoin_network(network)?;
-            let addr = parsed.require_network(btc_net).map_err(|e| {
-                anyhow::anyhow!("'{trimmed}' is not a {network} address: {e}")
-            })?;
+            let addr = parsed
+                .require_network(btc_net)
+                .map_err(|e| anyhow::anyhow!("'{trimmed}' is not a {network} address: {e}"))?;
             Ok(ParsedDestination {
                 script_pubkey: Script::from(addr.script_pubkey().to_bytes()),
                 blinding_pubkey: None,
@@ -267,7 +267,10 @@ impl AssemblyContext for ElementsContext<'_> {
 }
 
 fn compressed(inner: lwk_wollet::elements::secp256k1_zkp::PublicKey) -> PublicKey {
-    PublicKey { inner, compressed: true }
+    PublicKey {
+        inner,
+        compressed: true,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -302,11 +305,7 @@ pub struct BitcoinContext<'a> {
 }
 
 impl BitcoinContext<'_> {
-    fn address_at(
-        &self,
-        branch: crate::bitcoin_wallet::Branch,
-        index: u32,
-    ) -> Result<AddressInfo> {
+    fn address_at(&self, branch: crate::bitcoin_wallet::Branch, index: u32) -> Result<AddressInfo> {
         let address = self.wallet.address(branch, index)?;
         Ok(AddressInfo {
             script_pubkey: Script::from(address.script_pubkey().to_bytes()),
@@ -507,7 +506,11 @@ mod tests {
         let w = BitcoinWallet::from_mnemonic(MNEMONIC, Network::BitcoinSignet).unwrap();
         let c = ctx(&w);
         let info = c.receive_address(None).unwrap();
-        assert!(info.display.starts_with("tb1p"), "signet P2TR encoding: {}", info.display);
+        assert!(
+            info.display.starts_with("tb1p"),
+            "signet P2TR encoding: {}",
+            info.display
+        );
         let parsed: lwk_wollet::elements::bitcoin::Address<_> =
             info.display.parse().expect("display is a real address");
         assert_eq!(
@@ -596,8 +599,11 @@ mod tests {
             change_assets: Default::default(),
         };
         let narrowed = crate::psbt_builder::from_pset_request(&req, None).expect("narrows");
-        let crate::psbt_builder::PsbtInput::Wallet { outpoint: back, witness_utxo, .. } =
-            &narrowed.inputs[0]
+        let crate::psbt_builder::PsbtInput::Wallet {
+            outpoint: back,
+            witness_utxo,
+            ..
+        } = &narrowed.inputs[0]
         else {
             panic!("a wallet input must narrow to a wallet input");
         };
@@ -633,8 +639,7 @@ mod tests {
         // ...and one carrying any other asset does not, which is what makes the synthetic
         // constant safe rather than merely conventional.
         let mut wrong = req;
-        wrong.outputs[0].asset =
-            lwk_wollet::elements::AssetId::from_slice(&[9u8; 32]).unwrap();
+        wrong.outputs[0].asset = lwk_wollet::elements::AssetId::from_slice(&[9u8; 32]).unwrap();
         assert!(crate::psbt_builder::from_pset_request(&wrong, None).is_err());
     }
 }

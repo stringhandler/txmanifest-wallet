@@ -50,48 +50,58 @@ impl Target {
         wallet: Option<(&Path, &WalletFile)>,
         network_flag: Option<&str>,
     ) -> Result<Target> {
-        let LoadedConfig { mut config, declared_network, path } = loaded;
+        let LoadedConfig {
+            mut config,
+            declared_network,
+            path,
+        } = loaded;
         let flag_network: Option<Network> = network_flag
             .map(|f| f.parse().map_err(|e| anyhow::anyhow!("{e} (in --network)")))
             .transpose()?;
 
-        let (network, network_label) = match wallet.and_then(|(p, w)| w.network().map(|n| (p, w, n)))
-        {
-            Some((wallet_path, wallet_file, wallet_net)) => {
-                if let Some(config_net) = declared_network.filter(|n| *n != wallet_net) {
-                    anyhow::bail!(
+        let (network, network_label) =
+            match wallet.and_then(|(p, w)| w.network().map(|n| (p, w, n))) {
+                Some((wallet_path, wallet_file, wallet_net)) => {
+                    if let Some(config_net) = declared_network.filter(|n| *n != wallet_net) {
+                        anyhow::bail!(
                         "{} is a {wallet_net} wallet, but the config at {} is for {config_net}; \
                          pass --config with a {wallet_net} config, or put one beside the wallet",
                         wallet_path.display(),
-                        path.as_deref().map_or_else(|| "(defaults)".into(), |p| p.display().to_string()),
+                        path.as_deref()
+                            .map_or_else(|| "(defaults)".into(), |p| p.display().to_string()),
                     );
-                }
-                if let (Some(flag), Some(flag_net)) = (network_flag, flag_network) {
-                    if flag_net != wallet_net {
-                        anyhow::bail!(
+                    }
+                    if let (Some(flag), Some(flag_net)) = (network_flag, flag_network) {
+                        if flag_net != wallet_net {
+                            anyhow::bail!(
                             "--network {flag} does not match {}, which is a {wallet_net} wallet",
                             wallet_path.display()
                         );
+                        }
                     }
+                    let label = network_flag.unwrap_or(&wallet_file.network).to_string();
+                    (wallet_net, label)
                 }
-                let label = network_flag.unwrap_or(&wallet_file.network).to_string();
-                (wallet_net, label)
-            }
-            // No wallet, or one naming a network this build does not know — which gives
-            // nothing to bind to; `WalletFile::is_mainnet` already treats such a wallet as the
-            // dangerous case.
-            None => {
-                let network = match flag_network.or(declared_network) {
-                    Some(n) => n,
-                    None => config.network()?,
-                };
-                let label = network_flag.unwrap_or(&config.default_network).to_string();
-                (network, label)
-            }
-        };
+                // No wallet, or one naming a network this build does not know — which gives
+                // nothing to bind to; `WalletFile::is_mainnet` already treats such a wallet as the
+                // dangerous case.
+                None => {
+                    let network = match flag_network.or(declared_network) {
+                        Some(n) => n,
+                        None => config.network()?,
+                    };
+                    let label = network_flag.unwrap_or(&config.default_network).to_string();
+                    (network, label)
+                }
+            };
 
         config.default_network = network.to_string();
-        Ok(Target { network, network_label, config, config_path: path })
+        Ok(Target {
+            network,
+            network_label,
+            config,
+            config_path: path,
+        })
     }
 }
 
@@ -100,7 +110,10 @@ mod tests {
     use super::*;
 
     fn wallet(network: &str) -> WalletFile {
-        WalletFile { network: network.to_string(), mnemonic: String::new() }
+        WalletFile {
+            network: network.to_string(),
+            mnemonic: String::new(),
+        }
     }
 
     fn loaded(declared: Option<Network>) -> LoadedConfig {
@@ -128,10 +141,17 @@ mod tests {
     #[test]
     fn a_config_for_another_network_is_refused() {
         let w = wallet("bitcoin-signet");
-        let err = Target::bind(loaded(Some(Network::LiquidTestnet)), Some((path(), &w)), None)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("bitcoin-signet wallet") && err.contains("liquid-testnet"), "{err}");
+        let err = Target::bind(
+            loaded(Some(Network::LiquidTestnet)),
+            Some((path(), &w)),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("bitcoin-signet wallet") && err.contains("liquid-testnet"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -150,8 +170,12 @@ mod tests {
     #[test]
     fn the_network_label_keeps_the_given_spelling() {
         let w = wallet("testnet");
-        let t = Target::bind(loaded(Some(Network::LiquidTestnet)), Some((path(), &w)), None)
-            .unwrap();
+        let t = Target::bind(
+            loaded(Some(Network::LiquidTestnet)),
+            Some((path(), &w)),
+            None,
+        )
+        .unwrap();
         assert_eq!(t.network, Network::LiquidTestnet);
         assert_eq!(t.network_label, "testnet");
     }
@@ -174,6 +198,9 @@ mod tests {
         let b = wallet("liquid");
         let ta = Target::bind(loaded(None), Some((path(), &a)), None).unwrap();
         let tb = Target::bind(loaded(None), Some((path(), &b)), None).unwrap();
-        assert_eq!((ta.network, tb.network), (Network::BitcoinSignet, Network::Liquid));
+        assert_eq!(
+            (ta.network, tb.network),
+            (Network::BitcoinSignet, Network::Liquid)
+        );
     }
 }

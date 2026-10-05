@@ -52,8 +52,14 @@ pub struct AssetMeta {
 pub fn lookup_asset(label: &str) -> AssetMeta {
     let l = label.trim().to_lowercase();
     match l.as_str() {
-        "lbtc" | "bitcoin" | TLBTC_ASSET_ID => AssetMeta { symbol: "tL-BTC".into(), precision: 8 },
-        TUSD_ASSET_ID => AssetMeta { symbol: "tUSD".into(), precision: 8 },
+        "lbtc" | "bitcoin" | TLBTC_ASSET_ID => AssetMeta {
+            symbol: "tL-BTC".into(),
+            precision: 8,
+        },
+        TUSD_ASSET_ID => AssetMeta {
+            symbol: "tUSD".into(),
+            precision: 8,
+        },
         // Unknown asset: show a short id, count in base units.
         other => {
             let sym = if other.len() > 12 {
@@ -61,7 +67,10 @@ pub fn lookup_asset(label: &str) -> AssetMeta {
             } else {
                 other.to_string()
             };
-            AssetMeta { symbol: sym, precision: 0 }
+            AssetMeta {
+                symbol: sym,
+                precision: 0,
+            }
         }
     }
 }
@@ -132,11 +141,8 @@ fn resolve_token(token: &str, ctx: &ExecutionContext) -> Option<String> {
 /// Returns `None` when the reference doesn't resolve (rather than the literal),
 /// so callers can flag authoring mistakes.
 fn resolve_ref(reference: &str, ctx: &ExecutionContext) -> Option<String> {
-    let resolved = eval::eval_asset_label(
-        &serde_json::Value::String(reference.to_string()),
-        ctx,
-    )
-    .ok()?;
+    let resolved =
+        eval::eval_asset_label(&serde_json::Value::String(reference.to_string()), ctx).ok()?;
     // `eval_asset_label` echoes unknown refs back as a literal; treat an
     // unchanged echo of a `namespace.key` reference as "unresolved".
     if resolved == reference && reference.contains('.') {
@@ -164,7 +170,11 @@ pub struct WalletDelta {
 /// Render `- 0.000034 tL-BTC` style, returning `(is_credit, "amount symbol")`.
 fn format_signed(units: i64, meta: &AssetMeta) -> (bool, String) {
     let credit = units >= 0;
-    let text = format!("{} {}", format_amount(units.unsigned_abs(), meta.precision), meta.symbol);
+    let text = format!(
+        "{} {}",
+        format_amount(units.unsigned_abs(), meta.precision),
+        meta.symbol
+    );
     (credit, text)
 }
 
@@ -241,9 +251,17 @@ pub fn render_preview(
         for bucket in &buckets {
             println!("  {}", style(format!("({})", bucket.heading)).bold());
             for leg in &bucket.legs {
-                let sign = if leg.credit { style("+").green() } else { style("−").red() };
+                let sign = if leg.credit {
+                    style("+").green()
+                } else {
+                    style("−").red()
+                };
                 match leg.amount_text() {
-                    Some(a) => println!("    {sign} {}  {}", style(a).yellow(), style(&leg.label).dim()),
+                    Some(a) => println!(
+                        "    {sign} {}  {}",
+                        style(a).yellow(),
+                        style(&leg.label).dim()
+                    ),
                     None => println!("    {sign} {}", style(&leg.label).dim()),
                 }
             }
@@ -268,7 +286,11 @@ fn render_net_summary(buckets: &[Bucket], fee_sat: Option<u64>, wallet: Option<&
     }
     for (meta, units, exact) in &nets {
         let (credit, text) = format_signed(*units, meta);
-        let sign = if credit { style("+").green() } else { style("−").red() };
+        let sign = if credit {
+            style("+").green()
+        } else {
+            style("−").red()
+        };
         let approx = if *exact { "" } else { "≈ " };
         println!("    {sign} {approx}{}", style(&text).yellow());
     }
@@ -314,7 +336,9 @@ fn wallet_nets(buckets: &[Bucket], wallet: Option<&WalletDelta>) -> Vec<(AssetMe
     let mut order: Vec<String> = Vec::new();
     let mut acc: std::collections::HashMap<String, (u8, i64, bool)> = Default::default();
     for leg in &bucket.legs {
-        let Some(sym) = leg.asset.clone() else { continue };
+        let Some(sym) = leg.asset.clone() else {
+            continue;
+        };
         let e = acc.entry(sym.clone()).or_insert_with(|| {
             order.push(sym.clone());
             (leg.precision, 0, true)
@@ -330,11 +354,19 @@ fn wallet_nets(buckets: &[Bucket], wallet: Option<&WalletDelta>) -> Vec<(AssetMe
         .filter_map(|sym| {
             let (prec, units, exact) = acc[&sym];
             // Drop assets that merely round-trip, but keep inexact ones visible.
-            (units != 0 || !exact).then(|| (AssetMeta { symbol: sym, precision: prec }, units, exact))
+            (units != 0 || !exact).then(|| {
+                (
+                    AssetMeta {
+                        symbol: sym,
+                        precision: prec,
+                    },
+                    units,
+                    exact,
+                )
+            })
         })
         .collect()
 }
-
 
 /// The policy-asset symbol the network fee is denominated in. (Registry is out of
 /// scope; on testnet L-BTC is the fee/policy asset.)
@@ -383,7 +415,9 @@ fn build_net_effect(action: &Action, ctx: &ExecutionContext, fee_sat: Option<u64
     let mut change_leg_count: BTreeMap<String, usize> = BTreeMap::new();
     for output in outputs {
         if is_change(output) {
-            *change_leg_count.entry(output_asset_symbol(output, ctx)).or_default() += 1;
+            *change_leg_count
+                .entry(output_asset_symbol(output, ctx))
+                .or_default() += 1;
         }
     }
 
@@ -392,7 +426,10 @@ fn build_net_effect(action: &Action, ctx: &ExecutionContext, fee_sat: Option<u64
         if let Some(b) = buckets.iter_mut().find(|b| b.heading == heading) {
             b.legs.push(leg);
         } else {
-            buckets.push(Bucket { heading, legs: vec![leg] });
+            buckets.push(Bucket {
+                heading,
+                legs: vec![leg],
+            });
         }
     };
 
@@ -450,7 +487,13 @@ fn build_net_effect(action: &Action, ctx: &ExecutionContext, fee_sat: Option<u64
                 Some(0) => continue,
                 Some(n) => push(
                     heading,
-                    Leg { credit: true, units: Some(n), asset: Some(sym), precision: prec, label },
+                    Leg {
+                        credit: true,
+                        units: Some(n),
+                        asset: Some(sym),
+                        precision: prec,
+                        label,
+                    },
                 ),
                 // Fee unknown (e.g. dry run) — fall back to the placeholder label.
                 None => push(
@@ -492,9 +535,12 @@ fn build_net_effect(action: &Action, ctx: &ExecutionContext, fee_sat: Option<u64
                 order.push(k);
             }
         }
-        bucket
-            .legs
-            .sort_by_key(|leg| order.iter().position(|k| *k == key(leg)).unwrap_or(usize::MAX));
+        bucket.legs.sort_by_key(|leg| {
+            order
+                .iter()
+                .position(|k| *k == key(leg))
+                .unwrap_or(usize::MAX)
+        });
     }
 
     buckets
@@ -565,7 +611,12 @@ fn input_amount(input: &Input, ctx: &ExecutionContext) -> Option<(u64, String, u
         .get_input(&input.id)
         .map(|r| r.amount_sat)
         .filter(|n| *n > 0)
-        .or_else(|| input.amount_sat.as_ref().and_then(|v| eval::eval_amount(v, ctx).ok()))?;
+        .or_else(|| {
+            input
+                .amount_sat
+                .as_ref()
+                .and_then(|v| eval::eval_amount(v, ctx).ok())
+        })?;
     Some((amount, meta.symbol, meta.precision))
 }
 
@@ -686,9 +737,18 @@ mod tests {
             ("COLLATERAL_AMOUNT", "3400"),
             ("PRINCIPAL_ASSET_ID", PRINCIPAL_ID),
             ("COLLATERAL_ASSET_ID", COLLATERAL_ID),
-            ("FACTORY_ASSET_ID", "c6b7a5fdf1a01787af534dc9252d1c99908d929a16f8862b8925dcf53d089c6b"),
-            ("BORROWER_NFT_ASSET_ID", "1c424b82d66f37b9efea9f55bb5fab6dd2524742f8cc2741ed1be185a848c507"),
-            ("LENDER_NFT_ASSET_ID", "7eae7d537d90257c78220a1fd89915b39a2cb293111914e5a2e20d965acf361f"),
+            (
+                "FACTORY_ASSET_ID",
+                "c6b7a5fdf1a01787af534dc9252d1c99908d929a16f8862b8925dcf53d089c6b",
+            ),
+            (
+                "BORROWER_NFT_ASSET_ID",
+                "1c424b82d66f37b9efea9f55bb5fab6dd2524742f8cc2741ed1be185a848c507",
+            ),
+            (
+                "LENDER_NFT_ASSET_ID",
+                "7eae7d537d90257c78220a1fd89915b39a2cb293111914e5a2e20d965acf361f",
+            ),
         ] {
             ctx.set_compile_param(k, v);
         }
@@ -710,8 +770,9 @@ mod tests {
     fn ui_role_reads_detail_form_only() {
         use crate::manifest::UiSpec;
         let detail: UiSpec = serde_json::from_value(
-            serde_json::json!({ "label": "the live loan", "role": "covenant" })
-        ).unwrap();
+            serde_json::json!({ "label": "the live loan", "role": "covenant" }),
+        )
+        .unwrap();
         assert_eq!(detail.label(), Some("the live loan"));
         assert_eq!(detail.role(), Some("covenant"));
 
@@ -736,8 +797,14 @@ mod tests {
     #[test]
     fn format_signed_directions_and_precision() {
         let lbtc = lookup_asset("lbtc");
-        assert_eq!(format_signed(-3626, &lbtc), (false, "0.00003626 tL-BTC".to_string()));
-        assert_eq!(format_signed(100_000_000, &lbtc), (true, "1 tL-BTC".to_string()));
+        assert_eq!(
+            format_signed(-3626, &lbtc),
+            (false, "0.00003626 tL-BTC".to_string())
+        );
+        assert_eq!(
+            format_signed(100_000_000, &lbtc),
+            (true, "1 tL-BTC".to_string())
+        );
         let nft = lookup_asset("1c424b82d66f37b9efea9f55bb5fab6dd2524742f8cc2741ed1be185a848c507");
         let (credit, text) = format_signed(1, &nft);
         assert!(credit);
@@ -747,7 +814,10 @@ mod tests {
     #[test]
     fn unresolved_reference_stays_literal() {
         let ctx = ExecutionContext::new();
-        assert_eq!(interpolate("x {instance.NOPE} y", &ctx), "x {instance.NOPE} y");
+        assert_eq!(
+            interpolate("x {instance.NOPE} y", &ctx),
+            "x {instance.NOPE} y"
+        );
     }
 
     #[test]
@@ -761,9 +831,15 @@ mod tests {
         assert!(headings.contains(&"covenant: lending_collateral"));
 
         // The collateral output lands in the lending covenant as a debit-free credit.
-        let cov = buckets.iter().find(|b| b.heading == "covenant: lending_collateral").unwrap();
+        let cov = buckets
+            .iter()
+            .find(|b| b.heading == "covenant: lending_collateral")
+            .unwrap();
         let collateral_leg = cov.legs.iter().find(|l| l.credit).unwrap();
-        assert_eq!(collateral_leg.amount_text().as_deref(), Some("0.000034 tL-BTC"));
+        assert_eq!(
+            collateral_leg.amount_text().as_deref(),
+            Some("0.000034 tL-BTC")
+        );
     }
 
     #[test]
@@ -803,8 +879,12 @@ mod tests {
         let (manifest, mut ctx) = create_offer_ctx();
         for (id, asset) in [("collateral_in", COLLATERAL_ID), ("fee_input", "lbtc")] {
             ctx.set_input(ResolvedInput {
-                id: id.into(), txid: "00".repeat(32), vout: 0,
-                amount_sat: 49_470, asset: asset.into(), issuance_entropy: None,
+                id: id.into(),
+                txid: "00".repeat(32),
+                vout: 0,
+                amount_sat: 49_470,
+                asset: asset.into(),
+                issuance_entropy: None,
             });
         }
         let action = create_offer(&manifest);
@@ -824,13 +904,15 @@ mod tests {
             }
         }
         // Sanity: the factory-asset debit and credit are adjacent.
-        let factory_sym = lookup_asset(
-            "c6b7a5fdf1a01787af534dc9252d1c99908d929a16f8862b8925dcf53d089c6b",
-        )
-        .symbol;
-        let idxs: Vec<usize> = wallet.legs.iter().enumerate()
+        let factory_sym =
+            lookup_asset("c6b7a5fdf1a01787af534dc9252d1c99908d929a16f8862b8925dcf53d089c6b").symbol;
+        let idxs: Vec<usize> = wallet
+            .legs
+            .iter()
+            .enumerate()
             .filter(|(_, l)| l.asset.as_deref() == Some(factory_sym.as_str()))
-            .map(|(i, _)| i).collect();
+            .map(|(i, _)| i)
+            .collect();
         assert_eq!(idxs.len(), 2);
         assert_eq!(idxs[1], idxs[0] + 1);
     }
@@ -847,29 +929,53 @@ mod tests {
         for (k, v) in [
             ("PRINCIPAL_AMOUNT", "1000"),
             ("PRINCIPAL_ASSET_ID", PRINCIPAL_ID),
-            ("BORROWER_NFT_ASSET_ID", "a2f1d6000000000000000000000000000000000000000000000000000000001059"),
+            (
+                "BORROWER_NFT_ASSET_ID",
+                "a2f1d6000000000000000000000000000000000000000000000000000000001059",
+            ),
         ] {
             ctx.set_compile_param(k, v);
         }
         for (id, vout, amount, asset) in [
             ("principal_asset_auth_in", 0u32, 1000u64, PRINCIPAL_ID),
-            ("borrower_nft_in", 1, 1, "a2f1d6000000000000000000000000000000000000000000000000000000001059"),
+            (
+                "borrower_nft_in",
+                1,
+                1,
+                "a2f1d6000000000000000000000000000000000000000000000000000000001059",
+            ),
             ("fee_input", 2, 92_509, "lbtc"),
         ] {
             ctx.set_input(ResolvedInput {
-                id: id.into(), txid: "00".repeat(32), vout,
-                amount_sat: amount, asset: asset.into(), issuance_entropy: None,
+                id: id.into(),
+                txid: "00".repeat(32),
+                vout,
+                amount_sat: amount,
+                asset: asset.into(),
+                issuance_entropy: None,
             });
         }
-        let action = manifest.contract_templates.as_ref().unwrap().get("lending_contract").unwrap()
-            .actions.get("ClaimPrincipal").unwrap();
+        let action = manifest
+            .contract_templates
+            .as_ref()
+            .unwrap()
+            .get("lending_contract")
+            .unwrap()
+            .actions
+            .get("ClaimPrincipal")
+            .unwrap();
         let buckets = build_net_effect(action, &ctx, Some(195));
         let nets = wallet_nets(&buckets, None);
 
-        let rendered: Vec<(String, i64)> =
-            nets.iter().map(|(m, u, _)| (m.symbol.clone(), *u)).collect();
+        let rendered: Vec<(String, i64)> = nets
+            .iter()
+            .map(|(m, u, _)| (m.symbol.clone(), *u))
+            .collect();
         // The NFT round-trip is gone; L-BTC is exactly −fee; principal is +1000.
-        assert_eq!(rendered, vec![("tL-BTC".to_string(), -195), ("tUSD".to_string(), 1000)]);
+        assert_eq!(
+            rendered,
+            vec![("tL-BTC".to_string(), -195), ("tUSD".to_string(), 1000)]
+        );
         assert!(nets.iter().all(|(_, _, exact)| *exact));
     }
 
@@ -913,6 +1019,9 @@ mod tests {
         let buckets = build_net_effect(action, &ctx, None); // fee unknown
         let wallet = buckets.iter().find(|b| b.heading == "your wallet").unwrap();
         // With no fee we cannot be exact, so change stays a labelled placeholder.
-        assert!(wallet.legs.iter().any(|l| l.units.is_none() && l.label.contains("if any")));
+        assert!(wallet
+            .legs
+            .iter()
+            .any(|l| l.units.is_none() && l.label.contains("if any")));
     }
 }

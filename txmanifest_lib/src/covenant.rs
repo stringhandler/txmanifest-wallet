@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::chain::{ChainFamily, Network, TaprootTag, SIMPLICITY_LEAF_VERSION};
 use anyhow::{Context, Result};
 use lwk_wollet::elements::{
     hashes::{sha256, Hash as ElementsHash, HashEngine},
@@ -9,7 +10,6 @@ use lwk_wollet::elements::{
     taproot::{ControlBlock, LeafVersion, TaprootMerkleBranch, TaprootSpendInfo},
     Address, AddressParams, BlockHash, Script, Transaction, TxOut,
 };
-use crate::chain::{ChainFamily, Network, TaprootTag, SIMPLICITY_LEAF_VERSION};
 use simplicityhl::ast::ElementsJetHinter;
 use simplicityhl::simplicity::bit_machine::{ExecTracker, FrameIter, NodeOutput};
 use simplicityhl::simplicity::jet::elements::{ElementsEnv, ElementsUtxo};
@@ -164,7 +164,14 @@ pub fn compute_covenant_script_hash(
     network: lwk_wollet::ElementsNetwork,
     opts: impl Into<CompileOpts>,
 ) -> Result<[u8; 32]> {
-    compute_covenant_script_hash_with_leaves(simf_path, compile_params, type_hints, &[], network, opts)
+    compute_covenant_script_hash_with_leaves(
+        simf_path,
+        compile_params,
+        type_hints,
+        &[],
+        network,
+        opts,
+    )
 }
 
 /// Like [`compute_covenant_script_hash`] but folds `extra_leaf_payloads` (taproot storage
@@ -179,7 +186,14 @@ pub fn compute_covenant_script_hash_with_leaves(
     network: lwk_wollet::ElementsNetwork,
     opts: impl Into<CompileOpts>,
 ) -> Result<[u8; 32]> {
-    let addr = compute_covenant_address(simf_path, compile_params, type_hints, extra_leaf_payloads, network, opts)?;
+    let addr = compute_covenant_address(
+        simf_path,
+        compile_params,
+        type_hints,
+        extra_leaf_payloads,
+        network,
+        opts,
+    )?;
     let spk = addr.script_pubkey();
     Ok(sha256::Hash::hash(spk.as_bytes()).to_byte_array())
 }
@@ -970,9 +984,9 @@ pub fn covenant_script_pubkey_for(
     let opts = opts.into();
     match network.family() {
         ChainFamily::Elements => {
-            let elements_net = network.elements_network().ok_or_else(|| {
-                anyhow::anyhow!("{network} has no Elements network mapping")
-            })?;
+            let elements_net = network
+                .elements_network()
+                .ok_or_else(|| anyhow::anyhow!("{network} has no Elements network mapping"))?;
             let address = compute_covenant_address(
                 simf_path,
                 compile_params,
@@ -1032,8 +1046,8 @@ pub fn compute_bitcoin_covenant_address(
     )?;
 
     let secp = btc::secp256k1::Secp256k1::new();
-    let nums = btc::XOnlyPublicKey::from_slice(&NUMS_KEY_BYTES)
-        .context("Invalid NUMS key bytes")?;
+    let nums =
+        btc::XOnlyPublicKey::from_slice(&NUMS_KEY_BYTES).context("Invalid NUMS key bytes")?;
     let root = btc::taproot::TapNodeHash::from_byte_array(merkle_root);
     let bitcoin_net = match network {
         Network::Bitcoin => btc::Network::Bitcoin,
@@ -1148,7 +1162,10 @@ fn build_witness_values_from_types(
     }
 
     if !problems.is_empty() {
-        anyhow::bail!("Witnesses do not match the program:\n  {}", problems.join("\n  "));
+        anyhow::bail!(
+            "Witnesses do not match the program:\n  {}",
+            problems.join("\n  ")
+        );
     }
 
     Ok(WitnessValues::from(map))
@@ -1467,7 +1484,10 @@ mod tests {
         .expect("arguments parse");
 
         let compile_for = |family| {
-            let opts = CompileOpts { family, ..CompileOpts::default() };
+            let opts = CompileOpts {
+                family,
+                ..CompileOpts::default()
+            };
             compile_program(source.clone(), args.clone(), &opts)
                 .unwrap_or_else(|e| panic!("{family} should compile p2pk: {e}"))
                 .commit()
@@ -1495,7 +1515,10 @@ mod tests {
     #[test]
     fn each_hinter_admits_only_its_own_jets() {
         let compile = |src: &str, family| {
-            let opts = CompileOpts { family, ..CompileOpts::default() };
+            let opts = CompileOpts {
+                family,
+                ..CompileOpts::default()
+            };
             compile_program(src.to_string(), Arguments::default(), &opts)
         };
         let bitcoin_only = "fn main() { let _v: Option<u64> = jet::output_value(0); }";
@@ -1560,7 +1583,10 @@ mod tests {
             "0x0000000000000000000000000000000000000000000000000000000000000001".to_string(),
         )]);
         let hints = HashMap::from([("PUB_KEY".to_string(), "pubkey".to_string())]);
-        let opts = CompileOpts { family: ChainFamily::Elements, ..CompileOpts::default() };
+        let opts = CompileOpts {
+            family: ChainFamily::Elements,
+            ..CompileOpts::default()
+        };
 
         let root = covenant_merkle_root(simf, &params, &hints, &[], &opts).expect("root");
         let address = compute_covenant_address(
@@ -1574,8 +1600,8 @@ mod tests {
         .expect("address");
 
         let secp = Secp256k1::new();
-        let nums =
-            lwk_wollet::elements::secp256k1_zkp::XOnlyPublicKey::from_slice(&NUMS_KEY_BYTES).unwrap();
+        let nums = lwk_wollet::elements::secp256k1_zkp::XOnlyPublicKey::from_slice(&NUMS_KEY_BYTES)
+            .unwrap();
         let expected = Address::p2tr(
             &secp,
             nums,
@@ -1612,7 +1638,10 @@ mod tests {
             &hints,
             &[],
             Network::LiquidTestnet,
-            CompileOpts { family: ChainFamily::Elements, ..CompileOpts::default() },
+            CompileOpts {
+                family: ChainFamily::Elements,
+                ..CompileOpts::default()
+            },
         )
         .expect("elements script");
 
@@ -1622,7 +1651,10 @@ mod tests {
             &hints,
             &[],
             Network::BitcoinSignet,
-            CompileOpts { family: ChainFamily::Bitcoin, ..CompileOpts::default() },
+            CompileOpts {
+                family: ChainFamily::Bitcoin,
+                ..CompileOpts::default()
+            },
         )
         .expect("bitcoin script");
 
@@ -1651,7 +1683,10 @@ mod tests {
             &HashMap::new(),
             &[],
             Network::BitcoinSignet,
-            CompileOpts { family: ChainFamily::Elements, ..CompileOpts::default() },
+            CompileOpts {
+                family: ChainFamily::Elements,
+                ..CompileOpts::default()
+            },
         )
         .expect_err("mismatched family")
         .to_string();
@@ -1664,7 +1699,10 @@ mod tests {
             &HashMap::new(),
             &[],
             Network::LiquidTestnet,
-            CompileOpts { family: ChainFamily::Bitcoin, ..CompileOpts::default() },
+            CompileOpts {
+                family: ChainFamily::Bitcoin,
+                ..CompileOpts::default()
+            },
         )
         .expect_err("wrong network")
         .to_string();
@@ -1700,7 +1738,10 @@ mod tests {
             engine.input(&hi);
             TapNodeHash::from_engine(engine).to_byte_array()
         };
-        assert_eq!(elements, expected, "Elements TapBranch tag disagrees with rust-elements");
+        assert_eq!(
+            elements, expected,
+            "Elements TapBranch tag disagrees with rust-elements"
+        );
     }
 
     /// Both chains reserve the same leaf version for Simplicity, so this is a constant
@@ -1743,7 +1784,10 @@ mod tests {
         let err = build_witness_values_from_types(Some(&declared), &types).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("TOKENS_BURNED"), "{msg}");
-        assert!(msg.contains("unused"), "the error should name the way out: {msg}");
+        assert!(
+            msg.contains("unused"),
+            "the error should name the way out: {msg}"
+        );
 
         // `"unused"` is that way out, and resolves to the zero the pruned branch wants.
         let declared = serde_json::json!({
@@ -1825,7 +1869,10 @@ mod tests {
         // Hex of the wrong width is not silently padded, and the error still names the
         // witness and its value rather than the retry.
         let err = parse_witness_value("W", "ea0b31", &u256).unwrap_err();
-        assert!(err.to_string().contains('W') && err.to_string().contains("ea0b31"), "{err}");
+        assert!(
+            err.to_string().contains('W') && err.to_string().contains("ea0b31"),
+            "{err}"
+        );
 
         // Non-integer types never get the retry: a name is a name there.
         let err = parse_witness_value("ACTION", "deadbeef", &ResolvedType::unit()).unwrap_err();
@@ -1970,7 +2017,11 @@ mod tests {
     #[test]
     fn untyped_asset_named_param_is_not_inferred_as_asset() {
         let asset = "857e17708b6ec9ad0e2cc50a8faa8140b7ad253029443513850f14e4a95589b4";
-        assert_eq!(infer_simf_type("SOME_ASSET_ID"), None, "asset names are no longer type-inferred");
+        assert_eq!(
+            infer_simf_type("SOME_ASSET_ID"),
+            None,
+            "asset names are no longer type-inferred"
+        );
 
         let mut params = HashMap::new();
         params.insert("SOME_ASSET_ID".to_string(), asset.to_string());
@@ -2020,8 +2071,8 @@ mod tests {
         hints.insert("SCRIPT_HASH".to_string(), "bytes32".to_string());
 
         // Path A — the function under test. (Debug-symbol setting must match Path B.)
-        let hash_a = compute_tapleaf_hash(&simf_path, &params, &hints, true)
-            .expect("compute_tapleaf_hash");
+        let hash_a =
+            compute_tapleaf_hash(&simf_path, &params, &hints, true).expect("compute_tapleaf_hash");
 
         // Path B — compile directly, get CMR, use TapLeafHash::from_script.
         let source = std::fs::read_to_string(&simf_path).expect("read simf");
@@ -2206,9 +2257,14 @@ mod tests {
         );
 
         // Hash A: explicit params only (mirrors IssueUtilityNFTs PRE_LOCK_COV_HASH computation)
-        let hash_a =
-            compute_covenant_script_hash(&simf_path, &explicit_params, &explicit_hints, network, false)
-                .expect("hash with explicit params");
+        let hash_a = compute_covenant_script_hash(
+            &simf_path,
+            &explicit_params,
+            &explicit_hints,
+            network,
+            false,
+        )
+        .expect("hash with explicit params");
 
         // Add the extra params that LockCollateral includes via compile_params_map
         // (all instance fields, including ones pre_lock.simf does NOT reference).
@@ -2272,8 +2328,9 @@ mod tests {
         );
 
         // Hash B: all params (mirrors how LockCollateral creates the pre_lock output)
-        let hash_b = compute_covenant_script_hash(&simf_path, &all_params, &all_hints, network, false)
-            .expect("hash with all params");
+        let hash_b =
+            compute_covenant_script_hash(&simf_path, &all_params, &all_hints, network, false)
+                .expect("hash with all params");
 
         let hex_a: String = hash_a.iter().map(|b| format!("{b:02x}")).collect();
         let hex_b: String = hash_b.iter().map(|b| format!("{b:02x}")).collect();
@@ -2423,8 +2480,6 @@ mod tests {
     }
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Bitcoin covenant spending
 // ---------------------------------------------------------------------------
@@ -2499,7 +2554,9 @@ pub fn finalize_bitcoin_covenant_input(
     )?;
     let mut sibling_hashes: Vec<btc::taproot::TapNodeHash> = Vec::new();
     for payload in extra_leaf_payloads {
-        sibling_hashes.push(btc::taproot::TapNodeHash::from_byte_array(tapdata_hash(payload)));
+        sibling_hashes.push(btc::taproot::TapNodeHash::from_byte_array(tapdata_hash(
+            payload,
+        )));
     }
 
     use btc::key::TapTweak as _;
@@ -2598,11 +2655,16 @@ fn inject_bitcoin_signatures<T: std::borrow::Borrow<lwk_wollet::elements::bitcoi
         return Ok(out);
     };
     for (name, spec) in obj.iter_mut() {
-        let Some(map) = spec.as_object() else { continue };
+        let Some(map) = spec.as_object() else {
+            continue;
+        };
         if map.get("type").and_then(|v| v.as_str()) != Some("Signature") {
             continue;
         }
-        let sig_type = map.get("sig_type").and_then(|v| v.as_str()).unwrap_or("sig_hash_all");
+        let sig_type = map
+            .get("sig_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sig_hash_all");
         let hash: [u8; 32] = match sig_type {
             "sig_hash_all" => {
                 use lwk_wollet::elements::hashes::Hash as _;
@@ -2610,7 +2672,10 @@ fn inject_bitcoin_signatures<T: std::borrow::Borrow<lwk_wollet::elements::bitcoi
             }
             other => anyhow::bail!("unknown signature type '{other}' for witness '{name}'"),
         };
-        let key_label = map.get("key").and_then(|v| v.as_str()).unwrap_or(name.as_str());
+        let key_label = map
+            .get("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or(name.as_str());
         let sig = signer(key_label, sig_type, &hash)?;
         *spec = serde_json::json!({
             "type": "simplicityhl",
