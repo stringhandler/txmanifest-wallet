@@ -238,9 +238,13 @@ impl AssemblyContext for ElementsContext<'_> {
     }
 
     fn receive_address(&self, after: Option<u32>) -> Result<AddressInfo> {
+        // `after` is an index already handed out, and LWK's `address(Some(i))` returns the
+        // address *at* `i` — so passing it through gave every wallet output after the first
+        // the same address as the one before it. `None` still means LWK's first unused.
+        let next = after.map(|i| i + 1);
         let addr = self
             .wollet
-            .address(after)
+            .address(next)
             .map_err(|e| anyhow::anyhow!("Cannot derive wallet address: {e}"))?;
         Ok(AddressInfo {
             script_pubkey: addr.address().script_pubkey(),
@@ -465,6 +469,31 @@ mod tests {
 
     const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
                             abandon abandon abandon about";
+
+    /// The Elements half of `receive_addresses_advance`, which only ever covered Bitcoin.
+    /// LWK's `address(Some(i))` returns the address at `i`, so passing the last-used index
+    /// straight through gave a second wallet output the first one's address.
+    #[test]
+    fn elements_receive_addresses_advance() {
+        let w = crate::wallet::WalletFile {
+            network: "testnet".to_string(),
+            mnemonic: MNEMONIC.to_string(),
+        };
+        let wollet = lwk_wollet::Wollet::new(
+            lwk_wollet::ElementsNetwork::LiquidTestnet,
+            lwk_wollet::NoPersist::new(),
+            crate::wallet::descriptor(&w).unwrap(),
+        )
+        .unwrap();
+        let c = ElementsContext { wollet: &wollet, network: lwk_wollet::ElementsNetwork::LiquidTestnet };
+
+        let first = c.receive_address(None).unwrap();
+        let second = c.receive_address(Some(first.index)).unwrap();
+        let third = c.receive_address(Some(second.index)).unwrap();
+        assert_eq!((second.index, third.index), (first.index + 1, first.index + 2));
+        assert_ne!(first.script_pubkey, second.script_pubkey);
+        assert_ne!(second.script_pubkey, third.script_pubkey);
+    }
 
     fn ctx(wallet: &BitcoinWallet) -> BitcoinContext<'_> {
         BitcoinContext {

@@ -1562,9 +1562,9 @@ pub fn run(
         // the fee is estimated below (and the covenant state metadata kept in sync).
         let mut out_amount_formulas: Vec<(String, Option<serde_json::Value>)> = Vec::new();
         let mut collect_outputs_ok = true;
-        // Tracks the next wallet receive-address index so each wallet output gets a unique address.
-        // None on first use → wollet.address(None) picks the next confirmed-unused index, then we
-        // increment for subsequent outputs.
+        // The last receive index handed out in this transaction, so each wallet output gets
+        // its own address. `None` on first use takes the first unused index; after that the
+        // assembly context returns the address past it — see `receive_address`.
         let mut next_wallet_addr_idx: Option<u32> = None;
 
         if collect_inputs_ok {
