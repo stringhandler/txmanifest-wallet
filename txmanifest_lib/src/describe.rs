@@ -171,10 +171,14 @@ fn print_overview(manifest: &Manifest) {
     if let Some(d) = &manifest.description {
         println!("  {}", style(d).italic());
     }
-    println!(
-        "  chain    : {}",
-        manifest.chain.as_deref().unwrap_or("elements (default)")
-    );
+    let family = manifest.chain_family();
+    let defaulted = if manifest.chain.is_none() {
+        " (default)"
+    } else {
+        ""
+    };
+    println!("  chain    : {family}{defaulted}");
+    println!("  requires : {}", manifest.requires.describe());
     println!("  version  : {}", manifest.manifest_version);
 
     if let Some(utxo_types) = &manifest.utxo_types {

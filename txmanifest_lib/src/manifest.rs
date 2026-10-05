@@ -8,6 +8,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use simplicityhl::{UnstableFeature, UnstableFeatures};
 
+use crate::chain::{Capabilities, Capability, ChainFamily};
+
 // ---------------------------------------------------------------------------
 // Top-level file
 // ---------------------------------------------------------------------------
@@ -17,7 +19,7 @@ use simplicityhl::{UnstableFeature, UnstableFeatures};
 /// This is the version of the *file format*, not of this crate. The two move
 /// independently: a release that changes no format field leaves this alone, and a
 /// format change lands here whether or not the crate version moved with it.
-pub const FORMAT_VERSION: &str = "0.2.0";
+pub const FORMAT_VERSION: &str = "0.3.0";
 
 /// Split a version string into `(major, minor)`, ignoring the patch and any
 /// pre-release or build metadata.
@@ -75,7 +77,33 @@ pub struct Manifest {
     pub manifest_version: String,
     pub protocol: String,
     pub description: Option<String>,
-    pub chain: Option<String>,
+    /// Which ledger this protocol is written for: `"elements"` (or its alias `"liquid"`)
+    /// or `"bitcoin"`. Defaults to [`ChainFamily::DEFAULT`] when absent.
+    ///
+    /// Declares the *family*, not the network — a protocol that works on Liquid works on
+    /// Liquid testnet, and pinning one here would be wrong. The wallet's config picks the
+    /// concrete [`crate::chain::Network`].
+    pub chain: Option<ChainFamily>,
+    /// Ledger features this manifest depends on that [`Manifest::chain`] does not already
+    /// settle, e.g. `["simplicity"]` or `["simplicity", "custom::my-feature"]`.
+    ///
+    /// Deliberately narrow. Whether outputs carry an asset id, whether amounts can be
+    /// blinded, whether issuance exists — all of that follows from `chain`, so listing it
+    /// here would be a restatement that can disagree with itself. What is left is the
+    /// residue the chain does not answer: `simplicity`, which is live on Elements but a
+    /// soft fork on Bitcoin, and namespaced third-party features this crate cannot know
+    /// about. See [`crate::chain`].
+    ///
+    /// `validate` checks it both ways — a covenant manifest that omits `simplicity` is an
+    /// error, and declaring what nothing uses is a warning — because both mistakes are
+    /// real: the first passes a target check and then fails at broadcast, and the second
+    /// makes a manifest look less portable than it is.
+    ///
+    /// The empty default is the honest one and the useful one. A manifest that declares
+    /// nothing is claiming to need nothing a stock node lacks — which is exactly the
+    /// manifest that can target Bitcoin today, with no Simplicity activation.
+    #[serde(default)]
+    pub requires: Capabilities,
     /// SimplicityHL toolchain settings for this manifest's `.simf` programs.
     pub simplicity_hl: Option<SimplicityHl>,
     pub utxo_types: Option<BTreeMap<String, UtxoType>>,
@@ -1534,6 +1562,174 @@ impl UtxoType {
 }
 
 impl Manifest {
+    /// The ledger family this manifest targets, defaulting when `chain` is absent.
+    pub fn chain_family(&self) -> ChainFamily {
+        self.chain.unwrap_or(ChainFamily::DEFAULT)
+    }
+
+    /// Every action in the file, top-level and contract-template alike, paired with a
+    /// dot-path location.
+    ///
+    /// `validate` keeps its own walk because it needs each action's param types and
+    /// whether it sits in a template; this one exists for callers that just want the
+    /// actions. Any check that only needs the set should use this rather than open-coding
+    /// the `actions` + `contract_templates` union a third time — a walk that forgets the
+    /// template arm silently skips most of a real manifest.
+    pub fn all_actions(&self) -> Vec<(String, &Action)> {
+        let mut out: Vec<(String, &Action)> = self
+            .actions
+            .iter()
+            .map(|(n, a)| (format!("actions.{n}"), a))
+            .collect();
+        for (cname, cdef) in self.contract_templates.iter().flatten() {
+            for (aname, method) in &cdef.actions {
+                out.push((
+                    format!("contract_templates.{cname}.actions.{aname}"),
+                    method,
+                ));
+            }
+        }
+        out
+    }
+
+    /// The capabilities this manifest's *contents* actually demand, ignoring what
+    /// `requires` claims.
+    ///
+    /// Only the residue that [`Manifest::chain`] does not settle, which today means: does
+    /// any `utxo_type` carry a `script`. Namespaced capabilities are never inferred — this
+    /// crate does not know what they mean, so only the author can say one is needed.
+    pub fn inferred_capabilities(&self) -> Capabilities {
+        let mut caps = Capabilities::none();
+        let uses_covenants = self
+            .utxo_types
+            .iter()
+            .flatten()
+            .any(|(_, t)| t.script.is_some());
+        if uses_covenants {
+            caps.insert(Capability::SIMPLICITY);
+        }
+        caps
+    }
+
+    /// Places where this manifest uses something its declared [`Manifest::chain`] does not
+    /// have.
+    ///
+    /// This is what replaced the `multi-asset` / `asset-issuance` / `confidential-amounts`
+    /// capabilities. The check they powered was worth keeping; making an author *declare*
+    /// them was not, because `chain: "bitcoin"` already says there are no native assets.
+    /// So the rule now reads the chain directly, and there is nothing to keep in sync.
+    ///
+    /// Conservative in the same direction as before: presence of a field is taken as use
+    /// of the feature, because whether an expression resolves to the policy asset is not
+    /// knowable here. The exception is an `asset` naming the policy asset outright — see
+    /// [`names_policy_asset_str`] — which is single-asset behaviour and how this repo's
+    /// own portable examples are written.
+    pub fn chain_mismatches(&self) -> Vec<ChainMismatch> {
+        let family = self.chain_family();
+        let mut out = Vec::new();
+
+        let mut flag = |location: String, uses: &'static str, missing: &'static str| {
+            out.push(ChainMismatch {
+                location,
+                uses,
+                missing,
+            });
+        };
+
+        if !family.has_native_assets() {
+            for (name, t) in self.utxo_types.iter().flatten() {
+                if t.asset
+                    .as_deref()
+                    .is_some_and(|a| !names_policy_asset_str(a))
+                {
+                    flag(
+                        format!("utxo_types.{name}.asset"),
+                        "a non-policy asset",
+                        "native assets",
+                    );
+                }
+            }
+        }
+
+        for (loc, action) in self.all_actions() {
+            if !family.has_native_assets() && matches!(action.allow_change, AllowChange::Any) {
+                flag(
+                    format!("{loc}.allow_change"),
+                    "change in any asset",
+                    "native assets",
+                );
+            }
+            for input in action.inputs.iter().flatten() {
+                let at = |f: &str| format!("{loc}.inputs.{}.{f}", input.id);
+                if !family.has_native_assets()
+                    && input.asset.as_ref().is_some_and(names_non_policy_asset)
+                {
+                    flag(at("asset"), "a non-policy asset", "native assets");
+                }
+                if !family.has_asset_issuance() && input.issuance.is_some() {
+                    flag(at("issuance"), "an asset issuance", "asset issuance");
+                }
+                if !family.has_confidential_amounts() && input.blinding.is_some() {
+                    flag(at("blinding"), "blinding factors", "confidential amounts");
+                }
+            }
+            for output in action.outputs.iter().flatten() {
+                let at = |f: &str| format!("{loc}.outputs.{}.{f}", output.id);
+                if !family.has_native_assets()
+                    && output.asset.as_ref().is_some_and(names_non_policy_asset)
+                {
+                    flag(at("asset"), "a non-policy asset", "native assets");
+                }
+                if !family.has_confidential_amounts() {
+                    if output.blinding.is_some() {
+                        flag(at("blinding"), "blinding factors", "confidential amounts");
+                    }
+                    if output.confidential == Some(true) {
+                        flag(
+                            at("confidential"),
+                            "a blinded output",
+                            "confidential amounts",
+                        );
+                    }
+                }
+            }
+        }
+
+        out
+    }
+
+    /// Can a wallet supporting `chain` and `capabilities` execute this manifest?
+    ///
+    /// The support check `requires` exists for. A third-party wallet answers "do I handle
+    /// this file" by passing what it implements and reading the verdict, rather than
+    /// reimplementing this crate's inference over the manifest body.
+    ///
+    /// Both halves are checked because both can disqualify a wallet, and for different
+    /// reasons. A capability gap is about the wallet: it could be closed by implementing
+    /// something. A chain mismatch is about the file: an Elements manifest is not going to
+    /// become executable by a Bitcoin wallet.
+    ///
+    /// Note the contract this honours and the one it does not. If the verdict is
+    /// [`Support::Yes`], a wallet implementing `capabilities` on `chain` has everything the
+    /// *ledger* must provide. It does not certify that the wallet can construct every
+    /// transaction shape the manifest asks for — OP_RETURN outputs, relative timelocks and
+    /// the like are not in the capability vocabulary, so an implementor still reads the
+    /// manifest body for those.
+    pub fn supported_by(&self, chain: ChainFamily, capabilities: &Capabilities) -> Support {
+        if self.chain_family() != chain {
+            return Support::WrongChain {
+                manifest: self.chain_family(),
+                wallet: chain,
+            };
+        }
+        let missing = self.requires.missing_from(capabilities);
+        if missing.is_empty() {
+            Support::Yes
+        } else {
+            Support::Missing(missing)
+        }
+    }
+
     /// Whether covenants should be compiled with SimplicityHL debug symbols included.
     /// Defaults to `false`; see [`SimplicityHl::debug_symbols`].
     pub fn include_debug_symbols(&self) -> bool {
@@ -1557,6 +1753,7 @@ impl Manifest {
         crate::covenant::CompileOpts {
             debug_symbols: self.include_debug_symbols(),
             unstable_features: self.unstable_features(),
+            family: self.chain_family(),
         }
     }
 
@@ -1571,6 +1768,61 @@ impl Manifest {
 
 #[cfg(test)]
 mod tests {
+
+    /// The support check `requires` exists for: a wallet passes what it implements and
+    /// gets a verdict, without reimplementing this crate's inference over the body.
+    #[test]
+    fn supported_by_answers_a_wallets_question() {
+        use crate::chain::{Capabilities, Capability, ChainFamily};
+
+        let covenant = Manifest::from_json_str(
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "chain": "bitcoin",
+                 "requires": ["simplicity"],
+                 "utxo_types": { "v": { "description": "d",
+                   "script": { "type": "simplicity", "source": "./x.simf" } } },
+                 "actions": { "A": { "outputs": [ { "id": "o0", "amount_sat": "1",
+                   "destination": { "utxo_type": "v" } } ] } } }"#,
+        )
+        .expect("manifest parses");
+
+        let none = Capabilities::none();
+        let simplicity = Capabilities::from_iter([Capability::SIMPLICITY]);
+
+        assert_eq!(
+            covenant.supported_by(ChainFamily::Bitcoin, &none),
+            Support::Missing(vec![Capability::SIMPLICITY])
+        );
+        assert!(covenant
+            .supported_by(ChainFamily::Bitcoin, &simplicity)
+            .is_supported());
+
+        // The chain disqualifies a wallet on its own, and says so differently: a capability
+        // gap is closable by implementing something, a wrong chain is not.
+        assert_eq!(
+            covenant.supported_by(ChainFamily::Elements, &simplicity),
+            Support::WrongChain {
+                manifest: ChainFamily::Bitcoin,
+                wallet: ChainFamily::Elements
+            }
+        );
+    }
+
+    /// A manifest needing nothing is supported by a wallet implementing nothing — the case
+    /// that makes an empty `requires` meaningful rather than degenerate.
+    #[test]
+    fn a_plain_manifest_is_supported_by_a_plain_wallet() {
+        use crate::chain::{Capabilities, ChainFamily};
+        let plain = Manifest::from_json_str(
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "chain": "bitcoin",
+                 "requires": [],
+                 "actions": { "Pay": { "outputs": [ { "id": "o0", "amount_sat": "1000",
+                   "destination": "wallet" } ] } } }"#,
+        )
+        .expect("manifest parses");
+        assert!(plain
+            .supported_by(ChainFamily::Bitcoin, &Capabilities::none())
+            .is_supported());
+    }
     use super::*;
 
     /// The version this build implements must read, and every other 0.x line must not.
@@ -1579,14 +1831,16 @@ mod tests {
     /// minor is where a breaking change lands, so 0.1 and 0.2 are separate formats.
     #[test]
     fn format_version_gate_is_minor_exact_at_zero_x() {
-        assert!(check_format_version("0.2.0").is_ok());
-        assert!(check_format_version("0.2.7").is_ok(), "patch must not gate");
+        assert!(check_format_version("0.3.0").is_ok());
+        assert!(check_format_version("0.3.7").is_ok(), "patch must not gate");
         assert!(
-            check_format_version("0.2.0-rc1").is_ok(),
+            check_format_version("0.3.0-rc1").is_ok(),
             "pre-release must not gate"
         );
 
-        for rejected in ["0.1.0", "0.3.0", "1.0.0", "1.2.0"] {
+        // Both neighbours are refused, not just the older one: at 0.x the minor is where
+        // breaking changes live, so a newer minor is as unreadable as an older one.
+        for rejected in ["0.1.0", "0.2.0", "0.4.0", "1.0.0", "1.3.0"] {
             assert!(
                 check_format_version(rejected).is_err(),
                 "{rejected} is a different format from {FORMAT_VERSION} and must be refused"
@@ -1616,7 +1870,7 @@ mod tests {
             "the error should name the version that was refused, got: {err}"
         );
 
-        Manifest::from_json_str(r#"{ "manifest_version": "0.2.0", "protocol": "t" }"#)
+        Manifest::from_json_str(r#"{ "manifest_version": "0.3.0", "protocol": "t" }"#)
             .expect("the current format version must parse");
     }
 
@@ -1628,7 +1882,7 @@ mod tests {
     fn manifest_json(extra: &str) -> String {
         format!(
             r#"{{
-                "manifest_version": "0.2.0",
+                "manifest_version": "0.3.0",
                 "protocol": "test",
                 "actions": {{ "A": {{ "inputs": [
                     {{ "id": "in0", "utxo_source": "wallet"{extra} }}
@@ -1661,46 +1915,46 @@ mod tests {
     fn removed_legacy_fields_are_rejected() {
         // `deploy` — superseded by `create_instance`.
         let deploy = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "actions": { "A": { "deploy": true } }
         }"#;
         // Top-level `compile_params` — superseded by the flat `params` map.
         let compile_params = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "compile_params": { "user_provided": {}, "derived": {} }
         }"#;
         // `attestation_version` — never read by anything.
         let attestation = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "attestation_version": "1"
         }"#;
         // `confidential_outputs` — a file-level default no manifest ever set, so it
         // only ever passed through to the chain default. Set it per output instead.
         let confidential = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "confidential_outputs": true
         }"#;
 
         // `lifecycle` — a free-form state/transition block nothing enforced; removed
         // for now, so it must not silently reappear as an ignored key.
         let lifecycle = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "lifecycle": { "states": ["a"], "transitions": {} }
         }"#;
 
         // Both folded into the `simplicity_hl` object.
         let hl_version = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "simplicity_hl_version": "0.6.0"
         }"#;
         let debug_symbols = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "compile_debug_symbols": true
         }"#;
 
         // `errors` — a code→description lookup table nothing ever read.
         let errors = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "errors": { "1": "something went wrong" }
         }"#;
         // `validations` — deferred to a future addition. Of the 11 entries the
@@ -1717,7 +1971,7 @@ mod tests {
         // starting point for that work, and the thing to delete if the decision is
         // that covenant-level enforcement is sufficient.
         let validations = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "actions": { "A": { "validations": [
                 { "id": "v", "rule": { "type": "arithmetic", "expr": "1 != 2" } }
             ] } }
@@ -1726,20 +1980,20 @@ mod tests {
         // Top-level `params` — no example ever used it; template `fields` is the live
         // path. Action-level `params` is a different field and still exists.
         let params = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "params": { "P": { "type": "u64" } }
         }"#;
         // Top-level `source` — never set by any manifest; the engine now always
         // falls back to "covenant.simf". Per-utxo_type `script.source` is unaffected.
         let source = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "source": "./covenant.simf"
         }"#;
 
         // `classes` — renamed to `contract_templates` to match tx_manifest_spec
         // (2026-07-06). `create_instance.class` became `template` in the same pass.
         let classes = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "classes": { "C": { "fields": {}, "methods": {} } }
         }"#;
 
@@ -1748,7 +2002,7 @@ mod tests {
         // executed hooks in alphabetical rather than declaration order), and
         // `on_validate` was never executed at all.
         let hooks = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "actions": { "A": { "hooks": { "on_validate": "assert!(true)" } } }
         }"#;
 
@@ -1759,14 +2013,14 @@ mod tests {
         // NOTE: this puts the repo *ahead* of tx_manifest_spec, whose Hooks extension
         // still lists `args.NAME` as an assignment target.
         let args = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "actions": { "A": { "args": { "SIG": { "type": "bytes32" } } } }
         }"#;
 
         // Action-level `ui` — flattened to a bare `intent` string (the wrapper held
         // exactly one field). Per-leg `ui` is a different field and still exists.
         let action_ui = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "actions": { "A": { "ui": { "action": "do the thing" } } }
         }"#;
 
@@ -1774,21 +2028,21 @@ mod tests {
         // the same type (`MethodDef` was a type alias for `Action`), and "methods" is
         // the OOP jargon `contract_templates` was chosen to avoid.
         let methods = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "contract_templates": { "T": { "fields": {}, "methods": {} } }
         }"#;
 
         // `is_constructor` — an action carrying `create_instance` *is* a constructor;
         // the flag was a second way of saying the same thing, and could disagree.
         let is_constructor = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "contract_templates": { "T": { "fields": {},
                 "actions": { "A": { "is_constructor": true } } } }
         }"#;
         // `create_instance.template` — the instance is always of the enclosing
         // template, so naming it invited creating an instance of a different one.
         let ci_template = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "contract_templates": { "T": { "fields": {},
                 "actions": { "A": { "create_instance": { "template": "T", "fields": {} } } } } }
         }"#;
@@ -1797,19 +2051,19 @@ mod tests {
         // they belong on the input. No manifest ever set the action-level map, and
         // Spec.md §8 places witnesses on an input descriptor only.
         let action_witnesses = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "actions": { "A": { "witnesses": { "SIG": { "type": "Signature" } } } }
         }"#;
 
         // `derived` — a boolean saying "this is computed", alongside `compute`, which
         // says the same thing and also says how. Only the second is load-bearing.
         let derived = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "actions": { "A": { "params": { "P": { "type": "u64", "derived": true } } } }
         }"#;
         // `formula` — merged into `compute`, whose bare-string form it now is.
         let formula = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "actions": { "A": { "params": { "P": { "type": "u64", "formula": "1 + 1" } } } }
         }"#;
 
@@ -1819,7 +2073,7 @@ mod tests {
         // tokens beside an explicit collateral UTXO. Every example set it `false`, and
         // the builder only ever consulted it to warn. `output.confidential` says it now.
         let utxo_type_confidential = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "utxo_types": { "t": { "description": "d", "confidential": true } }
         }"#;
 
@@ -1827,7 +2081,7 @@ mod tests {
         // same question ("where does this value come from, if not the user?") and its
         // name collided with `script.source`, which is a file path.
         let source = r#"{
-            "manifest_version": "0.2.0", "protocol": "test",
+            "manifest_version": "0.3.0", "protocol": "test",
             "actions": { "A": { "params": { "P": {
                 "type": "pubkey", "source": { "type": "wallet_key" } } } } }
         }"#;
@@ -1871,7 +2125,7 @@ mod tests {
         // `debug_symbols` changes every covenant address, so pin both the plumbing
         // and the default rather than trusting the field is wired up.
         let with_debug = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "simplicity_hl": { "debug_symbols": true } }"#,
         )
         .expect("simplicity_hl should parse");
@@ -1879,7 +2133,7 @@ mod tests {
 
         // An empty block defaults to false...
         let empty = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "simplicity_hl": {} }"#,
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "simplicity_hl": {} }"#,
         )
         .expect("empty simplicity_hl should parse");
         assert!(!empty.include_debug_symbols());
@@ -1888,7 +2142,7 @@ mod tests {
         // `simc "<range>";` directive's job, so the key must be rejected.
         for key in ["version", "min_version", "simc"] {
             let json = format!(
-                r#"{{ "manifest_version": "0.2.0", "protocol": "t",
+                r#"{{ "manifest_version": "0.3.0", "protocol": "t",
                       "simplicity_hl": {{ "{key}": "0.6.0" }} }}"#
             );
             assert!(
@@ -1899,7 +2153,7 @@ mod tests {
 
         // ...as does an absent block entirely.
         let absent =
-            Manifest::from_json_str(r#"{ "manifest_version": "0.2.0", "protocol": "t" }"#).unwrap();
+            Manifest::from_json_str(r#"{ "manifest_version": "0.3.0", "protocol": "t" }"#).unwrap();
         assert!(!absent.include_debug_symbols());
     }
 
@@ -1911,7 +2165,7 @@ mod tests {
     fn destination_accepts_exactly_the_documented_forms() {
         let parse = |dest: &str| {
             Manifest::from_json_str(&format!(
-                r#"{{ "manifest_version": "0.2.0", "protocol": "t", "actions": {{ "A": {{ "outputs": [
+                r#"{{ "manifest_version": "0.3.0", "protocol": "t", "actions": {{ "A": {{ "outputs": [
                      {{ "id": "o0", "amount_sat": "1", "destination": {dest} }} ] }} }} }}"#
             ))
         };
@@ -1954,7 +2208,7 @@ mod tests {
     #[test]
     fn closed_utxo_type_binds_params_from_the_site_not_the_action() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "utxo_types": { "vault": {
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "utxo_types": { "vault": {
                  "description": "d",
                  "params": {
                    "STATE": { "type": "bytes32", "default": "0xff" },
@@ -1994,7 +2248,7 @@ mod tests {
     #[test]
     fn unbound_param_without_a_default_is_an_error_naming_it() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "utxo_types": { "vault": {
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "utxo_types": { "vault": {
                  "description": "d",
                  "params": { "DEBT": { "type": "u64" } },
                  "script": { "type": "simplicity", "source": "./x.simf" } } } }"#,
@@ -2020,7 +2274,7 @@ mod tests {
     fn leaf_payload_items_accept_exactly_the_documented_forms() {
         let parse = |item: &str| {
             Manifest::from_json_str(&format!(
-                r#"{{ "manifest_version": "0.2.0", "protocol": "t", "utxo_types": {{ "u": {{
+                r#"{{ "manifest_version": "0.3.0", "protocol": "t", "utxo_types": {{ "u": {{
                      "description": "d",
                      "script": {{ "type": "simplicity", "source": "./x.simf",
                                   "extra_leaves": [ {{ "type": "tapdata", "payload": [{item}] }} ] }} }} }} }}"#
@@ -2042,7 +2296,7 @@ mod tests {
         // `tapdata` is the only hashing scheme implemented; anything else was silently
         // hashed as tapdata anyway.
         let err = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "utxo_types": { "u": {
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "utxo_types": { "u": {
                  "description": "d",
                  "script": { "type": "simplicity", "source": "./x.simf",
                              "extra_leaves": [ { "type": "tapscript", "payload": ["0x01"] } ] } } } }"#,
@@ -2057,7 +2311,7 @@ mod tests {
         // the manifest listed — an entry that silently doesn't arrive shows up much later
         // as an "unstable feature not enabled" compile error.
         let enabled = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "simplicity_hl": { "unstable_features": ["enums"] } }"#,
         )
         .expect("unstable_features should parse");
@@ -2070,9 +2324,9 @@ mod tests {
 
         // Absent block, empty block and empty list all mean "nothing unstable".
         for json in [
-            r#"{ "manifest_version": "0.2.0", "protocol": "t" }"#,
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "simplicity_hl": {} }"#,
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t" }"#,
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "simplicity_hl": {} }"#,
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "simplicity_hl": { "unstable_features": [] } }"#,
         ] {
             let m = Manifest::from_json_str(json).expect("should parse");
@@ -2082,7 +2336,7 @@ mod tests {
         // A name the compiler doesn't know is a load-time error, not a mystery compile
         // failure later — and the message says which names exist.
         let err = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "simplicity_hl": { "unstable_features": ["enum"] } }"#,
         )
         .expect_err("a misspelled feature must not parse");
@@ -2095,7 +2349,7 @@ mod tests {
 
         // Both settings travel together to the compile sites.
         let both = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "simplicity_hl": { "debug_symbols": true, "unstable_features": ["enums", "enums"] } }"#,
         )
         .expect("both settings should parse");
@@ -2111,7 +2365,7 @@ mod tests {
     #[test]
     fn wallet_computes_are_recognised_and_are_not_expressions() {
         let m = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": { "params": {
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "actions": { "A": { "params": {
                  "K": { "type": "pubkey",  "compute": { "type": "wallet", "wallet": "key" } },
                  "H": { "type": "bytes32", "compute": { "type": "wallet", "wallet": "script_hash" } },
                  "A": { "type": "string",  "compute": { "type": "wallet", "wallet": "address" } },
@@ -2143,12 +2397,12 @@ mod tests {
         // `"compute": "a + b"` is shorthand for `{"type":"expr","expr":"a + b"}`.
         // Callers read through `as_expr()`, so neither spelling is privileged.
         let bare = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": {
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "actions": { "A": {
                  "params": { "P": { "type": "u64", "compute": "1 + 1" } } } } }"#,
         )
         .expect("bare expression should parse");
         let spelled = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": {
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "actions": { "A": {
                  "params": { "P": { "type": "u64",
                    "compute": { "type": "expr", "expr": "1 + 1" } } } } } }"#,
         )
@@ -2167,7 +2421,7 @@ mod tests {
 
         // A tapleaf spec is not an expression, and must not masquerade as one.
         let tapleaf = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": {
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "actions": { "A": {
                  "params": { "P": { "type": "u64",
                    "compute": { "type": "tapleaf", "simf": "./a.simf" } } } } } }"#,
         )
@@ -2180,7 +2434,7 @@ mod tests {
         // Two *other* fields share the name and must be unaffected by the removal of
         // the top-level one: the per-utxo-type simf wiring, and the simf_fn list.
         let json = r#"{
-            "manifest_version": "0.2.0",
+            "manifest_version": "0.3.0",
             "protocol": "test",
             "actions": {
                 "A": {
@@ -2225,7 +2479,7 @@ mod tests {
     fn comment_key_is_allowed_at_top_level() {
         let json = r#"{
             "$comment": "file-level note",
-            "manifest_version": "0.2.0",
+            "manifest_version": "0.3.0",
             "protocol": "test"
         }"#;
         Manifest::from_json_str(json).expect("top-level $comment should be stripped");
@@ -2240,7 +2494,7 @@ mod tests {
     fn a_bad_compute_spec_names_the_problem() {
         let manifest_with = |compute: &str| {
             format!(
-                r#"{{ "manifest_version": "0.2.0", "protocol": "t", "actions": {{ "A": {{
+                r#"{{ "manifest_version": "0.3.0", "protocol": "t", "actions": {{ "A": {{
                      "params": {{ "P": {{ "type": "u64", "compute": {compute} }} }} }} }} }}"#
             )
         };
@@ -2276,7 +2530,7 @@ mod tests {
     fn a_bad_ui_spec_names_the_problem() {
         let manifest_with = |ui: &str| {
             format!(
-                r#"{{ "manifest_version": "0.2.0", "protocol": "t", "actions": {{ "A": {{
+                r#"{{ "manifest_version": "0.3.0", "protocol": "t", "actions": {{ "A": {{
                      "outputs": [ {{ "id": "o0", "destination": "change", "ui": {ui} }} ] }} }} }}"#
             )
         };
@@ -2300,7 +2554,7 @@ mod tests {
     #[test]
     fn both_ui_spellings_still_parse() {
         // The manual impl must not have narrowed what is accepted.
-        let json = r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": {
+        let json = r#"{ "manifest_version": "0.3.0", "protocol": "t", "actions": { "A": {
              "outputs": [
                { "id": "o0", "destination": "change", "ui": "bare label" },
                { "id": "o1", "destination": "change",
@@ -2340,5 +2594,92 @@ mod tests {
             fv,
             ComputeSpec::Compute(ParamCompute::Expr { .. })
         ));
+    }
+}
+
+/// The verdict from [`Manifest::supported_by`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Support {
+    /// The wallet provides everything this manifest declares.
+    Yes,
+    /// Capabilities the manifest declares that the wallet did not.
+    Missing(Vec<Capability>),
+    /// The manifest is for a different ledger entirely.
+    WrongChain {
+        manifest: ChainFamily,
+        wallet: ChainFamily,
+    },
+}
+
+impl Support {
+    pub fn is_supported(&self) -> bool {
+        matches!(self, Support::Yes)
+    }
+
+    /// One line explaining the verdict, suitable for printing to a user.
+    pub fn describe(&self) -> String {
+        match self {
+            Support::Yes => "supported".to_string(),
+            Support::Missing(caps) => format!(
+                "unsupported: missing {}",
+                caps.iter()
+                    .map(Capability::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Support::WrongChain { manifest, wallet } => {
+                format!("unsupported: manifest targets {manifest}, wallet supports {wallet}")
+            }
+        }
+    }
+}
+
+/// One place a manifest uses something its declared chain does not have.
+///
+/// Carries the dot-path so `validate` can point at the offending field rather than at the
+/// manifest as a whole — an author porting a protocol needs the list of sites, not a
+/// verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainMismatch {
+    /// Dot-path to the offending field, e.g. `actions.Mint.inputs.i0.issuance`.
+    pub location: String,
+    /// What the manifest does there, as a noun phrase: "an asset issuance".
+    pub uses: &'static str,
+    /// What the chain would need to provide, as a noun phrase: "asset issuance".
+    pub missing: &'static str,
+}
+
+/// Aliases and ids that denote the chain's own policy asset (L-BTC on Liquid, BTC on
+/// Bitcoin) rather than a second asset.
+///
+/// Kept in sync with `preview::lookup_asset`, which resolves the same names for display.
+/// The mainnet Liquid id is absent for the same reason it is absent there: this engine has
+/// only ever hardcoded the testnet assets, and adding one chain's id but not the other's
+/// would be worse than adding neither.
+const POLICY_ASSET_ALIASES: [&str; 4] = [
+    "lbtc",
+    "l-btc",
+    "bitcoin",
+    // Liquid testnet L-BTC.
+    "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49",
+];
+
+/// Whether an asset label names the policy asset.
+///
+/// Only a literal counts. A reference (`instance.COLLATERAL_ASSET`) names a value this
+/// module cannot resolve, so it is treated as a second asset — the conservative direction,
+/// since a manifest wrongly marked as needing `multi-asset` costs one line in `requires`
+/// while one wrongly marked portable fails at build time.
+pub fn names_policy_asset_str(label: &str) -> bool {
+    let l = label.trim().to_ascii_lowercase();
+    POLICY_ASSET_ALIASES.contains(&l.as_str())
+}
+
+/// [`names_policy_asset_str`] for the JSON-valued `asset` fields on inputs and outputs.
+/// A non-string value (an object, a computed expression) is not a policy-asset literal.
+fn names_non_policy_asset(value: &serde_json::Value) -> bool {
+    match value.as_str() {
+        Some(s) => !names_policy_asset_str(s),
+        None => true,
     }
 }

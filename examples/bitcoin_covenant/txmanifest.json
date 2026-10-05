@@ -1,0 +1,81 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stringhandler/txmanifest-wallet/main/schema/txmanifest.schema.json",
+  "manifest_version": "0.3.0",
+  "protocol": "bitcoin-covenant",
+  "description": "A Simplicity covenant on Bitcoin. Locks coins under a program the node itself executes, then spends them by satisfying it — the same p2pk.simf that runs on Liquid, unchanged.",
+  "chain": "bitcoin",
+  "requires": ["simplicity"],
+  "simplicity_hl": { "debug_symbols": false },
+  "utxo_types": {
+    "p2pk_vault": {
+      "description": "Coins spendable only by a BIP340 signature over the whole transaction, checked on-chain by Simplicity rather than by Bitcoin script.",
+      "params": {
+        "PUB_KEY": {
+          "type": "pubkey",
+          "description": "x-only key the covenant checks against. Take it from `info` (Wallet Signing Key), so this wallet can satisfy it."
+        }
+      },
+      "script": { "type": "simplicity", "source": "./p2pk.simf" }
+    }
+  },
+  "actions": {
+    "Lock": {
+      "description": "Send coins into the covenant.",
+      "intent": "Lock {params.amount_sat} sat under a Simplicity covenant",
+      "allow_change": "lbtc_only",
+      "params": {
+        "PUB_KEY": { "type": "pubkey", "description": "Key the covenant will require." },
+        "amount_sat": { "type": "u64", "description": "Amount to lock.", "default": "1000000" }
+      },
+      "inputs": [
+        {
+          "id": "funding",
+          "utxo_source": "wallet",
+          "asset": "lbtc",
+          "amount_sat": { "min_amount": "params.amount_sat" },
+          "ui": { "label": "coin being locked", "role": "funding" }
+        }
+      ],
+      "outputs": [
+        {
+          "id": "vault",
+          "amount_sat": "params.amount_sat",
+          "asset": "lbtc",
+          "destination": { "utxo_type": "p2pk_vault", "args": { "PUB_KEY": "params.PUB_KEY" } },
+          "ui": { "label": "coins locked under the covenant", "role": "covenant" }
+        }
+      ]
+    },
+    "Unlock": {
+      "description": "Spend the covenant by satisfying its program.",
+      "intent": "Unlock the covenant and send to {params.dest}",
+      "$comment": "No change output: the amount formula accounts for the fee exactly, so any surplus would be an error rather than a silently invented output.",
+      "params": {
+        "PUB_KEY": { "type": "pubkey", "description": "Key the covenant requires." }
+      },
+      "inputs": [
+        {
+          "id": "vault_in",
+          "utxo_source": { "utxo_type": "p2pk_vault", "args": { "PUB_KEY": "params.PUB_KEY" } },
+          "$comment": "The witness the program reads. `type: Signature` means the engine computes sig_all_hash from the transaction it just built and signs it with the named key — so the value signed is by construction the one the program checks.",
+          "witnesses": {
+            "SIGNATURE": {
+              "type": "Signature",
+              "sig_type": "sig_hash_all",
+              "source": { "key": "params.PUB_KEY" }
+            }
+          },
+          "ui": { "label": "covenant being unlocked", "role": "covenant" }
+        }
+      ],
+      "outputs": [
+        {
+          "id": "unlocked",
+          "amount_sat": "vault_in.amount_sat - fee",
+          "destination": "wallet",
+          "ui": { "label": "unlocked coins", "role": "payment" }
+        }
+      ]
+    }
+  }
+}

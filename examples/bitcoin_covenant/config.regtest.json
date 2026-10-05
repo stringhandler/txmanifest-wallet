@@ -1,0 +1,7 @@
+{
+  "default_network": "bitcoin-regtest",
+  "bitcoin_backend": "rpc",
+  "bitcoin_rpc_url": "http://127.0.0.1:18443",
+  "bitcoin_rpc_auth": "tx:manifest",
+  "simplicity_activated": true
+}

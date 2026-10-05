@@ -15,7 +15,7 @@ use crate::preview;
 use crate::prompt;
 use crate::state::{history_path, ContractState, HistoryEntry, StateHistory, StateUtxo};
 use crate::wallet::{self, WalletFile};
-use crate::{config, covenant, eval, pset_builder};
+use crate::{covenant, eval, pset_builder};
 
 // BIP68 nSequence encoding bits.
 const SEQUENCE_LOCKTIME_DISABLE_FLAG: u32 = 1 << 31;
@@ -84,45 +84,6 @@ fn resolve_input_sequence(inp: &Input, ctx: &ExecutionContext) -> Result<Option<
     Ok(Some(seq))
 }
 
-/// Read a pinned outpoint's explicit amount and asset from the chain.
-///
-/// Best-effort by design: this is one network round-trip in the middle of input
-/// resolution, and a run that is offline, pointed at a lagging server, or spending a
-/// still-unconfirmed output must keep working from the manifest's declared values. So a
-/// failure warns and returns `None` rather than aborting — but when the chain does answer,
-/// it wins over everything else, because it is the only source that cannot be wrong.
-fn fetch_onchain_txout(txid: &str, vout: u32, network: ElementsNetwork) -> Option<(u64, String)> {
-    use crate::backend::{Backend, BackendKind};
-
-    let parsed = lwk_wollet::elements::Txid::from_str(txid).ok()?;
-    let cfg = crate::config::load();
-    let kind = cfg.backend_kind();
-    let url = match kind {
-        BackendKind::Esplora => cfg.esplora_url().to_string(),
-        BackendKind::Electrum => cfg.electrum_url().to_string(),
-    };
-
-    let result = Backend::connect(kind, &url, network)
-        .and_then(|backend| backend.fetch_explicit_txout(parsed, vout));
-    match result {
-        Ok(Some((amount, asset))) => Some((amount, asset.to_string())),
-        Ok(None) => {
-            println!(
-                "  {} {txid}:{vout} is confidential — falling back to the declared amount and asset.",
-                style("[warn]").yellow()
-            );
-            None
-        }
-        Err(e) => {
-            println!(
-                "  {} Cannot read {txid}:{vout} from the chain ({e}) — falling back to the declared amount and asset.",
-                style("[warn]").yellow()
-            );
-            None
-        }
-    }
-}
-
 /// The blinding key for an address destination, honouring the output's `confidential` flag.
 ///
 /// A confidential address carries its own blinding key, and using it is the right default.
@@ -134,18 +95,17 @@ fn fetch_onchain_txout(txid: &str, vout: u32, network: ElementsNetwork) -> Optio
 ///
 /// Stripping the blinding key does not change the scriptPubKey, so a covenant committed to
 /// `sha256(spk)` still matches the output — see `wallet::script_hash_of_address`.
+///
+/// Takes the address's blinding key rather than the address, so it serves both chains: a
+/// Bitcoin address simply has none, and this then correctly reports none.
 fn address_blinding_key(
     output: &crate::manifest::Output,
-    addr: &lwk_wollet::elements::Address,
+    addr_blinding_pubkey: Option<lwk_wollet::elements::bitcoin::PublicKey>,
 ) -> Option<lwk_wollet::elements::bitcoin::PublicKey> {
     if output.confidential == Some(false) {
         return None;
     }
-    addr.blinding_pubkey
-        .map(|pk| lwk_wollet::elements::bitcoin::PublicKey {
-            inner: pk,
-            compressed: true,
-        })
+    addr_blinding_pubkey
 }
 
 /// Resolve an output's pinned blinding factors, if it declared any.
@@ -310,7 +270,9 @@ impl OutpointOverride {
 pub fn run(
     manifest_file: &Path,
     action_name: &str,
-    network: Option<&str>,
+    // The network and config this run targets, bound by `Target::bind`. Nothing below
+    // reads a config of its own.
+    target: &crate::target::Target,
     params_file: Option<&Path>,
     instance: Option<&InstanceFile>,
     // Path the instance was loaded from (INPUT). Never auto-discovered; recorded into the
@@ -343,6 +305,11 @@ pub fn run(
 
     let manifest: Manifest = Manifest::from_json_str(&raw)
         .with_context(|| format!("Failed to parse manifest file: {}", manifest_file.display()))?;
+    // Refuse before anything is derived, signed or broadcast if the target cannot run
+    // this manifest. `validate` cannot do this: it is offline and has no idea which node
+    // the wallet points at, and Simplicity on Bitcoin is a property of the node.
+    check_target_capabilities(&manifest, target)?;
+
     // How every `.simf` in this run compiles: debug symbols (which affect every CMR and
     // address, so interop targets like simplicity-lending can be matched without
     // hardcoding) and any unstable `-Z` features the programs need. Sourced from the
@@ -396,7 +363,12 @@ pub fn run(
         _ => None,
     };
 
-    let overrides = ParamOverrides::load(manifest_file, network, params_file, instance)?;
+    let overrides = ParamOverrides::load(
+        manifest_file,
+        Some(&target.network_label),
+        params_file,
+        instance,
+    )?;
 
     let loaded_wallet: Option<WalletFile> = if wallet_path.exists() {
         Some(wallet::load_wallet(wallet_path)?)
@@ -408,12 +380,27 @@ pub fn run(
         );
         None
     };
+    // A target bound to one wallet must not run another. `Target::bind` checks the wallet it
+    // is given; this checks it was given this one, since a library caller binds and runs
+    // in separate steps.
+    if let Some(w_net) = loaded_wallet.as_ref().and_then(WalletFile::network) {
+        if w_net != target.network {
+            anyhow::bail!(
+                "{} is a {w_net} wallet, but this run is bound to {}",
+                wallet_path.display(),
+                target.network
+            );
+        }
+    }
 
-    // Load UTXOs from persisted wallet state for auto-selection.
-    let available_utxos: Vec<lwk_wollet::WalletTxOut> = match &loaded_wallet {
-        Some(w) if data_dir.exists() => wallet::utxos(w, data_dir).unwrap_or_else(|_| vec![]),
-        _ => vec![],
-    };
+    // The chain this run is on, chosen once; every chain-specific question below is a
+    // method on it. Opened before UTXO loading, because on Bitcoin input selection needs the
+    // scan.
+    let session = crate::session::ChainSession::open(&manifest, target, loaded_wallet.as_ref())?;
+
+    let run_network: Option<crate::chain::Network> = session.network();
+    let available_utxos: Vec<lwk_wollet::WalletTxOut> =
+        session.spendable_utxos(loaded_wallet.as_ref(), data_dir)?;
     let available_explicit: Vec<lwk_wollet::ExternalUtxo> = match &loaded_wallet {
         Some(w) if data_dir.exists() => {
             wallet::explicit_utxos(w, data_dir).unwrap_or_else(|_| vec![])
@@ -722,14 +709,7 @@ pub fn run(
                 // fact about the chain, so reading the amount and asset off it beats any
                 // number the manifest or the operator supplies — those can be wrong, and
                 // a wrong amount is the value the sighash commits to.
-                let onchain = fetch_onchain_txout(
-                    &ov.txid,
-                    ov.vout,
-                    loaded_wallet
-                        .as_ref()
-                        .map(wallet::elements_network)
-                        .unwrap_or(ElementsNetwork::LiquidTestnet),
-                );
+                let onchain = session.txout(target, loaded_wallet.as_ref(), &ov.txid, ov.vout);
                 let asset = onchain
                     .as_ref()
                     .map(|(_, asset)| asset.clone())
@@ -803,9 +783,19 @@ pub fn run(
                             a.to_string()
                         }
                     });
+                    // Compared as resolved asset *ids*, not as written. A manifest names
+                    // the chain's own unit as `"lbtc"` while the state file records the id
+                    // it resolved to, so a raw string compare matched nothing — and the
+                    // covenant the previous action had just recorded looked absent.
+                    let wanted = asset_filter.as_ref().map(|a| {
+                        run_network
+                            .and_then(|n| resolve_asset_label(a, n).ok())
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| a.clone())
+                    });
                     candidates
                         .into_iter()
-                        .find(|u| asset_filter.as_ref().is_none_or(|a| &u.asset == a))
+                        .find(|u| wanted.as_ref().is_none_or(|a| &u.asset == a))
                         .cloned()
                 });
                 if let Some(utxo) = state_match {
@@ -834,13 +824,7 @@ pub fn run(
                         &available_explicit,
                         &mut claimed,
                         manual_inputs,
-                        loaded_wallet.as_ref().map(|w| {
-                            if w.is_mainnet() {
-                                ElementsNetwork::Liquid
-                            } else {
-                                ElementsNetwork::LiquidTestnet
-                            }
-                        }),
+                        run_network,
                         &ctx,
                     )?
                 }
@@ -851,13 +835,7 @@ pub fn run(
                     &available_explicit,
                     &mut claimed,
                     manual_inputs,
-                    loaded_wallet.as_ref().map(|w| {
-                        if w.is_mainnet() {
-                            ElementsNetwork::Liquid
-                        } else {
-                            ElementsNetwork::LiquidTestnet
-                        }
-                    }),
+                    run_network,
                     &ctx,
                 )?
             };
@@ -1134,14 +1112,6 @@ pub fn run(
     let network_for_asset = loaded_wallet.as_ref().map(wallet::elements_network);
     let mut pset_opt: Option<lwk_wollet::elements::pset::PartiallySignedTransaction> = None;
 
-    // Tracks covenant outputs for state-file updates after broadcast.
-    struct CovenantOutputMeta {
-        utxo_type: String,
-        output_id: String,
-        script_pubkey: lwk_wollet::elements::Script,
-        amount_sat: u64,
-        asset: lwk_wollet::elements::AssetId,
-    }
     let mut covenant_output_meta: Vec<CovenantOutputMeta> = Vec::new();
 
     // Computed here so both Step 7 (PSET building) and Step 9 (dry-run) can use them.
@@ -1212,7 +1182,16 @@ pub fn run(
         m
     };
 
+    // The assembly runs when either chain has what it needs. `network_for_asset` is still
+    // required on both, because the Elements arm below reads it directly; on Bitcoin it is
+    // vestigial and the context never consults it.
     if let (Some(wollet), Some(net)) = (&wollet_opt, network_for_asset) {
+        // Everything chain-specific this block needs goes through here. See
+        // `crate::assembly`: the assembly itself is shared, and only these seven
+        // operations differ between Elements and Bitcoin.
+        let assembly_ctx = session.assembly_context(wollet, net);
+        let actx: &dyn crate::assembly::AssemblyContext = assembly_ctx.as_dyn();
+
         // ---- Populate input attrs for issuance inputs (needed by output asset resolution) ----
         for inp in action.inputs.as_deref().unwrap_or_default() {
             match issuance_kind(inp) {
@@ -1436,12 +1415,11 @@ pub fn run(
                             .join(src)
                     })
                     .unwrap_or_else(|| simf_path.clone());
-                let script_pubkey = match pset_builder::covenant_script_pubkey(
+                let script_pubkey = match actx.covenant_script_pubkey(
                     &inp_simf_path,
                     &inp_params,
                     &inp_hints,
                     &leaf_payloads,
-                    net,
                     &compile_opts,
                 ) {
                     Ok(s) => s,
@@ -1475,7 +1453,7 @@ pub fn run(
                 // resolution above). Outputs have always gone through `resolve_asset_id`;
                 // this branch parsed the raw string, so a covenant input on L-BTC —
                 // `"asset": "lbtc"`, the obvious spelling — died with "failed to parse hex".
-                let asset_id = match resolve_asset_id(&resolved.asset, net) {
+                let asset_id = match actx.resolve_asset(&resolved.asset) {
                     Ok(a) => a,
                     Err(e) => {
                         println!(
@@ -1664,7 +1642,7 @@ pub fn run(
                     }
                 };
 
-                let asset_id = match resolve_asset_id(&asset_label, net) {
+                let asset_id = match actx.resolve_asset(&asset_label) {
                     Ok(id) => id,
                     Err(e) => {
                         if output.optional.unwrap_or(false) {
@@ -1847,12 +1825,11 @@ pub fn run(
                                     .join(src)
                             })
                             .unwrap_or_else(|| simf_path.clone());
-                        let script_pubkey = match pset_builder::covenant_script_pubkey(
+                        let script_pubkey = match actx.covenant_script_pubkey(
                             &out_simf_path,
                             &out_params,
                             &out_hints,
                             &leaf_payloads,
-                            net,
                             &compile_opts,
                         ) {
                             Ok(s) => s,
@@ -1875,8 +1852,8 @@ pub fn run(
                         // covenant reads are published in the manifest anyway; the key
                         // buys the builder a way to reopen its own output, nothing more.
                         let blinding_key = if confidential {
-                            let change_addr = match wollet.change(None) {
-                                Ok(a) => a.address().clone(),
+                            let change_addr = match actx.change_address() {
+                                Ok(a) => a,
                                 Err(e) => {
                                     println!(
                                         "  {} Output '{}' cannot derive a blinding key: {e}",
@@ -1888,10 +1865,7 @@ pub fn run(
                                 }
                             };
                             match change_addr.blinding_pubkey {
-                                Some(pk) => Some(lwk_wollet::elements::bitcoin::PublicKey {
-                                    inner: pk,
-                                    compressed: true,
-                                }),
+                                Some(pk) => Some(pk),
                                 None => {
                                     println!(
                                         "  {} Output '{}' is confidential but the wallet has no blinding key — not a CT descriptor.",
@@ -1943,7 +1917,7 @@ pub fn run(
                         });
                     }
                     serde_json::Value::String(dest) if dest == "wallet" => {
-                        let addr_result = match wollet.address(next_wallet_addr_idx) {
+                        let addr_result = match actx.receive_address(next_wallet_addr_idx) {
                             Ok(a) => a,
                             Err(e) => {
                                 println!(
@@ -1954,22 +1928,13 @@ pub fn run(
                                 continue;
                             }
                         };
-                        next_wallet_addr_idx = Some(addr_result.index() + 1);
-                        let addr = addr_result.address().clone();
+                        next_wallet_addr_idx = Some(addr_result.index);
                         // Resolution order: per-output → chain default.
                         // Bitcoin does not support confidential outputs; Liquid defaults to confidential.
-                        let chain_default = matches!(
-                            net,
-                            ElementsNetwork::Liquid | ElementsNetwork::LiquidTestnet
-                        );
+                        let chain_default = actx.confidential_by_default();
                         let is_confidential = output.confidential.unwrap_or(chain_default);
                         let bpk = if is_confidential {
-                            addr.blinding_pubkey.map(|pk| {
-                                lwk_wollet::elements::bitcoin::PublicKey {
-                                    inner: pk,
-                                    compressed: true,
-                                }
-                            })
+                            addr_result.blinding_pubkey
                         } else {
                             None
                         };
@@ -1981,7 +1946,7 @@ pub fn run(
                             collect_outputs_ok = false;
                             break;
                         }
-                        let addr_str = addr.to_string();
+                        let addr_str = addr_result.display.clone();
                         println!(
                             "  {} Output '{}': {} sat {} → wallet ({}…){}",
                             style("+").green(),
@@ -1996,7 +1961,7 @@ pub fn run(
                             }
                         );
                         pset_outputs.push(pset_builder::PsetOutputSpec {
-                            script_pubkey: addr.script_pubkey(),
+                            script_pubkey: addr_result.script_pubkey,
                             amount,
                             asset: asset_id,
                             blinding_key: bpk,
@@ -2006,20 +1971,26 @@ pub fn run(
                     serde_json::Value::String(dest) => {
                         let addr_str =
                             eval::eval_destination_str(dest, &ctx).unwrap_or_else(|| dest.clone());
-                        let addr = match addr_str.trim().parse::<lwk_wollet::elements::Address>() {
-                            Ok(a) => a,
-                            Err(e) => {
-                                println!(
-                                    "  {} Output '{}' address parse failed ('{}': {e})",
-                                    style("[warn]").yellow(),
-                                    output.id,
-                                    addr_str
-                                );
-                                continue;
-                            }
-                        };
-                        let bpk = address_blinding_key(output, &addr);
-                        if bpk.is_none() && addr.blinding_pubkey.is_some() {
+                        // An unparseable destination is fatal, not skippable. `continue`
+                        // here used to drop the output and build the transaction without
+                        // it — the declared payment simply missing and its value falling
+                        // into change. That is the wrong money in the wrong place off the
+                        // back of a warning, so the whole build stops instead.
+                        let parsed =
+                            match crate::assembly::parse_destination(&addr_str, actx.network()) {
+                                Ok(a) => a,
+                                Err(e) => {
+                                    println!(
+                                        "  {} Output '{}' address is unusable: {e}",
+                                        style("[error]").red(),
+                                        output.id
+                                    );
+                                    collect_outputs_ok = false;
+                                    break;
+                                }
+                            };
+                        let bpk = address_blinding_key(output, parsed.blinding_pubkey);
+                        if bpk.is_none() && parsed.blinding_pubkey.is_some() {
                             println!(
                                 "  {} Output '{}' pays a confidential address explicitly (confidential: false) — the amount and asset stay in the clear.",
                                 style("·").dim(), output.id
@@ -2042,7 +2013,7 @@ pub fn run(
                             &addr_str[..addr_str.len().min(24)]
                         );
                         pset_outputs.push(pset_builder::PsetOutputSpec {
-                            script_pubkey: addr.script_pubkey(),
+                            script_pubkey: parsed.script_pubkey,
                             amount,
                             asset: asset_id,
                             blinding_key: bpk,
@@ -2141,7 +2112,7 @@ pub fn run(
             match action.allow_change {
                 crate::manifest::AllowChange::None => {}
                 crate::manifest::AllowChange::LbtcOnly => {
-                    change_assets.insert(net.policy_asset());
+                    change_assets.insert(actx.policy_asset());
                 }
                 crate::manifest::AllowChange::Any => {
                     for i in &pset_inputs {
@@ -2149,14 +2120,14 @@ pub fn run(
                             change_assets.insert(utxo.unblinded.asset);
                         }
                     }
-                    change_assets.insert(net.policy_asset());
+                    change_assets.insert(actx.policy_asset());
                 }
             }
             let mut req = pset_builder::BuildPsetRequest {
                 inputs: pset_inputs,
                 outputs: pset_outputs,
                 fee_rate: fee_rate as f32,
-                policy_asset: net.policy_asset(),
+                policy_asset: actx.policy_asset(),
                 change_assets: change_assets.clone(),
             };
 
@@ -2168,7 +2139,10 @@ pub fn run(
                 .filter_map(|(_, f)| f.as_ref())
                 .any(amount_uses_fee_keyword)
             {
-                match pset_builder::estimate_fee(wollet, net, &req) {
+                // On the chain the transaction is actually for; see
+                // `ChainSession::estimate_fee`.
+                let estimate = session.estimate_fee(wollet, net, &req);
+                match estimate {
                     Ok(est) => {
                         ctx.set_fee(est);
                         println!(
@@ -2200,10 +2174,20 @@ pub fn run(
                             }
                         }
                     }
-                    Err(e) => println!(
-                        "  {} Fee estimation failed (`fee` stays 0): {e}",
-                        style("[warn]").yellow()
-                    ),
+                    // A formula that reads `fee` has no sane value to fall back on. The
+                    // old behaviour left `fee` at 0 and carried on, which turns "estimation
+                    // failed" into "every output computed as if the transaction were free" —
+                    // an amount that is wrong by exactly the fee. On Elements that surfaces
+                    // later as a build failure; on Bitcoin, where the fee is a leftover
+                    // rather than an output, it surfaces as a transaction that overpays by
+                    // whatever the outputs left behind. Neither is worth reaching by
+                    // default, so stop where the cause is still legible.
+                    Err(e) => {
+                        return Err(e.context(
+                            "cannot resolve the `fee` keyword: an output amount depends on it, \
+                         so there is no safe value to continue with",
+                        ))
+                    }
                 }
             }
 
@@ -2215,13 +2199,132 @@ pub fn run(
                 req.outputs.len()
             );
 
-            match pset_builder::build_pset(wollet, net, &req) {
-                Err(e) => {
-                    println!("  {} PSET build failed:", style("[error]").red());
-                    for (i, cause) in e.chain().enumerate() {
-                        println!("    {i}: {cause}");
+            // The chains part company here. Everything above is shared; below, Elements
+            // builds a PSET and carries on to the signing and covenant steps, while
+            // Bitcoin builds, signs and broadcasts a PSBT in one go — it has no covenant
+            // path to run through yet, and nothing downstream would know what to do with a
+            // PSBT.
+            if actx.family() == crate::chain::ChainFamily::Bitcoin {
+                // Resolve each covenant input's program and parameters here, where the
+                // manifest and the execution context are in scope. The Elements path does
+                // the same work in its own finalize step; this is the same resolution,
+                // moved to where the Bitcoin build can reach it.
+                let mut covenant_specs: std::collections::HashMap<String, CovenantSpendSpec> =
+                    std::collections::HashMap::new();
+                let mut specs_ok = true;
+                for action_inp in action.inputs.as_deref().unwrap_or_default() {
+                    let Some(type_name) = action_inp.utxo_type_name() else {
+                        continue;
+                    };
+                    let spec = (|| -> Result<CovenantSpendSpec> {
+                        let ut = manifest.utxo_type(&type_name)?;
+                        let site = resolve_utxo_site(
+                            ut,
+                            Some(&action_inp.utxo_source),
+                            &compile_params_map,
+                            &compile_param_type_hints,
+                            action,
+                            &ctx,
+                        )?;
+                        let path = ut
+                            .script
+                            .as_ref()
+                            .and_then(|sc| sc.source.as_deref())
+                            .map(|src| {
+                                manifest_file
+                                    .parent()
+                                    .unwrap_or(std::path::Path::new("."))
+                                    .join(src)
+                            })
+                            .unwrap_or_else(|| simf_path.clone());
+                        Ok(CovenantSpendSpec {
+                            simf_path: path,
+                            params: site.compile_params,
+                            hints: site.type_hints,
+                            leaf_payloads: site.leaf_payloads,
+                            witnesses: action_inp
+                                .witnesses
+                                .as_ref()
+                                .map(|w| eval::resolve_witness_refs(w, &ctx)),
+                            witness_spec: action_inp.witnesses.clone(),
+                        })
+                    })();
+                    match spec {
+                        Ok(spec) => {
+                            covenant_specs.insert(action_inp.id.clone(), spec);
+                        }
+                        Err(e) => {
+                            println!(
+                                "  {} Covenant input '{}': {e}",
+                                style("[error]").red(),
+                                action_inp.id
+                            );
+                            specs_ok = false;
+                        }
                     }
                 }
+                if !specs_ok {
+                    anyhow::bail!("a covenant input could not be resolved; nothing was built");
+                }
+
+                let params_snap = compile_params_map.clone();
+                let action_params_snap = action_params_map.clone();
+                let wallet_snap = loaded_wallet.clone();
+                let bitcoin_run = session
+                    .bitcoin()
+                    .ok_or_else(|| anyhow::anyhow!("a Bitcoin build with no Bitcoin session"))?;
+                match run_bitcoin_build(
+                    &req,
+                    bitcoin_run,
+                    export_pset_path,
+                    &covenant_specs,
+                    &params_snap,
+                    &action_params_snap,
+                    wallet_snap.as_ref(),
+                    &compile_opts,
+                    action
+                        .intent
+                        .as_deref()
+                        .map(|s| crate::preview::interpolate(s, &ctx))
+                        .as_deref(),
+                ) {
+                    Ok(Some(broadcast)) => {
+                        let recorded_instance = if action.create_instance.is_some() {
+                            Some(effective_instance_out.as_path())
+                        } else {
+                            instance_in_path
+                        };
+                        record_broadcast(
+                            &BroadcastRecord {
+                                action_name,
+                                action,
+                                instance: recorded_instance,
+                                covenant_outputs: &covenant_output_meta,
+                                state_out: &effective_state_out,
+                                history_seed: &history_seed,
+                            },
+                            &broadcast.txid,
+                            &broadcast.outputs,
+                            &mut ctx,
+                            &mut contract_state,
+                        );
+                    }
+                    // Exported, or declined at the prompt: nothing exists on chain yet, so
+                    // there is no state to record.
+                    Ok(None) => {}
+                    // A build, signing or broadcast failure is a failed run, and says so in
+                    // the exit status. It used to print and return `Ok`, so a rejected
+                    // broadcast looked, to anything checking, like a payment made.
+                    Err(e) => return Err(e.context("Bitcoin build failed")),
+                }
+                return Ok(());
+            }
+
+            match pset_builder::build_pset(wollet, net, &req) {
+                // With a wallet loaded, a transaction that cannot be built is a failed run.
+                // Carrying on reached the broadcast prompt with nothing to broadcast, and
+                // exited 0.
+                Err(e) => return Err(e.context("PSET build failed")),
                 Ok(result) => {
                     for iso in &result.issuances {
                         // Printed in full, not elided. These ids exist nowhere else yet:
@@ -2444,6 +2547,8 @@ pub fn run(
                                 let utxos: Vec<lwk_wollet::elements::TxOut> =
                                     witness_utxos.into_iter().flatten().collect();
                                 let genesis_hash = network_genesis_hash(net_for_hash);
+                                let chain_family =
+                                    crate::chain::Network::from(net_for_hash).family();
 
                                 let action_inputs = action.inputs.as_deref().unwrap_or_default();
                                 let mut exec_all_ok = true;
@@ -2542,6 +2647,7 @@ pub fn run(
                                         &utxos,
                                         pset_idx as u32,
                                         genesis_hash,
+                                        chain_family,
                                         debug_jets,
                                         &compile_opts,
                                     ) {
@@ -2629,6 +2735,7 @@ pub fn run(
 
                             let tx = Arc::new(tx);
                             let genesis_hash = network_genesis_hash(net_for_hash);
+                            let chain_family = crate::chain::Network::from(net_for_hash).family();
                             let action_inputs = action.inputs.as_deref().unwrap_or_default();
                             let mut all_finalized = true;
 
@@ -2731,6 +2838,7 @@ pub fn run(
                                     &utxos,
                                     pset_idx as u32,
                                     genesis_hash,
+                                    chain_family,
                                     &mut pset.inputs_mut()[pset_idx],
                                     &compile_opts,
                                 ) {
@@ -3068,8 +3176,7 @@ pub fn run(
                             &tx_hex[..128]
                         );
                     }
-                    let cfg = config::load();
-                    match broadcast_finalized_tx(&cfg, &tx, &tx_hex, net_for_hash) {
+                    match broadcast_finalized_tx(&target.config, &tx, &tx_hex, net_for_hash) {
                         Ok(txid) => {
                             broadcast_txid = Some(txid.clone());
                             println!(
@@ -3079,113 +3186,53 @@ pub fn run(
                             );
                             println!("  Run `sync` after confirmation to update wallet state.");
 
-                            // --- Method-level on_post_broadcast hook ---
-                            if let Some(hook) = &action.on_post_broadcast {
-                                ctx.set_param("broadcast_txid", &txid);
-                                run_hook_block(hook, &mut ctx, "[on_post_broadcast]", None);
-                            }
-
-                            // --- Update and write state file ---
-                            let mut new_state = contract_state
-                                .take()
-                                .unwrap_or_else(|| ContractState::new(action_name));
-                            new_state.last_action = action_name.to_string();
-                            // Record which instance file this contract belongs to: the
-                            // just-written output for constructors, else the loaded input.
+                            // Add new covenant outputs by matching them against the
+                            // broadcast transaction; confidential values and assets are
+                            // unknown here and match on script alone.
+                            let descriptors: Vec<OutputDescriptor> = tx
+                                .output
+                                .iter()
+                                .map(|o| OutputDescriptor {
+                                    script_pubkey: o.script_pubkey.as_bytes().to_vec(),
+                                    amount_sat: match &o.value {
+                                        lwk_wollet::elements::confidential::Value::Explicit(v) => {
+                                            Some(*v)
+                                        }
+                                        _ => None,
+                                    },
+                                    asset: match &o.asset {
+                                        lwk_wollet::elements::confidential::Asset::Explicit(a) => {
+                                            Some(*a)
+                                        }
+                                        _ => None,
+                                    },
+                                })
+                                .collect();
                             let recorded_instance = if action.create_instance.is_some() {
                                 Some(effective_instance_out.as_path())
                             } else {
                                 instance_in_path
                             };
-                            new_state.instance = recorded_instance.map(|p| p.display().to_string());
-                            // Remove spent covenant inputs.
-                            for inp in action.inputs.as_deref().unwrap_or_default() {
-                                if inp.utxo_type_name().is_some() {
-                                    if let Some(r) = ctx.get_input(&inp.id) {
-                                        new_state.remove_spent(&r.txid, r.vout);
-                                    }
-                                }
-                            }
-                            // Add new covenant outputs by matching script_pubkeys in the tx.
-                            // First, drop any existing UTXOs of the types being produced —
-                            // this action supersedes them.
-                            for meta in &covenant_output_meta {
-                                new_state.utxos.retain(|u| u.utxo_type != meta.utxo_type);
-                            }
-                            // Match each meta entry to the correct output vout.
-                            // Multiple outputs can share the same script_pubkey (e.g. four
-                            // prelock_script_auth outputs for four different NFTs), so we
-                            // also match on asset and amount, and consume each position at
-                            // most once to avoid duplicates.
-                            let mut used_vouts: std::collections::HashSet<usize> =
-                                std::collections::HashSet::new();
-                            for meta in &covenant_output_meta {
-                                let found = tx.output.iter().enumerate().find(|(i, o)| {
-                                    if used_vouts.contains(i) {
-                                        return false;
-                                    }
-                                    if o.script_pubkey != meta.script_pubkey {
-                                        return false;
-                                    }
-                                    let asset_ok = matches!(
-                                        &o.asset,
-                                        lwk_wollet::elements::confidential::Asset::Explicit(a)
-                                            if *a == meta.asset
-                                    );
-                                    let value_ok = matches!(
-                                        &o.value,
-                                        lwk_wollet::elements::confidential::Value::Explicit(v)
-                                            if *v == meta.amount_sat
-                                    );
-                                    asset_ok && value_ok
-                                });
-                                if let Some((vout, _)) = found {
-                                    used_vouts.insert(vout);
-                                    new_state.utxos.push(StateUtxo {
-                                        utxo_type: meta.utxo_type.clone(),
-                                        utxo_id: meta.output_id.clone(),
-                                        txid: txid.clone(),
-                                        vout: vout as u32,
-                                        amount_sat: meta.amount_sat,
-                                        asset: meta.asset.to_string(),
-                                    });
-                                }
-                            }
-                            match new_state.write(&effective_state_out) {
-                                Ok(()) => {
-                                    println!(
-                                        "  {} State written:    {}",
-                                        style("✓").green(),
-                                        effective_state_out.display()
-                                    );
-                                    let hist_path = history_path(&history_seed);
-                                    let entry = HistoryEntry {
-                                        action: action_name.to_string(),
-                                        txid: txid.clone(),
-                                        utxos: new_state.utxos.clone(),
-                                    };
-                                    match StateHistory::load(&hist_path)
-                                        .and_then(|mut h| h.append(entry, &hist_path))
-                                    {
-                                        Ok(()) => println!(
-                                            "  {} History appended: {}",
-                                            style("✓").green(),
-                                            hist_path.display()
-                                        ),
-                                        Err(e) => println!(
-                                            "  {} Could not write history file: {e}",
-                                            style("[warn]").yellow()
-                                        ),
-                                    }
-                                }
-                                Err(e) => println!(
-                                    "  {} Could not write state file: {e}",
-                                    style("[warn]").yellow()
-                                ),
-                            }
+                            record_broadcast(
+                                &BroadcastRecord {
+                                    action_name,
+                                    action,
+                                    instance: recorded_instance,
+                                    covenant_outputs: &covenant_output_meta,
+                                    state_out: &effective_state_out,
+                                    history_seed: &history_seed,
+                                },
+                                &txid,
+                                &descriptors,
+                                &mut ctx,
+                                &mut contract_state,
+                            );
                         }
+                        // Nothing was sent, so the run failed. This printed and carried on to
+                        // exit 0, which a script cannot tell from a payment made.
                         Err(msg) => {
                             println!("  {} Broadcast failed: {msg}", style("[error]").red());
+                            anyhow::bail!("broadcast failed: {msg}");
                         }
                     }
                 }
@@ -3269,7 +3316,7 @@ fn network_genesis_hash(network: ElementsNetwork) -> lwk_wollet::elements::Block
     }
 }
 
-fn resolve_asset_id(
+pub(crate) fn resolve_asset_id(
     label: &str,
     network: ElementsNetwork,
 ) -> Result<lwk_wollet::elements::AssetId> {
@@ -3315,9 +3362,24 @@ fn select_input(
     available_explicit: &[lwk_wollet::ExternalUtxo],
     claimed: &mut std::collections::HashSet<String>,
     manual_inputs: bool,
-    network: Option<ElementsNetwork>,
+    // The network this run targets, which settles two things selection depends on: the
+    // asset the labels `"lbtc"` / `"bitcoin"` name, and how `from_address` parses.
+    //
+    // Both used to be hardcoded to Elements here. A Bitcoin run therefore looked for
+    // Liquid's policy asset — matching none of its own UTXOs and reporting an empty wallet
+    // while holding funds — and rejected every `from_address` as unparseable, quietly
+    // selecting from anywhere instead. Deriving both from one value is what stops them
+    // disagreeing again.
+    network: Option<crate::chain::Network>,
     ctx: &ExecutionContext,
 ) -> Result<ResolvedInput> {
+    let policy_asset = network.map(|n| match n.family() {
+        crate::chain::ChainFamily::Bitcoin => crate::assembly::bitcoin_policy_asset(),
+        crate::chain::ChainFamily::Elements => n
+            .elements_network()
+            .expect("an Elements network maps")
+            .policy_asset(),
+    });
     // Protocol/covenant inputs are never invented. Reaching here means every
     // resolution source came up empty (--input override, instance.provided_inputs,
     // and the state file), so fail loudly with the fix rather than fabricating a UTXO.
@@ -3363,7 +3425,7 @@ fn select_input(
             }
         })
         .and_then(|s| match s {
-            "lbtc" | "bitcoin" => network.map(|n| n.policy_asset()),
+            "lbtc" | "bitcoin" => policy_asset,
             other => other.parse().ok(),
         });
 
@@ -3420,22 +3482,24 @@ fn select_input(
 
     // Optional address pin: restrict selection to UTXOs at this exact scriptPubKey.
     // Resolves a reference (instance./params.) or a literal address string.
-    let from_spk: Option<lwk_wollet::elements::Script> =
-        input.from_address.as_ref().and_then(|s| {
+    // An unparseable pin must not degrade into "select from anywhere". `from_address` is a
+    // restriction, and silently dropping a restriction is how a manifest that meant to
+    // spend one specific coin spends a different one.
+    let from_spk: Option<lwk_wollet::elements::Script> = match input.from_address.as_ref() {
+        None => None,
+        Some(s) => {
             let resolved = eval::eval_destination_str(s, ctx).unwrap_or_else(|| s.clone());
-            match resolved.trim().parse::<lwk_wollet::elements::Address>() {
-                Ok(a) => Some(a.script_pubkey()),
-                Err(e) => {
-                    println!(
-                        "  {} Input '{}' from_address '{}' is not a valid address: {e}",
-                        style("[warn]").yellow(),
-                        input.id,
-                        resolved
-                    );
-                    None
-                }
-            }
-        });
+            let net = network.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "input '{}' pins from_address but no network is known",
+                    input.id
+                )
+            })?;
+            let parsed = crate::assembly::parse_destination(&resolved, net)
+                .with_context(|| format!("input '{}' pins an unusable from_address", input.id))?;
+            Some(parsed.script_pubkey)
+        }
+    };
     let spk_matches_wt = |u: &lwk_wollet::WalletTxOut| {
         from_spk
             .as_ref()
@@ -4412,11 +4476,15 @@ pub struct HeadlessResult {
 /// `NEW_STATE_BYTES`, `NETWORK_FEE`) plus `fee_rate` (sat/vb as a float
 /// string) to prevent the interactive fee prompt.
 /// The instance file at `instance_path` must supply all compile params.
+///
+/// Takes a [`crate::target::Target`] rather than a network name: the config it reaches
+/// the chain through is the caller's to choose, not a global this function reads.
 #[allow(clippy::too_many_arguments)]
 pub fn run_headless(
     manifest_path: &Path,
     action_name: &str,
-    network: &str,
+    // Bound by `Target::bind` against the wallet at `wallet_path`; `run` re-checks that.
+    target: &crate::target::Target,
     instance_path: Option<&Path>,
     wallet_path: &Path,
     data_dir: &Path,
@@ -4477,7 +4545,7 @@ pub fn run_headless(
     let run_result = run(
         manifest_path,
         action_name,
-        Some(network),
+        target,
         Some(&params_path),
         loaded_instance.as_ref(),
         instance_path,                     // instance_in_path
@@ -4539,7 +4607,7 @@ mod tests {
                     None => String::new(),
                 };
                 Manifest::from_json_str(&format!(
-                    r#"{{ "manifest_version": "0.2.0", "protocol": "t", "actions": {{ "A": {{ "outputs": [
+                    r#"{{ "manifest_version": "0.3.0", "protocol": "t", "actions": {{ "A": {{ "outputs": [
                          {{ "id": "o0", "amount_sat": "1", "destination": "params.a"{extra} }} ] }} }} }}"#
                 ))
                 .expect("manifest should parse")
@@ -4554,19 +4622,119 @@ mod tests {
                 .expect("valid address");
         assert!(confidential.blinding_pubkey.is_some());
         let explicit = confidential.to_unconfidential();
+        let confidential_bpk = || {
+            confidential
+                .blinding_pubkey
+                .map(|pk| lwk_wollet::elements::bitcoin::PublicKey {
+                    inner: pk,
+                    compressed: true,
+                })
+        };
 
         // The default and an explicit `true` both blind, as before.
-        assert!(address_blinding_key(default, &confidential).is_some());
-        assert!(address_blinding_key(yes, &confidential).is_some());
+        assert!(address_blinding_key(default, confidential_bpk()).is_some());
+        assert!(address_blinding_key(yes, confidential_bpk()).is_some());
         // `false` wins over the address's own key.
-        assert!(address_blinding_key(no, &confidential).is_none());
+        assert!(address_blinding_key(no, confidential_bpk()).is_none());
         // An unconfidential address has nothing to strip, whatever the flag says.
-        assert!(address_blinding_key(default, &explicit).is_none());
-        assert!(address_blinding_key(yes, &explicit).is_none());
+        assert!(address_blinding_key(default, None).is_none());
+        assert!(address_blinding_key(yes, None).is_none());
 
         // Stripping must not move the scriptPubKey, or the covenant's committed
         // sha256(spk) would stop matching the output that pays it.
         assert_eq!(confidential.script_pubkey(), explicit.script_pubkey());
+    }
+
+    fn broadcast_fixture(dir_name: &str) -> (Manifest, std::path::PathBuf) {
+        let manifest = Manifest::from_json_str(
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
+                 "actions": { "A": {
+                   "on_post_broadcast": { "set": { "instance.RAN": "1 + 1" } }
+                 } } }"#,
+        )
+        .expect("manifest should parse");
+        let dir = std::env::temp_dir().join(format!("txm-{dir_name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        (manifest, dir)
+    }
+
+    fn vault_meta() -> CovenantOutputMeta {
+        CovenantOutputMeta {
+            utxo_type: "vault".into(),
+            output_id: "locked".into(),
+            script_pubkey: lwk_wollet::elements::Script::from(vec![0x51, 0x20, 7, 7]),
+            amount_sat: 1_000,
+            asset: crate::assembly::bitcoin_policy_asset(),
+        }
+    }
+
+    /// One function now records a broadcast for both chains: the hook runs (the Bitcoin
+    /// copy never ran it), the covenant output is recorded, and history is appended.
+    #[test]
+    fn a_broadcast_runs_the_hook_and_records_state_and_history() {
+        let (manifest, dir) = broadcast_fixture("record");
+        let state_out = dir.join("t.state.1.json");
+        let meta = [vault_meta()];
+        let rec = BroadcastRecord {
+            action_name: "A",
+            action: &manifest.actions["A"],
+            instance: None,
+            covenant_outputs: &meta,
+            state_out: &state_out,
+            history_seed: &state_out,
+        };
+        let outputs = [OutputDescriptor {
+            script_pubkey: vec![0x51, 0x20, 7, 7],
+            amount_sat: Some(1_000),
+            asset: None,
+        }];
+        let mut ctx = ExecutionContext::new();
+        let mut state = None;
+        let txid = "ab".repeat(32);
+
+        record_broadcast(&rec, &txid, &outputs, &mut ctx, &mut state);
+
+        assert_eq!(ctx.get_compile_param("RAN"), Some("2"), "hook ran");
+        assert_eq!(ctx.get_param("broadcast_txid"), Some(txid.as_str()));
+        let written = ContractState::load(&state_out).expect("state written");
+        assert_eq!(written.utxos_for_type("vault").len(), 1);
+        assert_eq!(written.utxos[0].txid, txid);
+        let history = StateHistory::load(&history_path(&state_out)).unwrap();
+        assert_eq!(history.entries.len(), 1);
+    }
+
+    /// History follows the state file: if the state could not be written, no history entry
+    /// claims it was. The Bitcoin copy appended regardless.
+    #[test]
+    fn no_history_is_appended_when_state_cannot_be_written() {
+        let (manifest, dir) = broadcast_fixture("nowrite");
+        // A state path whose parent is a file, so the write must fail.
+        let blocker = dir.join("not-a-dir");
+        std::fs::write(&blocker, "").unwrap();
+        let state_out = blocker.join("t.state.1.json");
+        let history_seed = dir.join("t.state.1.json");
+        let rec = BroadcastRecord {
+            action_name: "A",
+            action: &manifest.actions["A"],
+            instance: None,
+            covenant_outputs: &[],
+            state_out: &state_out,
+            history_seed: &history_seed,
+        };
+        record_broadcast(
+            &rec,
+            &"cd".repeat(32),
+            &[],
+            &mut ExecutionContext::new(),
+            &mut None,
+        );
+
+        assert!(!state_out.exists());
+        assert!(StateHistory::load(&history_path(&history_seed))
+            .unwrap()
+            .entries
+            .is_empty());
     }
 
     /// The end this boundary exists for: one closed `utxo_type`, two sites, two states —
@@ -4579,7 +4747,7 @@ mod tests {
     #[test]
     fn closed_utxo_type_resolves_each_site_independently() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "actions": { "A": { "params": { "claim": { "type": "bytes32" } } } },
                  "utxo_types": { "prize": {
                    "description": "d",
@@ -4627,7 +4795,7 @@ mod tests {
     #[test]
     fn closed_utxo_type_cannot_read_action_scope() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "actions": { "A": { "params": { "claim": { "type": "bytes32" } } } },
                  "utxo_types": {
                    "leaky_leaf": {
@@ -4709,7 +4877,7 @@ mod tests {
     #[test]
     fn declared_inputs_that_never_reach_the_pset_are_detected() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": { "inputs": [
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "actions": { "A": { "inputs": [
                  { "id": "contest_in", "utxo_source": "prize_covenant" },
                  { "id": "fees_in",    "utxo_source": "wallet" } ] } } }"#,
         )
@@ -4768,7 +4936,7 @@ mod tests {
     #[test]
     fn change_outputs_are_never_skipped_for_a_missing_amount() {
         let manifest = Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t", "actions": { "A": { "outputs": [
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "actions": { "A": { "outputs": [
                  { "id": "change_out",   "asset": "lbtc", "destination": "change" },
                  { "id": "opt_change",   "asset": "lbtc", "destination": "change", "optional": true },
                  { "id": "opt_wallet",   "asset": "lbtc", "destination": "wallet", "optional": true },
@@ -5991,4 +6159,464 @@ mod tests {
              'whatever sits in this UTXO, for AMOUNT_B of ASSET_B'"
         );
     }
+}
+
+/// Refuse a run whose target cannot provide what the manifest declares in `requires`.
+///
+/// The counterpart to `validate`'s static check. That one asks "could this manifest ever
+/// run on this chain"; this one asks "will it run here, now, against this node" — a
+/// question only the wallet's configuration can answer, since Simplicity on Bitcoin is a
+/// soft fork some nodes honour and most do not.
+///
+/// Placed before any address derivation, signing or broadcast. A capability gap discovered
+/// later shows up as a rejected transaction, by which point a covenant address may already
+/// hold funds that nothing on that chain can spend.
+fn check_target_capabilities(manifest: &Manifest, bound: &crate::target::Target) -> Result<()> {
+    let cfg = &bound.config;
+    let target = bound.network;
+
+    // The manifest declares a family; the wallet points at a network. Disagreement is
+    // caught here rather than deep in address derivation, where the message would be about
+    // taproot tags instead of about the mistake the user made.
+    let declared = manifest.chain_family();
+    if declared != target.family() {
+        anyhow::bail!(
+            "manifest targets chain '{declared}' but this run is on network '{target}' \
+             ({}). Point the wallet at a {declared} network, or change the manifest's \
+             `chain`.",
+            target.family(),
+        );
+    }
+
+    let activation = cfg.activation(target)?;
+    let provided = target.capabilities(&activation);
+    let missing = manifest.requires.missing_from(&provided);
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut msg = format!(
+        "network '{target}' cannot provide what this manifest requires ({}):",
+        manifest.requires.describe()
+    );
+    for cap in &missing {
+        msg.push_str(&format!("\n  - {cap}: {}", cap.unsupported_hint()));
+    }
+    // Say how to proceed, but only where proceeding is a configuration question rather
+    // than a fact about the chain.
+    if missing.contains(&crate::chain::Capability::SIMPLICITY) {
+        msg.push_str(
+            "\n\nIf this node does run Simplicity, set `simplicity_activated: true` in the \
+             wallet config.",
+        );
+    }
+    if missing.iter().any(|c| !c.is_core()) {
+        msg.push_str(
+            "\n\nNamespaced capabilities are satisfied only by listing them in the wallet \
+             config's `extra_capabilities`.",
+        );
+    }
+    anyhow::bail!(msg)
+}
+
+/// Everything needed to satisfy one covenant input, resolved from the manifest.
+pub(crate) struct CovenantSpendSpec {
+    pub simf_path: std::path::PathBuf,
+    pub params: std::collections::HashMap<String, String>,
+    pub hints: std::collections::HashMap<String, String>,
+    pub leaf_payloads: Vec<Vec<u8>>,
+    /// Witness values with manifest references already resolved.
+    pub witnesses: Option<serde_json::Value>,
+    /// The manifest's raw witness block, which still carries the `source.key` a signature
+    /// witness names. Resolution strips it, so both forms are kept.
+    pub witness_spec: Option<serde_json::Value>,
+}
+
+/// Build, sign and finalize a Bitcoin transaction, show what it does, and broadcast it
+/// once the user confirms.
+///
+/// `Ok(None)` when nothing was sent — exported to `export_path`, or declined at the prompt.
+#[allow(clippy::too_many_arguments)]
+fn run_bitcoin_build(
+    req: &pset_builder::BuildPsetRequest,
+    run: &crate::session::BitcoinRun,
+    export_path: Option<&Path>,
+    covenant_specs: &std::collections::HashMap<String, CovenantSpendSpec>,
+    compile_params: &std::collections::HashMap<String, String>,
+    action_params: &std::collections::HashMap<String, String>,
+    wallet: Option<&WalletFile>,
+    compile_opts: &covenant::CompileOpts,
+    intent: Option<&str>,
+) -> Result<Option<BitcoinBroadcast>> {
+    use crate::psbt_builder;
+
+    let change_script = run
+        .wallet
+        .script_pubkey(crate::bitcoin_wallet::Branch::Change, run.change_index)?;
+    // Narrowing, not translating: anything Elements-only that reached the request is
+    // refused here rather than dropped. See `psbt_builder::from_pset_request`.
+    let psbt_req = psbt_builder::from_pset_request(req, Some(change_script))?;
+
+    let mut built = psbt_builder::build_psbt(&psbt_req)?;
+    println!(
+        "  {} PSBT constructed ({} inputs, {} outputs, fee {} sat).",
+        style("✓").green(),
+        built.psbt.unsigned_tx.input.len(),
+        built.psbt.unsigned_tx.output.len(),
+        style(built.fee).yellow(),
+    );
+    if let Some(idx) = built.change_index {
+        println!("    Change at output #{idx}");
+    }
+
+    // Wallet inputs are signed with a wallet key; covenant inputs are satisfied by a
+    // Simplicity witness. Split them here, since the two are finalized by different code.
+    let mut plan = Vec::new();
+    let mut covenant_inputs: Vec<(usize, String)> = Vec::new();
+    for (index, input) in psbt_req.inputs.iter().enumerate() {
+        match input {
+            psbt_builder::PsbtInput::Wallet { outpoint, .. } => {
+                let utxo = run
+                    .utxos
+                    .iter()
+                    .find(|u| u.outpoint == *outpoint)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "input '{}' spends {outpoint}, which is not a wallet UTXO",
+                            input.input_id()
+                        )
+                    })?;
+                plan.push(psbt_builder::KeyPathSigner {
+                    input_index: index,
+                    branch: utxo.branch,
+                    index: utxo.index,
+                });
+            }
+            psbt_builder::PsbtInput::Covenant { input_id, .. } => {
+                covenant_inputs.push((index, input_id.clone()));
+            }
+        }
+    }
+
+    psbt_builder::sign_key_path_inputs(&mut built.psbt, &run.wallet, &plan)?;
+    psbt_builder::finalize_key_path_inputs(&mut built.psbt)?;
+    if !plan.is_empty() {
+        println!(
+            "  {} Signed {} wallet input(s).",
+            style("✓").green(),
+            plan.len()
+        );
+    }
+
+    // Covenant inputs, once every other input's witness is settled: the Simplicity program
+    // reads the whole transaction, and `sig_all_hash` commits to it.
+    if !covenant_inputs.is_empty() {
+        let prevouts: Vec<lwk_wollet::elements::bitcoin::TxOut> =
+            psbt_req.inputs.iter().map(|i| i.witness_utxo()).collect();
+        let unsigned = built.psbt.unsigned_tx.clone();
+
+        for (index, input_id) in &covenant_inputs {
+            let spec = covenant_specs.get(input_id).ok_or_else(|| {
+                anyhow::anyhow!("covenant input '{input_id}' has no resolved program")
+            })?;
+            print!(
+                "  {} Covenant input '{}' — satisfying… ",
+                style("·").dim(),
+                input_id
+            );
+            use std::io::Write as _;
+            let _ = std::io::stdout().flush();
+
+            let witness_spec = spec.witness_spec.clone();
+            let params_snap = compile_params.clone();
+            let action_snap = action_params.clone();
+            let wallet_snap = wallet.cloned();
+            let signer = move |name: &str, _kind: &str, hash: &[u8; 32]| -> Result<[u8; 64]> {
+                let w = wallet_snap
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no wallet loaded — cannot sign '{name}'"))?;
+                let key_ref = witness_spec
+                    .as_ref()
+                    .and_then(|wits| wits.get(name))
+                    .and_then(|s| s.get("source"))
+                    .and_then(|src| src.get("key"))
+                    .and_then(|k| k.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("no signing key for witness '{name}'"))?;
+                let resolved = resolve_witness_signing_key(key_ref, &action_snap, &params_snap);
+                wallet::sign_schnorr_for_pubkey(w, resolved, hash)
+            };
+
+            match covenant::finalize_bitcoin_covenant_input(
+                &spec.simf_path,
+                &spec.params,
+                &spec.hints,
+                &spec.leaf_payloads,
+                spec.witnesses.as_ref(),
+                Some(&signer),
+                &unsigned,
+                &prevouts,
+                *index as u32,
+                compile_opts,
+            ) {
+                Ok(stack) => {
+                    println!("{}", style("OK").green());
+                    built.psbt.inputs[*index].final_script_witness =
+                        Some(lwk_wollet::elements::bitcoin::Witness::from_slice(&stack));
+                }
+                Err(e) => {
+                    println!("{}", style("FAILED").red());
+                    for (i, cause) in e.chain().enumerate() {
+                        println!("      {i}: {cause}");
+                    }
+                    anyhow::bail!("covenant input '{input_id}' could not be satisfied");
+                }
+            }
+        }
+    }
+
+    let tx = psbt_builder::extract_tx(built.psbt)?;
+
+    // Exporting is not a lesser form of broadcasting: it is what a caller asks for when
+    // something else will relay the transaction, so it must not also send it.
+    // The outputs, flattened for covenant-state matching. Taken before the transaction is
+    // consumed, and reported whether or not it is broadcast — an exported transaction still
+    // describes the UTXOs it would create.
+    let outputs: Vec<OutputDescriptor> = tx
+        .output
+        .iter()
+        .map(|o| OutputDescriptor {
+            script_pubkey: o.script_pubkey.to_bytes(),
+            amount_sat: Some(o.value.to_sat()),
+            // Bitcoin has one asset, so there is nothing to match on and nothing to reject.
+            asset: None,
+        })
+        .collect();
+
+    // The last look before the money moves, read off the finalized transaction rather than
+    // the manifest: every output with its destination, which of them come back to this
+    // wallet, and the real fee rate. Shown for an export too — it describes exactly what
+    // whoever relays the file will send.
+    crate::bitcoin_review::TxReview::new(
+        &tx,
+        &psbt_req.inputs,
+        &run.wallet,
+        run.network,
+        run.change_index,
+        run.receive_start,
+    )?
+    .render(intent);
+
+    if let Some(path) = export_path {
+        let hex = lwk_wollet::elements::bitcoin::consensus::encode::serialize_hex(&tx);
+        let doc = serde_json::json!({ "txid": tx.compute_txid().to_string(), "tx_hex": hex });
+        std::fs::write(path, serde_json::to_string_pretty(&doc)?)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        println!(
+            "  {} Wrote signed transaction to {}",
+            style("✓").green(),
+            path.display()
+        );
+        // Reported as broadcast-less: the covenant exists only once the transaction is
+        // relayed, and writing it into the state file now would name a UTXO that does not
+        // exist and may never.
+        return Ok(None);
+    }
+
+    // The same question the Elements path asks, with the same default. This used to go
+    // straight to `broadcast`, on every network including mainnet: the Bitcoin path leaves
+    // `run` before the Elements preview and prompt, and nothing here replaced them.
+    println!();
+    if !crate::prompt::confirm_broadcast()? {
+        println!("  {} Not broadcast.", style("·").dim());
+        return Ok(None);
+    }
+
+    let txid = run.client.broadcast(&tx)?;
+    println!(
+        "  {} Broadcast: {}",
+        style("✓").green(),
+        style(txid.to_string()).yellow()
+    );
+    Ok(Some(BitcoinBroadcast {
+        txid: txid.to_string(),
+        outputs,
+    }))
+}
+
+/// What a broadcast Bitcoin transaction created, for the state file.
+pub(crate) struct BitcoinBroadcast {
+    pub txid: String,
+    pub outputs: Vec<OutputDescriptor>,
+}
+
+/// What a run records once its transaction is on the network.
+pub(crate) struct BroadcastRecord<'a> {
+    pub action_name: &'a str,
+    pub action: &'a crate::manifest::Action,
+    /// The instance file this contract belongs to: the one just written for a constructor,
+    /// else the one loaded.
+    pub instance: Option<&'a Path>,
+    pub covenant_outputs: &'a [CovenantOutputMeta],
+    pub state_out: &'a Path,
+    pub history_seed: &'a Path,
+}
+
+/// Everything after a transaction is on the network, the same on both chains: the action's
+/// `on_post_broadcast` hook, then the state file — spent covenant inputs out, the covenant
+/// outputs this action created in — then its history.
+///
+/// One function because it was two copies, and they had already drifted: the Bitcoin one
+/// never ran the hook, and appended history even when the state file could not be written.
+///
+/// A failure to write state is reported, not returned. The transaction is already out, and
+/// an error here would read as "nothing happened" when the opposite is true.
+pub(crate) fn record_broadcast(
+    rec: &BroadcastRecord,
+    txid: &str,
+    outputs: &[OutputDescriptor],
+    ctx: &mut ExecutionContext,
+    contract_state: &mut Option<ContractState>,
+) {
+    if let Some(hook) = &rec.action.on_post_broadcast {
+        ctx.set_param("broadcast_txid", txid);
+        run_hook_block(hook, ctx, "[on_post_broadcast]", None);
+    }
+
+    let mut new_state = contract_state
+        .take()
+        .unwrap_or_else(|| ContractState::new(rec.action_name));
+    new_state.last_action = rec.action_name.to_string();
+    new_state.instance = rec.instance.map(|p| p.display().to_string());
+    for inp in rec.action.inputs.as_deref().unwrap_or_default() {
+        if inp.utxo_type_name().is_some() {
+            if let Some(r) = ctx.get_input(&inp.id) {
+                new_state.remove_spent(&r.txid, r.vout);
+            }
+        }
+    }
+    record_covenant_outputs(&mut new_state, outputs, rec.covenant_outputs, txid);
+
+    if let Err(e) = new_state.write(rec.state_out) {
+        println!(
+            "  {} Could not write state file: {e}",
+            style("[warn]").yellow()
+        );
+        return;
+    }
+    println!(
+        "  {} State written:    {}",
+        style("✓").green(),
+        rec.state_out.display()
+    );
+
+    let hist_path = history_path(rec.history_seed);
+    let entry = HistoryEntry {
+        action: rec.action_name.to_string(),
+        txid: txid.to_string(),
+        utxos: new_state.utxos.clone(),
+    };
+    match StateHistory::load(&hist_path).and_then(|mut h| h.append(entry, &hist_path)) {
+        Ok(()) => println!(
+            "  {} History appended: {}",
+            style("✓").green(),
+            hist_path.display()
+        ),
+        Err(e) => println!(
+            "  {} Could not write history file: {e}",
+            style("[warn]").yellow()
+        ),
+    }
+}
+
+/// A covenant output this action creates, tracked so the state file can name it once the
+/// transaction is broadcast and its vouts are known.
+///
+/// At module scope rather than inside `run` because both chains' post-broadcast paths
+/// match against it.
+pub(crate) struct CovenantOutputMeta {
+    pub utxo_type: String,
+    pub output_id: String,
+    pub script_pubkey: lwk_wollet::elements::Script,
+    pub amount_sat: u64,
+    pub asset: lwk_wollet::elements::AssetId,
+}
+
+/// One transaction output, reduced to what covenant-state matching needs.
+///
+/// Both chains flatten their own output type into this. Elements outputs carry confidential
+/// commitments and an asset id, Bitcoin outputs carry neither — but the question being
+/// asked is the same, so the matching below is written once against this.
+pub(crate) struct OutputDescriptor {
+    pub script_pubkey: Vec<u8>,
+    /// `None` when the output is blinded, and therefore cannot be matched by value.
+    pub amount_sat: Option<u64>,
+    /// `None` on Bitcoin, which has one asset, and when an Elements output is blinded.
+    pub asset: Option<lwk_wollet::elements::AssetId>,
+}
+
+/// Record the covenant UTXOs a broadcast transaction just created.
+///
+/// Shared by both chains because the matching rule is subtle enough that two copies would
+/// diverge: several outputs can share a scriptPubKey — deadcat's four market states are one
+/// program under four tapdata leaves — so an output is identified by script *and* amount
+/// (and asset, where there is more than one), and each position is consumed at most once so
+/// two metas cannot claim the same vout.
+///
+/// Without this the next action has no way to find the covenant it is meant to spend, and
+/// the operator has to name the outpoint and its amount by hand.
+pub(crate) fn record_covenant_outputs(
+    state: &mut ContractState,
+    outputs: &[OutputDescriptor],
+    meta: &[CovenantOutputMeta],
+    txid: &str,
+) {
+    // This action supersedes any existing UTXO of the types it produces.
+    for m in meta {
+        state.utxos.retain(|u| u.utxo_type != m.utxo_type);
+    }
+
+    let mut used_vouts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for m in meta {
+        let found = outputs.iter().enumerate().find(|(i, o)| {
+            if used_vouts.contains(i) || o.script_pubkey != m.script_pubkey.as_bytes() {
+                return false;
+            }
+            // A blinded output matches on script alone: its amount and asset are
+            // commitments, and refusing to match would lose the UTXO entirely.
+            o.amount_sat.is_none_or(|v| v == m.amount_sat) && o.asset.is_none_or(|a| a == m.asset)
+        });
+        if let Some((vout, _)) = found {
+            used_vouts.insert(vout);
+            state.utxos.push(StateUtxo {
+                utxo_type: m.utxo_type.clone(),
+                utxo_id: m.output_id.clone(),
+                txid: txid.to_string(),
+                vout: vout as u32,
+                amount_sat: m.amount_sat,
+                asset: m.asset.to_string(),
+            });
+        }
+    }
+}
+
+/// Resolve a manifest asset label to an id on `network`.
+///
+/// The chain's own unit (`"lbtc"` / `"bitcoin"`) resolves to whatever that network calls
+/// it — Liquid's policy asset, or the synthetic constant standing in for BTC. Anything else
+/// has to be an asset id already.
+pub(crate) fn resolve_asset_label(
+    label: &str,
+    network: crate::chain::Network,
+) -> Result<lwk_wollet::elements::AssetId> {
+    if crate::manifest::names_policy_asset_str(label) {
+        return Ok(match network.family() {
+            crate::chain::ChainFamily::Bitcoin => crate::assembly::bitcoin_policy_asset(),
+            crate::chain::ChainFamily::Elements => network
+                .elements_network()
+                .ok_or_else(|| anyhow::anyhow!("{network} has no Elements mapping"))?
+                .policy_asset(),
+        });
+    }
+    lwk_wollet::elements::AssetId::from_str(label)
+        .with_context(|| format!("Cannot parse asset ID '{label}'"))
 }

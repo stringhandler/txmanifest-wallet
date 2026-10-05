@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::chain::{ChainFamily, Network, TaprootTag, SIMPLICITY_LEAF_VERSION};
 use anyhow::{Context, Result};
 use lwk_wollet::elements::{
     hashes::{sha256, Hash as ElementsHash, HashEngine},
@@ -20,9 +21,14 @@ use simplicityhl::{
 /// Signs `(key_label, kind, sighash)` and returns a 64-byte Schnorr signature.
 type SigSigner = dyn Fn(&str, &str, &[u8; 32]) -> Result<[u8; 64]>;
 
-/// Simplicity leaf version for Elements/Liquid.
+/// Taproot leaf version for a Simplicity tapleaf.
+///
+/// Sourced from [`SIMPLICITY_LEAF_VERSION`] rather than `simplicity::leaf_version()` so
+/// that one constant governs both chains. The upstream helper returns an
+/// `elements::taproot::LeafVersion` specifically, which is the wrong return type the
+/// moment a Bitcoin tree is being built — the byte itself is the same on both.
 fn simplicity_leaf_version() -> LeafVersion {
-    simplicity::leaf_version()
+    LeafVersion::from_u8(SIMPLICITY_LEAF_VERSION).expect("constant leaf version")
 }
 
 /// The NUMS (Nothing-Up-My-Sleeve) internal key for covenant Taproot outputs.
@@ -47,6 +53,15 @@ pub struct CompileOpts {
     /// Unstable compiler features the program may use (`simc -Z <name>`). Purely a gate:
     /// enabling a feature never changes generated code, so it never moves an address.
     pub unstable_features: UnstableFeatures,
+    /// Which jet set the program is compiled against.
+    ///
+    /// Belongs here for the same reason `debug_symbols` does: it changes the CMR, and
+    /// therefore every covenant address. A jet's CMR depends on its position in its jet
+    /// set, so a program touching a single jet commits to a different CMR under Bitcoin
+    /// than under Elements — `p2pk.simf` compiles unchanged on both and yields two
+    /// different addresses. Applying it on some paths and forgetting it on others is the
+    /// failure this struct exists to prevent.
+    pub family: ChainFamily,
 }
 
 impl Default for CompileOpts {
@@ -54,6 +69,7 @@ impl Default for CompileOpts {
         Self {
             debug_symbols: false,
             unstable_features: UnstableFeatures::none(),
+            family: ChainFamily::DEFAULT,
         }
     }
 }
@@ -88,9 +104,26 @@ fn compile_program(
         &opts.unstable_features,
         arguments,
         opts.debug_symbols,
-        Box::new(ElementsJetHinter::new()),
+        jet_hinter(opts.family)?,
     )
     .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))
+}
+
+/// The jet set to compile against, as a SimplicityHL hinter.
+///
+/// The chains' jet sets are genuinely different vocabularies, not dialects: `output_value`
+/// exists only for Bitcoin, `output_asset` and `genesis_block_hash` only for Elements, and
+/// a program naming the wrong one fails to compile rather than misbehaving.
+///
+/// Choosing the hinter is what makes that true. Compiling a Bitcoin manifest under the
+/// Elements hinter would *succeed* for any program using only shared jets — `p2pk.simf`
+/// among them — and hand back an address on the wrong chain, because a jet's CMR depends
+/// on its position in its jet set.
+fn jet_hinter(family: ChainFamily) -> Result<Box<dyn simplicityhl::ast::JetHinter>> {
+    Ok(match family {
+        ChainFamily::Elements => Box::new(ElementsJetHinter::new()),
+        ChainFamily::Bitcoin => Box::new(simplicityhl::ast::BitcoinJetHinter::new()),
+    })
 }
 
 /// Compile a `.simf` file and return the Simplicity tapleaf hash (32 bytes, natural byte order).
@@ -388,6 +421,8 @@ pub fn dry_run_covenant(
     witness_utxos: &[TxOut],
     input_index: u32,
     genesis_hash: BlockHash,
+    // Chain whose taproot tag domain the tree is built under; see `build_tapbranch`.
+    family: ChainFamily,
     debug_jets: bool,
     opts: impl Into<CompileOpts>,
 ) -> Result<()> {
@@ -500,7 +535,7 @@ pub fn dry_run_covenant(
     for payload in extra_leaf_payloads {
         let extra = tapdata_hash(payload);
         sibling_hashes.push(sha256::Hash::from_byte_array(extra));
-        merkle_root_bytes = build_tapbranch(merkle_root_bytes, extra);
+        merkle_root_bytes = build_tapbranch(family, merkle_root_bytes, extra);
     }
 
     let tap_node = tap_node_hash_from_bytes(merkle_root_bytes);
@@ -693,6 +728,8 @@ pub fn finalize_covenant_input(
     witness_utxos: &[TxOut],
     input_index: u32,
     genesis_hash: BlockHash,
+    // Chain whose taproot tag domain the tree is built under; see `build_tapbranch`.
+    family: ChainFamily,
     pset_input: &mut lwk_wollet::elements::pset::Input,
     opts: impl Into<CompileOpts>,
 ) -> Result<()> {
@@ -727,7 +764,7 @@ pub fn finalize_covenant_input(
     for payload in extra_leaf_payloads {
         let extra = tapdata_hash(payload);
         sibling_hashes.push(sha256::Hash::from_byte_array(extra));
-        merkle_root_bytes = build_tapbranch(merkle_root_bytes, extra);
+        merkle_root_bytes = build_tapbranch(family, merkle_root_bytes, extra);
     }
 
     let tap_node = tap_node_hash_from_bytes(merkle_root_bytes);
@@ -795,6 +832,34 @@ pub fn finalize_covenant_input(
 /// program leaf and folding in each extra leaf via TapBranch in declaration order.
 ///
 /// Internal key: the standard NUMS point (no key-path spend).
+/// The taproot merkle root of a covenant tree: the Simplicity leaf, with each extra leaf
+/// folded in by TapBranch in declaration order.
+///
+/// Shared by both chains' address functions so they cannot disagree about the tree while
+/// disagreeing (correctly) about the tweak. `opts.family` decides the TapBranch tag domain
+/// and the jet set, both of which change the result.
+fn covenant_merkle_root(
+    simf_path: &Path,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    opts: &CompileOpts,
+) -> Result<[u8; 32]> {
+    let args_json = build_args_json(compile_params, type_hints)?;
+    let arguments: Arguments = serde_json::from_str(&args_json)
+        .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
+    let source = std::fs::read_to_string(simf_path)
+        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let compiled = compile_program(source, arguments, opts)?;
+
+    let cmr = compiled.commit().cmr();
+    let mut root: [u8; 32] = tapleaf_hash(opts.family, cmr.as_ref());
+    for payload in extra_leaf_payloads {
+        root = build_tapbranch(opts.family, root, tapdata_hash(payload));
+    }
+    Ok(root)
+}
+
 pub fn compute_covenant_address(
     simf_path: &Path,
     compile_params: &HashMap<String, String>,
@@ -804,6 +869,22 @@ pub fn compute_covenant_address(
     opts: impl Into<CompileOpts>,
 ) -> Result<Address> {
     let opts = opts.into();
+    // The taproot tag domain and the jet set must come from one place. They enter by
+    // different doors — the tag from the network the wallet is pointed at, the jet set from
+    // the manifest's `chain` — and if those disagree the result is an address that is wrong
+    // in a way nothing downstream can detect: a well-formed p2tr output built from one
+    // chain's tag over another chain's CMR, spendable by nothing. So take the manifest's
+    // family as the single source and refuse outright when the network contradicts it.
+    let family = opts.family;
+    let network_family = Network::from(network).family();
+    if family != network_family {
+        anyhow::bail!(
+            "manifest targets chain '{family}' but the wallet is on {network_family} network \
+             '{}': refusing to derive a covenant address, because the taproot tag domain and \
+             the jet set would come from different chains",
+            Network::from(network),
+        );
+    }
     eprintln!(
         "[covenant] compute_covenant_address: {} extra leaf(s), simf={}",
         extra_leaf_payloads.len(),
@@ -864,7 +945,7 @@ pub fn compute_covenant_address(
                 hex_bytes(payload),
                 hex_bytes(&extra)
             );
-            root = build_tapbranch(root, extra);
+            root = build_tapbranch(family, root, extra);
         }
         root
     };
@@ -878,6 +959,104 @@ pub fn compute_covenant_address(
     eprintln!("[covenant] address: {address}");
 
     Ok(address)
+}
+
+/// The covenant's scriptPubKey on `network`, for either chain.
+///
+/// Exists because [`compute_covenant_address`] cannot serve Bitcoin, and the reason is
+/// easy to get wrong: the taproot **tweak** is domain-separated the same way the tag
+/// hashes are (`TapTweak/elements` versus `TapTweak`), so the tweaked output key — and
+/// therefore the scriptPubKey bytes, not merely the address string — differ between the
+/// chains for one and the same covenant tree.
+///
+/// That is a third independent reason a covenant address is chain-specific, alongside the
+/// jet CMRs and the TapBranch tag. It is also the one with no visible symptom: an
+/// Elements-derived script is a perfectly well-formed P2TR output on Bitcoin, and a
+/// transaction paying it looks entirely normal right up until nobody can ever spend it.
+pub fn covenant_script_pubkey_for(
+    simf_path: &Path,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    network: Network,
+    opts: impl Into<CompileOpts>,
+) -> Result<Vec<u8>> {
+    let opts = opts.into();
+    match network.family() {
+        ChainFamily::Elements => {
+            let elements_net = network
+                .elements_network()
+                .ok_or_else(|| anyhow::anyhow!("{network} has no Elements network mapping"))?;
+            let address = compute_covenant_address(
+                simf_path,
+                compile_params,
+                type_hints,
+                extra_leaf_payloads,
+                elements_net,
+                opts,
+            )?;
+            Ok(address.script_pubkey().to_bytes())
+        }
+        ChainFamily::Bitcoin => Ok(compute_bitcoin_covenant_address(
+            simf_path,
+            compile_params,
+            type_hints,
+            extra_leaf_payloads,
+            network,
+            opts,
+        )?
+        .script_pubkey()
+        .to_bytes()),
+    }
+}
+
+/// The covenant's Bitcoin address — the Bitcoin counterpart of
+/// [`compute_covenant_address`].
+///
+/// Shares the merkle-root computation with the Elements path (both fold the extra leaves
+/// with [`build_tapbranch`] under their own chain's tag) and differs only in the final
+/// tweak-and-encode, which is exactly where the two chains diverge.
+pub fn compute_bitcoin_covenant_address(
+    simf_path: &Path,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    network: Network,
+    opts: impl Into<CompileOpts>,
+) -> Result<lwk_wollet::elements::bitcoin::Address> {
+    use lwk_wollet::elements::bitcoin as btc;
+
+    let opts = opts.into();
+    if network.family() != ChainFamily::Bitcoin {
+        anyhow::bail!("{network} is not a Bitcoin network");
+    }
+    if opts.family != ChainFamily::Bitcoin {
+        anyhow::bail!(
+            "compile options target chain '{}' but a Bitcoin address was requested",
+            opts.family
+        );
+    }
+
+    let merkle_root = covenant_merkle_root(
+        simf_path,
+        compile_params,
+        type_hints,
+        extra_leaf_payloads,
+        &opts,
+    )?;
+
+    let secp = btc::secp256k1::Secp256k1::new();
+    let nums =
+        btc::XOnlyPublicKey::from_slice(&NUMS_KEY_BYTES).context("Invalid NUMS key bytes")?;
+    let root = btc::taproot::TapNodeHash::from_byte_array(merkle_root);
+    let bitcoin_net = match network {
+        Network::Bitcoin => btc::Network::Bitcoin,
+        Network::BitcoinTestnet => btc::Network::Testnet,
+        Network::BitcoinSignet => btc::Network::Signet,
+        Network::BitcoinRegtest => btc::Network::Regtest,
+        other => anyhow::bail!("{other} is not a Bitcoin network"),
+    };
+    Ok(btc::Address::p2tr(&secp, nums, Some(root), bitcoin_net))
 }
 
 /// A witness the program declares but this spending path never reads, written in the
@@ -1215,9 +1394,50 @@ fn tapdata_hash(data: &[u8]) -> [u8; 32] {
     sha256::Hash::from_engine(engine).to_byte_array()
 }
 
-/// TapBranch hash (Elements variant): SHA256(SHA256(tag) || SHA256(tag) || min(a,b) || max(a,b)).
-fn build_tapbranch(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
-    let tag_hash = sha256::Hash::hash(b"TapBranch/elements");
+/// The taproot leaf hash of a Simplicity program, for the given chain.
+///
+/// The `TapLeaf` tag is domain-separated exactly as `TapBranch` and `TapTweak` are, so a
+/// leaf hashed under the wrong one yields a different merkle root, a different output key,
+/// and an address nothing can spend.
+///
+/// This was the last of the four places a covenant address diverges per chain — the jet
+/// CMRs, and each of the three taproot tags — and the one that hid longest, because the
+/// address and its own control block stay consistent with each other. Funding such an
+/// address works perfectly. Only the spend fails, with `Witness program hash mismatch`,
+/// pointing at the witness rather than at the tag that built it.
+fn tapleaf_hash(family: ChainFamily, cmr: &[u8]) -> [u8; 32] {
+    use lwk_wollet::elements::bitcoin as btc;
+    match family {
+        ChainFamily::Elements => {
+            let script = Script::from(cmr.to_vec());
+            lwk_wollet::elements::taproot::TapLeafHash::from_script(
+                &script,
+                simplicity_leaf_version(),
+            )
+            .to_byte_array()
+        }
+        ChainFamily::Bitcoin => {
+            // rust-bitcoin's own tagged hash, so the tag and the length prefixing come from
+            // the chain's implementation rather than being restated here.
+            let script = btc::ScriptBuf::from_bytes(cmr.to_vec());
+            btc::taproot::TapLeafHash::from_script(
+                script.as_script(),
+                btc::taproot::LeafVersion::from_consensus(SIMPLICITY_LEAF_VERSION)
+                    .expect("simplicity leaf version"),
+            )
+            .to_byte_array()
+        }
+    }
+}
+
+/// TapBranch hash: SHA256(SHA256(tag) || SHA256(tag) || min(a,b) || max(a,b)).
+///
+/// The tag is domain-separated per chain (`TapBranch/elements` vs `TapBranch`), which is
+/// why `family` is a parameter and not a constant: the same covenant tree yields a
+/// different merkle root, and therefore a different address, on each chain. Getting this
+/// wrong produces a valid-looking address that nothing can ever spend.
+fn build_tapbranch(family: ChainFamily, a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
+    let tag_hash = sha256::Hash::hash(family.taproot_tag(TaprootTag::Branch).as_bytes());
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
     let mut engine = sha256::HashEngine::default();
     engine.input(&tag_hash[..]);
@@ -1244,6 +1464,293 @@ fn network_to_params(network: lwk_wollet::ElementsNetwork) -> &'static AddressPa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The same source compiles on both chains and commits to a different CMR on each.
+    ///
+    /// This is the property the hinter exists to produce, and the one with no symptom if
+    /// it is wrong: `p2pk.simf` uses only jets present in both sets, so under the wrong
+    /// hinter it compiles perfectly and yields an address on the wrong chain. A jet's CMR
+    /// depends on its position in its jet set, so the CMRs must differ.
+    #[test]
+    fn one_source_commits_to_a_different_cmr_on_each_chain() {
+        let source = std::fs::read_to_string(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../examples/p2pk/p2pk.simf"
+        )))
+        .expect("read p2pk.simf");
+        let args: Arguments = serde_json::from_str(
+            r#"{"PUB_KEY":{"value":"0x0000000000000000000000000000000000000000000000000000000000000001","type":"u256"}}"#,
+        )
+        .expect("arguments parse");
+
+        let compile_for = |family| {
+            let opts = CompileOpts {
+                family,
+                ..CompileOpts::default()
+            };
+            compile_program(source.clone(), args.clone(), &opts)
+                .unwrap_or_else(|e| panic!("{family} should compile p2pk: {e}"))
+                .commit()
+                .cmr()
+        };
+
+        let elements = compile_for(ChainFamily::Elements);
+        let bitcoin = compile_for(ChainFamily::Bitcoin);
+        assert_ne!(
+            elements, bitcoin,
+            "identical source must not commit to the same CMR under two jet sets"
+        );
+
+        // The Elements CMR is pinned: a SimplicityHL pin change that moved it would move
+        // every covenant address on Liquid, including live ones.
+        assert_eq!(
+            elements.to_string(),
+            "50adb0d66b31caaf1590c0157d3a12d6d28b48355d411b69da7e942fd95cf08c"
+        );
+    }
+
+    /// A Bitcoin-only jet compiles only under the Bitcoin hinter, and an Elements-only jet
+    /// only under the Elements one — so the two vocabularies are genuinely enforced rather
+    /// than the hinter being decorative.
+    #[test]
+    fn each_hinter_admits_only_its_own_jets() {
+        let compile = |src: &str, family| {
+            let opts = CompileOpts {
+                family,
+                ..CompileOpts::default()
+            };
+            compile_program(src.to_string(), Arguments::default(), &opts)
+        };
+        let bitcoin_only = "fn main() { let _v: Option<u64> = jet::output_value(0); }";
+        let elements_only = "fn main() { let _h: u256 = jet::genesis_block_hash(); }";
+
+        assert!(compile(bitcoin_only, ChainFamily::Bitcoin).is_ok());
+        assert!(compile(bitcoin_only, ChainFamily::Elements).is_err());
+        assert!(compile(elements_only, ChainFamily::Elements).is_ok());
+        assert!(compile(elements_only, ChainFamily::Bitcoin).is_err());
+    }
+
+    /// All three taproot tags are domain-separated, so a covenant tree hashes differently
+    /// at every level on each chain.
+    ///
+    /// `TapLeaf` was the one that hid longest. `build_tapbranch` and the tweak were made
+    /// chain-aware first, and with the leaf still hashed under `TapLeaf/elements` an
+    /// address and its own control block stayed perfectly consistent — so funding worked,
+    /// and only the spend failed, with `Witness program hash mismatch` pointing at the
+    /// witness rather than at the tag that built it.
+    #[test]
+    fn every_taproot_tag_is_domain_separated() {
+        let cmr = [0x5au8; 32];
+        assert_ne!(
+            tapleaf_hash(ChainFamily::Elements, &cmr),
+            tapleaf_hash(ChainFamily::Bitcoin, &cmr),
+            "TapLeaf must differ per chain"
+        );
+        assert_ne!(
+            build_tapbranch(ChainFamily::Elements, [1u8; 32], [2u8; 32]),
+            build_tapbranch(ChainFamily::Bitcoin, [1u8; 32], [2u8; 32]),
+            "TapBranch must differ per chain"
+        );
+
+        // Cross-check each leaf against its own chain's implementation, so a typo in one
+        // cannot pass by agreeing with the other.
+        let elements_expected = lwk_wollet::elements::taproot::TapLeafHash::from_script(
+            &Script::from(cmr.to_vec()),
+            simplicity_leaf_version(),
+        )
+        .to_byte_array();
+        assert_eq!(tapleaf_hash(ChainFamily::Elements, &cmr), elements_expected);
+
+        use lwk_wollet::elements::bitcoin as btc;
+        let bitcoin_expected = btc::taproot::TapLeafHash::from_script(
+            btc::ScriptBuf::from_bytes(cmr.to_vec()).as_script(),
+            btc::taproot::LeafVersion::from_consensus(SIMPLICITY_LEAF_VERSION).unwrap(),
+        )
+        .to_byte_array();
+        assert_eq!(tapleaf_hash(ChainFamily::Bitcoin, &cmr), bitcoin_expected);
+    }
+
+    /// The shared core must agree with the Elements address path, or the two could fold
+    /// different trees while both looking right.
+    #[test]
+    fn the_shared_merkle_root_matches_the_elements_address_path() {
+        let simf = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../examples/p2pk/p2pk.simf"
+        ));
+        let params = HashMap::from([(
+            "PUB_KEY".to_string(),
+            "0x0000000000000000000000000000000000000000000000000000000000000001".to_string(),
+        )]);
+        let hints = HashMap::from([("PUB_KEY".to_string(), "pubkey".to_string())]);
+        let opts = CompileOpts {
+            family: ChainFamily::Elements,
+            ..CompileOpts::default()
+        };
+
+        let root = covenant_merkle_root(simf, &params, &hints, &[], &opts).expect("root");
+        let address = compute_covenant_address(
+            simf,
+            &params,
+            &hints,
+            &[],
+            lwk_wollet::ElementsNetwork::LiquidTestnet,
+            &opts,
+        )
+        .expect("address");
+
+        let secp = Secp256k1::new();
+        let nums = lwk_wollet::elements::secp256k1_zkp::XOnlyPublicKey::from_slice(&NUMS_KEY_BYTES)
+            .unwrap();
+        let expected = Address::p2tr(
+            &secp,
+            nums,
+            Some(tap_node_hash_from_bytes(root)),
+            None,
+            &AddressParams::LIQUID_TESTNET,
+        );
+        assert_eq!(address.script_pubkey(), expected.script_pubkey());
+    }
+
+    /// The taproot **tweak** is domain-separated too (`TapTweak/elements` vs `TapTweak`),
+    /// so one covenant tree yields different scriptPubKey *bytes* on the two chains — not
+    /// merely a different address string.
+    ///
+    /// This is the failure with no symptom. An Elements-derived script is a perfectly
+    /// well-formed P2TR output on Bitcoin, and a transaction paying it looks entirely
+    /// normal right up until nobody can ever spend it. Nothing downstream can detect it,
+    /// so it is asserted here.
+    #[test]
+    fn the_same_covenant_yields_different_scripts_on_each_chain() {
+        let simf = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../examples/p2pk/p2pk.simf"
+        ));
+        let params = HashMap::from([(
+            "PUB_KEY".to_string(),
+            "0x0000000000000000000000000000000000000000000000000000000000000001".to_string(),
+        )]);
+        let hints = HashMap::from([("PUB_KEY".to_string(), "pubkey".to_string())]);
+
+        let elements = covenant_script_pubkey_for(
+            simf,
+            &params,
+            &hints,
+            &[],
+            Network::LiquidTestnet,
+            CompileOpts {
+                family: ChainFamily::Elements,
+                ..CompileOpts::default()
+            },
+        )
+        .expect("elements script");
+
+        let bitcoin = covenant_script_pubkey_for(
+            simf,
+            &params,
+            &hints,
+            &[],
+            Network::BitcoinSignet,
+            CompileOpts {
+                family: ChainFamily::Bitcoin,
+                ..CompileOpts::default()
+            },
+        )
+        .expect("bitcoin script");
+
+        // Both are witness-v1 programs, and they are not the same one.
+        for spk in [&elements, &bitcoin] {
+            assert_eq!(spk[0], 0x51, "OP_1");
+            assert_eq!(spk.len(), 34);
+        }
+        assert_ne!(
+            elements, bitcoin,
+            "one covenant tree must not yield the same script on both chains"
+        );
+    }
+
+    /// A Bitcoin address must not be derivable from Elements compile options, or the tweak
+    /// and the jet set would come from different chains.
+    #[test]
+    fn a_bitcoin_covenant_address_refuses_elements_compile_options() {
+        let simf = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../examples/p2pk/p2pk.simf"
+        ));
+        let err = compute_bitcoin_covenant_address(
+            simf,
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            Network::BitcoinSignet,
+            CompileOpts {
+                family: ChainFamily::Elements,
+                ..CompileOpts::default()
+            },
+        )
+        .expect_err("mismatched family")
+        .to_string();
+        assert!(err.contains("compile options target chain"), "{err}");
+
+        // ...and an Elements network is refused outright.
+        let err = compute_bitcoin_covenant_address(
+            simf,
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            Network::LiquidTestnet,
+            CompileOpts {
+                family: ChainFamily::Bitcoin,
+                ..CompileOpts::default()
+            },
+        )
+        .expect_err("wrong network")
+        .to_string();
+        assert!(err.contains("not a Bitcoin network"), "{err}");
+    }
+
+    /// The tag domain must actually change the tree, and must match Elements' published
+    /// tag on the chain this engine already ships against.
+    ///
+    /// A wrong tag here is the worst class of bug this module can have: it yields a
+    /// perfectly well-formed address that no script path can ever satisfy, and the funds
+    /// sent to it are unrecoverable. Nothing downstream would catch it — an address is a
+    /// hash, and a wrong hash looks exactly like a right one.
+    #[test]
+    fn tapbranch_is_domain_separated_per_chain() {
+        let a = [0x11u8; 32];
+        let b = [0x22u8; 32];
+
+        let elements = build_tapbranch(ChainFamily::Elements, a, b);
+        let bitcoin = build_tapbranch(ChainFamily::Bitcoin, a, b);
+        assert_ne!(
+            elements, bitcoin,
+            "the two chains must not produce the same merkle root"
+        );
+
+        // Cross-check the Elements branch against rust-elements' own TapBranch tag, so a
+        // typo in our tag string cannot pass by agreeing with itself.
+        let expected = {
+            use lwk_wollet::elements::taproot::TapNodeHash;
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            let mut engine = TapNodeHash::engine();
+            engine.input(&lo);
+            engine.input(&hi);
+            TapNodeHash::from_engine(engine).to_byte_array()
+        };
+        assert_eq!(
+            elements, expected,
+            "Elements TapBranch tag disagrees with rust-elements"
+        );
+    }
+
+    /// Both chains reserve the same leaf version for Simplicity, so this is a constant
+    /// rather than a per-chain value. Pinned because the whole tapleaf hash depends on it.
+    #[test]
+    fn simplicity_leaf_version_is_0xbe() {
+        assert_eq!(simplicity_leaf_version().as_u8(), 0xbe);
+        assert_eq!(simplicity_leaf_version(), simplicity::leaf_version());
+    }
 
     /// Build a `WitnessTypes` the way a compiled program hands one over.
     fn witness_types(entries: &[(&str, simplicityhl::ResolvedType)]) -> WitnessTypes {
@@ -1384,7 +1891,7 @@ mod tests {
     #[test]
     fn unstable_features_gate_a_program_that_uses_enums() {
         let manifest = crate::manifest::Manifest::from_json_str(
-            r#"{ "manifest_version": "0.2.0", "protocol": "t",
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
                  "simplicity_hl": { "unstable_features": ["enums"] } }"#,
         )
         .expect("manifest should parse");
@@ -1971,4 +2478,209 @@ mod tests {
             "Computed PRE_LOCK_COV_HASH does not match expected value.\nComputed: {hex}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Bitcoin covenant spending
+// ---------------------------------------------------------------------------
+
+/// Finalize a Simplicity covenant input on a Bitcoin PSBT.
+///
+/// The Bitcoin counterpart of [`finalize_covenant_input`], and the same shape: compile,
+/// build the taproot control block, satisfy the program against the real transaction, and
+/// write the four-item Simplicity tapscript witness
+/// `[witness, program, cmr, control_block]`.
+///
+/// Three things differ, and each is a consequence of the chain rather than a choice:
+///
+/// - **The environment.** `BitcoinEnv` takes the spent outputs and the input index, with
+///   no genesis hash — Bitcoin's sighash does not commit to one.
+/// - **No pruning.** SimplicityHL's `satisfy_with_env` is typed to `ElementsEnv`, so the
+///   Bitcoin path satisfies without an environment and the program keeps every branch.
+///   Harmless for a single-path program; a program with a `match` will carry dead branches
+///   into the witness, costing size and budget.
+/// - **Cost padding.** Bitcoin's Simplicity validator accepts a program only when its cost
+///   falls inside `(minCost, budget]`, and a cheap program has to be padded *up* into that
+///   window. Elements has no equivalent, so this is the one step with no counterpart
+///   above. The padding is a plain all-zero stack item; it must not be built with
+///   `Cost::get_padding_bytes`, whose Elements form is an annex (`[0x50] + zeros`) that a
+///   regular stack item's leading byte would be misread as.
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_bitcoin_covenant_input(
+    simf_path: &Path,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    witnesses: Option<&serde_json::Value>,
+    sig_signer: Option<&SigSigner>,
+    tx: &lwk_wollet::elements::bitcoin::Transaction,
+    witness_utxos: &[lwk_wollet::elements::bitcoin::TxOut],
+    input_index: u32,
+    opts: impl Into<CompileOpts>,
+) -> Result<Vec<Vec<u8>>> {
+    use lwk_wollet::elements::bitcoin as btc;
+    use simplicityhl::simplicity::jet::bitcoin::BitcoinEnv;
+
+    let opts = opts.into();
+    if opts.family != ChainFamily::Bitcoin {
+        anyhow::bail!(
+            "compile options target chain '{}' but a Bitcoin witness was requested",
+            opts.family
+        );
+    }
+
+    let source = std::fs::read_to_string(simf_path)
+        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let args_json = build_args_json(compile_params, type_hints)?;
+    let arguments: Arguments = serde_json::from_str(&args_json)
+        .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
+    let compiled = compile_program(source, arguments, &opts)?;
+    let abi_meta = compiled
+        .generate_abi_meta()
+        .map_err(|e| anyhow::anyhow!("Cannot read program ABI: {e}"))?;
+
+    let commit = compiled.commit();
+    let script_cmr = commit.cmr();
+
+    // The taproot tree, folded exactly as the address derivation folds it — the control
+    // block has to reproduce the merkle root the output committed to, or the spend fails
+    // with nothing to point at.
+    let merkle_root = covenant_merkle_root(
+        simf_path,
+        compile_params,
+        type_hints,
+        extra_leaf_payloads,
+        &opts,
+    )?;
+    let mut sibling_hashes: Vec<btc::taproot::TapNodeHash> = Vec::new();
+    for payload in extra_leaf_payloads {
+        sibling_hashes.push(btc::taproot::TapNodeHash::from_byte_array(tapdata_hash(
+            payload,
+        )));
+    }
+
+    use btc::key::TapTweak as _;
+    let secp = btc::secp256k1::Secp256k1::new();
+    let nums = btc::XOnlyPublicKey::from_slice(&NUMS_KEY_BYTES).context("Invalid NUMS key")?;
+    let root = btc::taproot::TapNodeHash::from_byte_array(merkle_root);
+    let (_, parity) = nums.tap_tweak(&secp, Some(root));
+
+    let control_block = btc::taproot::ControlBlock {
+        leaf_version: btc::taproot::LeafVersion::from_consensus(SIMPLICITY_LEAF_VERSION)
+            .expect("simplicity leaf version"),
+        output_key_parity: parity,
+        internal_key: nums,
+        merkle_branch: btc::taproot::TaprootMerkleBranch::try_from(sibling_hashes)
+            .map_err(|e| anyhow::anyhow!("taproot merkle branch is too long: {e}"))?,
+    };
+
+    let env = BitcoinEnv::new(
+        tx.clone(),
+        witness_utxos,
+        input_index,
+        script_cmr,
+        control_block.clone(),
+    );
+
+    // Signature witnesses are computed against the environment's own sighash, exactly as
+    // on Elements — the program will recompute it with `jet::sig_all_hash`, and a
+    // signature over anything else simply does not verify.
+    let injected: Option<serde_json::Value>;
+    let effective_witnesses = if let (Some(signer), Some(w)) = (sig_signer, witnesses) {
+        injected = Some(
+            inject_bitcoin_signatures(w, &env, signer)
+                .context("Failed to compute Signature witnesses")?,
+        );
+        injected.as_ref()
+    } else {
+        witnesses
+    };
+
+    let witness_values =
+        build_witness_values_from_types(effective_witnesses, &abi_meta.witness_types)
+            .context("Cannot build witness values")?;
+
+    let satisfied = compiled
+        .satisfy(witness_values)
+        .map_err(|e| anyhow::anyhow!("Covenant satisfaction failed: {e}"))?;
+
+    // Prune against the real transaction, dropping every branch this spend does not take.
+    //
+    // Not optional. Simplicity's anti-DoS rule requires a redeem program to contain no
+    // unexecuted nodes, so an unpruned program with a `match` is rejected outright —
+    // `mempool-script-verify-flag-failed (Anti-DOS check failed)`, which reads like a
+    // resource limit and is really "this program has branches you did not take".
+    //
+    // SimplicityHL's `satisfy_with_env` does this on the Elements side but is typed to
+    // `ElementsEnv`, so it cannot be used here. `RedeemNode::prune` underneath it is
+    // generic over the environment, which is what makes the Bitcoin path possible at all.
+    let redeem = satisfied
+        .redeem()
+        .prune(&env)
+        .map_err(|e| anyhow::anyhow!("Cannot prune covenant program: {e}"))?;
+
+    let (prog, witness) = redeem.to_vec_with_witness();
+    let mut stack = vec![
+        witness,
+        prog,
+        script_cmr.as_ref().to_vec(),
+        control_block.serialize(),
+    ];
+
+    // Pad the cost into the validator's acceptance window, if the program is too cheap.
+    // Sized from the *satisfied* program so it reflects which branches actually run.
+    // `None` means the program's cost already falls inside the budget its witness buys, so
+    // there is nothing to pad. Padding only ever raises a *cheap* program into the window.
+    if let Some(padding) = satisfied.required_padding_bytes(&stack) {
+        if !padding.is_empty() {
+            eprintln!("[covenant] cost padding: {} bytes", padding.len());
+            stack.push(padding);
+        }
+    }
+    Ok(stack)
+}
+
+/// Resolve `"type": "Signature"` witnesses against a Bitcoin environment.
+///
+/// The Elements counterpart is [`inject_computed_signatures`]; the two differ only in the
+/// environment type, and both take the hash from the environment rather than recomputing
+/// it, so the value signed is by construction the one the program will check.
+fn inject_bitcoin_signatures<T: std::borrow::Borrow<lwk_wollet::elements::bitcoin::Transaction>>(
+    witnesses: &serde_json::Value,
+    env: &simplicityhl::simplicity::jet::bitcoin::BitcoinEnv<T>,
+    signer: &SigSigner,
+) -> Result<serde_json::Value> {
+    let mut out = witnesses.clone();
+    let Some(obj) = out.as_object_mut() else {
+        return Ok(out);
+    };
+    for (name, spec) in obj.iter_mut() {
+        let Some(map) = spec.as_object() else {
+            continue;
+        };
+        if map.get("type").and_then(|v| v.as_str()) != Some("Signature") {
+            continue;
+        }
+        let sig_type = map
+            .get("sig_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sig_hash_all");
+        let hash: [u8; 32] = match sig_type {
+            "sig_hash_all" => {
+                use lwk_wollet::elements::hashes::Hash as _;
+                env.c_tx_env().sighash_all().to_byte_array()
+            }
+            other => anyhow::bail!("unknown signature type '{other}' for witness '{name}'"),
+        };
+        let key_label = map
+            .get("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or(name.as_str());
+        let sig = signer(key_label, sig_type, &hash)?;
+        *spec = serde_json::json!({
+            "type": "simplicityhl",
+            "value": format!("0x{}", hex_bytes(&sig)),
+        });
+    }
+    Ok(out)
 }
