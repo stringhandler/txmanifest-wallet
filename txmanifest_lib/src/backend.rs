@@ -38,6 +38,8 @@ impl BackendKind {
 }
 
 /// A connected blockchain backend — either Esplora (HTTP) or Electrum (TCP/TLS).
+// One per process, so the variants' size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum Backend {
     Esplora(blocking::EsploraClient),
     Electrum(ElectrumClient),

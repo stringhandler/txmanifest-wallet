@@ -53,14 +53,6 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # NON-BLOCKING for now: the tree is not yet rustfmt-clean and clippy reports 18
-    # warnings (all warnings, no errors). This job exists to make both visible on a PR
-    # without gating merges on a cleanup nobody has done yet.
-    #
-    # To turn it into a real gate: run `cargo fmt --all`, clear the clippy warnings
-    # (`cargo clippy --fix` handles most), then delete this line and add
-    # `-- -D warnings` to the clippy step.
-    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v5
@@ -79,4 +71,4 @@ jobs:
       - name: Clippy
         # `--all-targets` so tests and examples are linted too — that is where the
         # shadowed-binding and unused-variable classes of bug actually show up.
-        run: cargo clippy --workspace --all-targets --locked
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

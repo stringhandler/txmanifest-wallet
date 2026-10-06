@@ -1461,6 +1461,211 @@ fn network_to_params(network: lwk_wollet::ElementsNetwork) -> &'static AddressPa
     }
 }
 
+// ---------------------------------------------------------------------------
+// Bitcoin covenant spending
+// ---------------------------------------------------------------------------
+
+/// Finalize a Simplicity covenant input on a Bitcoin PSBT.
+///
+/// The Bitcoin counterpart of [`finalize_covenant_input`], and the same shape: compile,
+/// build the taproot control block, satisfy the program against the real transaction, and
+/// write the four-item Simplicity tapscript witness
+/// `[witness, program, cmr, control_block]`.
+///
+/// Three things differ, and each is a consequence of the chain rather than a choice:
+///
+/// - **The environment.** `BitcoinEnv` takes the spent outputs and the input index, with
+///   no genesis hash — Bitcoin's sighash does not commit to one.
+/// - **No pruning.** SimplicityHL's `satisfy_with_env` is typed to `ElementsEnv`, so the
+///   Bitcoin path satisfies without an environment and the program keeps every branch.
+///   Harmless for a single-path program; a program with a `match` will carry dead branches
+///   into the witness, costing size and budget.
+/// - **Cost padding.** Bitcoin's Simplicity validator accepts a program only when its cost
+///   falls inside `(minCost, budget]`, and a cheap program has to be padded *up* into that
+///   window. Elements has no equivalent, so this is the one step with no counterpart
+///   above. The padding is a plain all-zero stack item; it must not be built with
+///   `Cost::get_padding_bytes`, whose Elements form is an annex (`[0x50] + zeros`) that a
+///   regular stack item's leading byte would be misread as.
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_bitcoin_covenant_input(
+    simf_path: &Path,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    witnesses: Option<&serde_json::Value>,
+    sig_signer: Option<&SigSigner>,
+    tx: &lwk_wollet::elements::bitcoin::Transaction,
+    witness_utxos: &[lwk_wollet::elements::bitcoin::TxOut],
+    input_index: u32,
+    opts: impl Into<CompileOpts>,
+) -> Result<Vec<Vec<u8>>> {
+    use lwk_wollet::elements::bitcoin as btc;
+    use simplicityhl::simplicity::jet::bitcoin::BitcoinEnv;
+
+    let opts = opts.into();
+    if opts.family != ChainFamily::Bitcoin {
+        anyhow::bail!(
+            "compile options target chain '{}' but a Bitcoin witness was requested",
+            opts.family
+        );
+    }
+
+    let source = std::fs::read_to_string(simf_path)
+        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let args_json = build_args_json(compile_params, type_hints)?;
+    let arguments: Arguments = serde_json::from_str(&args_json)
+        .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
+    let compiled = compile_program(source, arguments, &opts)?;
+    let abi_meta = compiled
+        .generate_abi_meta()
+        .map_err(|e| anyhow::anyhow!("Cannot read program ABI: {e}"))?;
+
+    let commit = compiled.commit();
+    let script_cmr = commit.cmr();
+
+    // The taproot tree, folded exactly as the address derivation folds it — the control
+    // block has to reproduce the merkle root the output committed to, or the spend fails
+    // with nothing to point at.
+    let merkle_root = covenant_merkle_root(
+        simf_path,
+        compile_params,
+        type_hints,
+        extra_leaf_payloads,
+        &opts,
+    )?;
+    let mut sibling_hashes: Vec<btc::taproot::TapNodeHash> = Vec::new();
+    for payload in extra_leaf_payloads {
+        sibling_hashes.push(btc::taproot::TapNodeHash::from_byte_array(tapdata_hash(
+            payload,
+        )));
+    }
+
+    use btc::key::TapTweak as _;
+    let secp = btc::secp256k1::Secp256k1::new();
+    let nums = btc::XOnlyPublicKey::from_slice(&NUMS_KEY_BYTES).context("Invalid NUMS key")?;
+    let root = btc::taproot::TapNodeHash::from_byte_array(merkle_root);
+    let (_, parity) = nums.tap_tweak(&secp, Some(root));
+
+    let control_block = btc::taproot::ControlBlock {
+        leaf_version: btc::taproot::LeafVersion::from_consensus(SIMPLICITY_LEAF_VERSION)
+            .expect("simplicity leaf version"),
+        output_key_parity: parity,
+        internal_key: nums,
+        merkle_branch: btc::taproot::TaprootMerkleBranch::try_from(sibling_hashes)
+            .map_err(|e| anyhow::anyhow!("taproot merkle branch is too long: {e}"))?,
+    };
+
+    let env = BitcoinEnv::new(
+        tx.clone(),
+        witness_utxos,
+        input_index,
+        script_cmr,
+        control_block.clone(),
+    );
+
+    // Signature witnesses are computed against the environment's own sighash, exactly as
+    // on Elements — the program will recompute it with `jet::sig_all_hash`, and a
+    // signature over anything else simply does not verify.
+    let injected: Option<serde_json::Value>;
+    let effective_witnesses = if let (Some(signer), Some(w)) = (sig_signer, witnesses) {
+        injected = Some(
+            inject_bitcoin_signatures(w, &env, signer)
+                .context("Failed to compute Signature witnesses")?,
+        );
+        injected.as_ref()
+    } else {
+        witnesses
+    };
+
+    let witness_values =
+        build_witness_values_from_types(effective_witnesses, &abi_meta.witness_types)
+            .context("Cannot build witness values")?;
+
+    let satisfied = compiled
+        .satisfy(witness_values)
+        .map_err(|e| anyhow::anyhow!("Covenant satisfaction failed: {e}"))?;
+
+    // Prune against the real transaction, dropping every branch this spend does not take.
+    //
+    // Not optional. Simplicity's anti-DoS rule requires a redeem program to contain no
+    // unexecuted nodes, so an unpruned program with a `match` is rejected outright —
+    // `mempool-script-verify-flag-failed (Anti-DOS check failed)`, which reads like a
+    // resource limit and is really "this program has branches you did not take".
+    //
+    // SimplicityHL's `satisfy_with_env` does this on the Elements side but is typed to
+    // `ElementsEnv`, so it cannot be used here. `RedeemNode::prune` underneath it is
+    // generic over the environment, which is what makes the Bitcoin path possible at all.
+    let redeem = satisfied
+        .redeem()
+        .prune(&env)
+        .map_err(|e| anyhow::anyhow!("Cannot prune covenant program: {e}"))?;
+
+    let (prog, witness) = redeem.to_vec_with_witness();
+    let mut stack = vec![
+        witness,
+        prog,
+        script_cmr.as_ref().to_vec(),
+        control_block.serialize(),
+    ];
+
+    // Pad the cost into the validator's acceptance window, if the program is too cheap.
+    // Sized from the *satisfied* program so it reflects which branches actually run.
+    // `None` means the program's cost already falls inside the budget its witness buys, so
+    // there is nothing to pad. Padding only ever raises a *cheap* program into the window.
+    if let Some(padding) = satisfied.required_padding_bytes(&stack) {
+        if !padding.is_empty() {
+            eprintln!("[covenant] cost padding: {} bytes", padding.len());
+            stack.push(padding);
+        }
+    }
+    Ok(stack)
+}
+
+/// Resolve `"type": "Signature"` witnesses against a Bitcoin environment.
+///
+/// The Elements counterpart is [`inject_computed_signatures`]; the two differ only in the
+/// environment type, and both take the hash from the environment rather than recomputing
+/// it, so the value signed is by construction the one the program will check.
+fn inject_bitcoin_signatures<T: std::borrow::Borrow<lwk_wollet::elements::bitcoin::Transaction>>(
+    witnesses: &serde_json::Value,
+    env: &simplicityhl::simplicity::jet::bitcoin::BitcoinEnv<T>,
+    signer: &SigSigner,
+) -> Result<serde_json::Value> {
+    let mut out = witnesses.clone();
+    let Some(obj) = out.as_object_mut() else {
+        return Ok(out);
+    };
+    for (name, spec) in obj.iter_mut() {
+        let Some(map) = spec.as_object() else {
+            continue;
+        };
+        if map.get("type").and_then(|v| v.as_str()) != Some("Signature") {
+            continue;
+        }
+        let sig_type = map
+            .get("sig_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sig_hash_all");
+        let hash: [u8; 32] = match sig_type {
+            "sig_hash_all" => {
+                use lwk_wollet::elements::hashes::Hash as _;
+                env.c_tx_env().sighash_all().to_byte_array()
+            }
+            other => anyhow::bail!("unknown signature type '{other}' for witness '{name}'"),
+        };
+        let key_label = map
+            .get("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or(name.as_str());
+        let sig = signer(key_label, sig_type, &hash)?;
+        *spec = serde_json::json!({
+            "type": "simplicityhl",
+            "value": format!("0x{}", hex_bytes(&sig)),
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2478,209 +2683,4 @@ mod tests {
             "Computed PRE_LOCK_COV_HASH does not match expected value.\nComputed: {hex}"
         );
     }
-}
-
-// ---------------------------------------------------------------------------
-// Bitcoin covenant spending
-// ---------------------------------------------------------------------------
-
-/// Finalize a Simplicity covenant input on a Bitcoin PSBT.
-///
-/// The Bitcoin counterpart of [`finalize_covenant_input`], and the same shape: compile,
-/// build the taproot control block, satisfy the program against the real transaction, and
-/// write the four-item Simplicity tapscript witness
-/// `[witness, program, cmr, control_block]`.
-///
-/// Three things differ, and each is a consequence of the chain rather than a choice:
-///
-/// - **The environment.** `BitcoinEnv` takes the spent outputs and the input index, with
-///   no genesis hash — Bitcoin's sighash does not commit to one.
-/// - **No pruning.** SimplicityHL's `satisfy_with_env` is typed to `ElementsEnv`, so the
-///   Bitcoin path satisfies without an environment and the program keeps every branch.
-///   Harmless for a single-path program; a program with a `match` will carry dead branches
-///   into the witness, costing size and budget.
-/// - **Cost padding.** Bitcoin's Simplicity validator accepts a program only when its cost
-///   falls inside `(minCost, budget]`, and a cheap program has to be padded *up* into that
-///   window. Elements has no equivalent, so this is the one step with no counterpart
-///   above. The padding is a plain all-zero stack item; it must not be built with
-///   `Cost::get_padding_bytes`, whose Elements form is an annex (`[0x50] + zeros`) that a
-///   regular stack item's leading byte would be misread as.
-#[allow(clippy::too_many_arguments)]
-pub fn finalize_bitcoin_covenant_input(
-    simf_path: &Path,
-    compile_params: &HashMap<String, String>,
-    type_hints: &HashMap<String, String>,
-    extra_leaf_payloads: &[Vec<u8>],
-    witnesses: Option<&serde_json::Value>,
-    sig_signer: Option<&SigSigner>,
-    tx: &lwk_wollet::elements::bitcoin::Transaction,
-    witness_utxos: &[lwk_wollet::elements::bitcoin::TxOut],
-    input_index: u32,
-    opts: impl Into<CompileOpts>,
-) -> Result<Vec<Vec<u8>>> {
-    use lwk_wollet::elements::bitcoin as btc;
-    use simplicityhl::simplicity::jet::bitcoin::BitcoinEnv;
-
-    let opts = opts.into();
-    if opts.family != ChainFamily::Bitcoin {
-        anyhow::bail!(
-            "compile options target chain '{}' but a Bitcoin witness was requested",
-            opts.family
-        );
-    }
-
-    let source = std::fs::read_to_string(simf_path)
-        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
-    let args_json = build_args_json(compile_params, type_hints)?;
-    let arguments: Arguments = serde_json::from_str(&args_json)
-        .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    let compiled = compile_program(source, arguments, &opts)?;
-    let abi_meta = compiled
-        .generate_abi_meta()
-        .map_err(|e| anyhow::anyhow!("Cannot read program ABI: {e}"))?;
-
-    let commit = compiled.commit();
-    let script_cmr = commit.cmr();
-
-    // The taproot tree, folded exactly as the address derivation folds it — the control
-    // block has to reproduce the merkle root the output committed to, or the spend fails
-    // with nothing to point at.
-    let merkle_root = covenant_merkle_root(
-        simf_path,
-        compile_params,
-        type_hints,
-        extra_leaf_payloads,
-        &opts,
-    )?;
-    let mut sibling_hashes: Vec<btc::taproot::TapNodeHash> = Vec::new();
-    for payload in extra_leaf_payloads {
-        sibling_hashes.push(btc::taproot::TapNodeHash::from_byte_array(tapdata_hash(
-            payload,
-        )));
-    }
-
-    use btc::key::TapTweak as _;
-    let secp = btc::secp256k1::Secp256k1::new();
-    let nums = btc::XOnlyPublicKey::from_slice(&NUMS_KEY_BYTES).context("Invalid NUMS key")?;
-    let root = btc::taproot::TapNodeHash::from_byte_array(merkle_root);
-    let (_, parity) = nums.tap_tweak(&secp, Some(root));
-
-    let control_block = btc::taproot::ControlBlock {
-        leaf_version: btc::taproot::LeafVersion::from_consensus(SIMPLICITY_LEAF_VERSION)
-            .expect("simplicity leaf version"),
-        output_key_parity: parity,
-        internal_key: nums,
-        merkle_branch: btc::taproot::TaprootMerkleBranch::try_from(sibling_hashes)
-            .map_err(|e| anyhow::anyhow!("taproot merkle branch is too long: {e}"))?,
-    };
-
-    let env = BitcoinEnv::new(
-        tx.clone(),
-        witness_utxos,
-        input_index,
-        script_cmr,
-        control_block.clone(),
-    );
-
-    // Signature witnesses are computed against the environment's own sighash, exactly as
-    // on Elements — the program will recompute it with `jet::sig_all_hash`, and a
-    // signature over anything else simply does not verify.
-    let injected: Option<serde_json::Value>;
-    let effective_witnesses = if let (Some(signer), Some(w)) = (sig_signer, witnesses) {
-        injected = Some(
-            inject_bitcoin_signatures(w, &env, signer)
-                .context("Failed to compute Signature witnesses")?,
-        );
-        injected.as_ref()
-    } else {
-        witnesses
-    };
-
-    let witness_values =
-        build_witness_values_from_types(effective_witnesses, &abi_meta.witness_types)
-            .context("Cannot build witness values")?;
-
-    let satisfied = compiled
-        .satisfy(witness_values)
-        .map_err(|e| anyhow::anyhow!("Covenant satisfaction failed: {e}"))?;
-
-    // Prune against the real transaction, dropping every branch this spend does not take.
-    //
-    // Not optional. Simplicity's anti-DoS rule requires a redeem program to contain no
-    // unexecuted nodes, so an unpruned program with a `match` is rejected outright —
-    // `mempool-script-verify-flag-failed (Anti-DOS check failed)`, which reads like a
-    // resource limit and is really "this program has branches you did not take".
-    //
-    // SimplicityHL's `satisfy_with_env` does this on the Elements side but is typed to
-    // `ElementsEnv`, so it cannot be used here. `RedeemNode::prune` underneath it is
-    // generic over the environment, which is what makes the Bitcoin path possible at all.
-    let redeem = satisfied
-        .redeem()
-        .prune(&env)
-        .map_err(|e| anyhow::anyhow!("Cannot prune covenant program: {e}"))?;
-
-    let (prog, witness) = redeem.to_vec_with_witness();
-    let mut stack = vec![
-        witness,
-        prog,
-        script_cmr.as_ref().to_vec(),
-        control_block.serialize(),
-    ];
-
-    // Pad the cost into the validator's acceptance window, if the program is too cheap.
-    // Sized from the *satisfied* program so it reflects which branches actually run.
-    // `None` means the program's cost already falls inside the budget its witness buys, so
-    // there is nothing to pad. Padding only ever raises a *cheap* program into the window.
-    if let Some(padding) = satisfied.required_padding_bytes(&stack) {
-        if !padding.is_empty() {
-            eprintln!("[covenant] cost padding: {} bytes", padding.len());
-            stack.push(padding);
-        }
-    }
-    Ok(stack)
-}
-
-/// Resolve `"type": "Signature"` witnesses against a Bitcoin environment.
-///
-/// The Elements counterpart is [`inject_computed_signatures`]; the two differ only in the
-/// environment type, and both take the hash from the environment rather than recomputing
-/// it, so the value signed is by construction the one the program will check.
-fn inject_bitcoin_signatures<T: std::borrow::Borrow<lwk_wollet::elements::bitcoin::Transaction>>(
-    witnesses: &serde_json::Value,
-    env: &simplicityhl::simplicity::jet::bitcoin::BitcoinEnv<T>,
-    signer: &SigSigner,
-) -> Result<serde_json::Value> {
-    let mut out = witnesses.clone();
-    let Some(obj) = out.as_object_mut() else {
-        return Ok(out);
-    };
-    for (name, spec) in obj.iter_mut() {
-        let Some(map) = spec.as_object() else {
-            continue;
-        };
-        if map.get("type").and_then(|v| v.as_str()) != Some("Signature") {
-            continue;
-        }
-        let sig_type = map
-            .get("sig_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("sig_hash_all");
-        let hash: [u8; 32] = match sig_type {
-            "sig_hash_all" => {
-                use lwk_wollet::elements::hashes::Hash as _;
-                env.c_tx_env().sighash_all().to_byte_array()
-            }
-            other => anyhow::bail!("unknown signature type '{other}' for witness '{name}'"),
-        };
-        let key_label = map
-            .get("key")
-            .and_then(|v| v.as_str())
-            .unwrap_or(name.as_str());
-        let sig = signer(key_label, sig_type, &hash)?;
-        *spec = serde_json::json!({
-            "type": "simplicityhl",
-            "value": format!("0x{}", hex_bytes(&sig)),
-        });
-    }
-    Ok(out)
 }
