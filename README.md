@@ -1,177 +1,135 @@
 # tx-manifest
 
-A declarative engine and wallet CLI for executing **transaction manifests** on
-[Liquid](https://liquid.net/) / Elements — JSON files that describe a protocol's
-UTXO types, actions, and lifecycle, backed by [SimplicityHL](https://github.com/BlockstreamResearch/SimplicityHL)
-covenants.
+A wallet that runs **transaction manifests**: JSON files describing a protocol's
+transactions — what each action spends, what it creates, and which
+[SimplicityHL](https://github.com/BlockstreamResearch/SimplicityHL) covenants guard the
+outputs. Write the manifest once; the wallet selects UTXOs, derives covenant addresses,
+builds and signs the transaction, dry-runs the covenant programs, and broadcasts. No
+protocol-specific wallet code.
 
-You write a manifest (`txmanifest.json`) that declares *what* a transaction does —
-its inputs, outputs, covenant scripts, compile-time parameters, and validations —
-and the wallet figures out *how*: it resolves UTXOs, computes covenant addresses
-and tapleaf hashes, builds and signs the PSET, dry-runs the Simplicity programs,
-and broadcasts. No bespoke wallet code per protocol.
+Runs on **Liquid** (and other Elements networks) and **Bitcoin** (mainnet, testnet,
+signet, regtest; covenants only where Simplicity is active).
 
-## Workspace layout
+> **Experimental and unaudited.** The wallet holds private keys and signs transactions.
+> Use testnets. Do not use it with funds you care about.
 
-This is a Cargo workspace with two crates:
+## Install
 
-| Crate | Kind | Purpose |
-|-------|------|---------|
-| [`tx-manifest-lib`](txmanifest_lib) | library | The manifest model, lifecycle engine, covenant compilation/dry-run, parameter resolution, PSET building, and wallet primitives. |
-| [`tx-manifest-wallet`](txmanifest_wallet) | binary | The `tx-manifest-wallet` CLI that drives the library interactively. |
-
-```
-manifest-wallet/
-├── Cargo.toml              # workspace
-├── txmanifest_lib/         # library crate
-│   └── src/
-│       ├── manifest.rs     # manifest schema (deserialized from txmanifest.json)
-│       ├── lifecycle.rs    # interactive action execution engine
-│       ├── covenant.rs     # SimplicityHL covenant compile / address / dry-run / finalize
-│       ├── eval.rs         # expression evaluator (amounts, formulas, references)
-│       ├── prepare.rs      # UTXO pre-funding / splitting
-│       ├── pset_builder.rs # PSET construction
-│       ├── validate.rs     # static manifest schema checks
-│       ├── describe.rs     # interactive manifest explorer
-│       ├── wallet.rs       # key management & signing
-│       └── …               # config, context, params, instance, state, prompt
-├── txmanifest_wallet/      # CLI crate
-└── examples/               # sample manifests + .simf programs
-    ├── p2pk/               # "hello world" — pay-to-public-key via Simplicity
-    ├── lending/            # P2P collateralised lending protocol
-    ├── dex/                # keyless atomic swap offers (Mosaik's Tessera covenant)
-    ├── deadcat/            # binary prediction market with on-chain oracle resolution
-    ├── deadcat_v2/         # …unblinded tokens — a documented dead end
-    ├── deadcat_v3/         # …derivable blinding factors; the runnable fork
-    └── last_will/          # time-locked inheritance
-```
-
-## How a manifest works
-
-A manifest is a JSON document describing a protocol. The key sections:
-
-- **`utxo_types`** — covenant output types, each referencing a `.simf` SimplicityHL
-  program and its compile parameters.
-- **`actions`** / **`classes`** — the operations a user can perform. Each declares
-  `params`, `args`, `inputs`, `outputs`, `validations`, and lifecycle hooks.
-- **`params`** — values baked into covenant programs at compile time. Derived params
-  can be auto-computed (arithmetic expressions, tapleaf hashes, or — with the
-  `simplicity_eval` feature — standalone function calls). A `utxo_type`'s
-  `script.compile_params` then wires these onto the `.simf`'s own parameter names.
-
-See [`examples/p2pk/txmanifest.json`](examples/p2pk/txmanifest.json) for a minimal
-example, or [`examples/lending/txmanifest.json`](examples/lending/txmanifest.json)
-for a full multi-action covenant protocol.
-
-## Building
+Download a binary for your platform from the
+[releases page](https://github.com/stringhandler/txmanifest-wallet/releases), or build
+from source (Rust stable):
 
 ```sh
-cargo build            # whole workspace
-cargo test             # run the test suite
+cargo install --locked --git https://github.com/stringhandler/txmanifest-wallet tx-manifest-wallet
 ```
 
-The `simplicityhl` dependency is a git reference. Covenant **dry-runs, address
-derivation, and witness building** work against upstream
-`BlockstreamResearch/SimplicityHL` (master). The standalone `compile_function` /
-expression-eval code paths are gated behind a feature.
+## Quick start (Liquid testnet)
 
-### The `simplicity_eval` feature
+The default network is Liquid testnet, so this needs no configuration.
 
 ```sh
-cargo build --features tx-manifest-wallet/simplicity_eval
+# 1. Create a wallet, then print a receive address
+tx-manifest-wallet create-wallet --out wallet.json
+tx-manifest-wallet info --wallet wallet.json
+
+# 2. Fund that address from a Liquid testnet faucet (e.g. https://liquidtestnet.com/faucet),
+#    then sync
+tx-manifest-wallet sync --wallet wallet.json
+
+# 3. Check a manifest, then run one of its actions
+tx-manifest-wallet validate examples/p2pk/txmanifest.json
+tx-manifest-wallet run examples/p2pk/txmanifest.json Pay --wallet wallet.json
 ```
 
-This enables manifest features that depend on custom SimplicityHL APIs not yet in
-master (`TemplateProgram::compile_function`, `CompiledFunction`, `eval_expression`) —
-namely the `simf_fn` compute hook and `on_input_resolved` SimplicityHL hooks.
+`run` walks through the action: it prompts for any parameters you did not pass with
+`--params`, picks inputs from the wallet, shows the transaction, and asks before
+broadcasting. Pass `--export-pset out.json` to write the signed transaction instead of
+sending it.
 
-> ⚠️ **The default `simplicityhl` dependency points at upstream master, which does
-> not have these APIs, so `--features simplicity_eval` will _not_ compile as-is.**
-> To use it you must repoint the `simplicityhl` dependency in
-> [`txmanifest_lib/Cargo.toml`](txmanifest_lib/Cargo.toml) at a branch that provides
-> them (e.g. a fork that is a superset of master). With the feature off — the
-> default — these specific hooks fail at runtime with a clear message and everything
-> else works normally.
+For Bitcoin, start with [`examples/bitcoin_pay`](examples/bitcoin_pay) (plain payments)
+and [`examples/bitcoin_covenant`](examples/bitcoin_covenant) (a Simplicity covenant on the
+Simplicity signet or a local regtest).
 
-## Usage
+## Examples
 
-The CLI is `tx-manifest-wallet`. During development, run it via `cargo run --`.
+[`examples/`](examples) has a list of every example, from a one-key covenant to a
+lending protocol that interoperates with the reference implementation. Each one passes
+`validate`.
+
+## Writing a manifest
+
+A manifest declares:
+
+- **`chain`** and **`requires`** — the ledger it targets and what the wallet must
+  support (e.g. `"simplicity"`).
+- **`utxo_types`** — covenant output types, each pointing at a `.simf` program.
+- **`actions`** — the operations a user performs, each with `params`, `inputs`,
+  `outputs` and `validations`.
+
+The full format is defined by the JSON Schema in
+[`schema/txmanifest.schema.json`](schema/txmanifest.schema.json); point your editor at it
+with `"$schema"` for completion and inline errors. `manifest_version` must be `"0.3.0"`.
+[`examples/p2pk`](examples/p2pk/txmanifest.json) is the smallest complete manifest.
+
+Check a manifest with `validate` (offline structure checks) and `capabilities` (what a
+wallet needs to run it; `--supports` turns it into a CI check for other wallet
+implementations).
+
+## Commands
+
+| Command | What it does |
+|---------|--------------|
+| `run <manifest> <action>` | Run an action: resolve inputs, build, sign, broadcast. |
+| `validate <manifest>` | Check a manifest without touching the network. |
+| `capabilities <manifest>` | Report what a wallet must support to run a manifest. |
+| `describe <manifest>` | Browse a manifest's actions interactively. |
+| `prepare <manifest> <action>` | Split wallet funds so an action has the UTXOs it needs (Liquid). |
+| `create-wallet` | Create a wallet file. |
+| `info` | Show the wallet's keys and a receive address. |
+| `sync` | Fetch the wallet's UTXOs and show the balance. |
+| `get-balance` | Show the last synced balance, offline. |
+| `split` | Split one asset into N equal UTXOs (Liquid). |
+| `config` | Show or change configuration. |
+
+`tx-manifest-wallet <command> --help` lists every flag.
+
+## Configuration
+
+The config file is chosen in this order:
+
+1. `--config <file>`
+2. a `config.json` in the same directory as the wallet file
+3. `config.json` in the data directory (the platform data directory, or
+   `$TX_MANIFEST_DATA_DIR` if set)
+
+`tx-manifest-wallet config` prints the active settings, and `config <key> <value>` changes
+one. The wallet file records its network; a config naming a different one is an error
+rather than a silent switch.
+
+**Files `run` writes.** After a broadcast, `run` records the contract's on-chain state in a
+numbered file next to the manifest (`txmanifest.state.1.json`, `.2`, …) and, for actions
+that create a contract, an instance file. Pass the latest one back with `--state` /
+`--instance` to continue the contract. Use `--state-out` / `--instance-out` to choose
+where they go.
+
+## Building from source
 
 ```sh
-# Create a wallet (defaults to Liquid testnet)
-cargo run -- create-wallet --out wallet.json
-
-# Fund it, then check it
-cargo run -- info --wallet wallet.json
-cargo run -- sync --wallet wallet.json
-
-# Inspect / validate a manifest
-cargo run -- describe examples/p2pk/txmanifest.json
-cargo run -- validate examples/p2pk/txmanifest.json
-
-# Ensure the wallet has the UTXOs an action needs (splits a funding tx if required)
-cargo run -- prepare examples/p2pk/txmanifest.json Pay --wallet wallet.json
-
-# Execute an action interactively
-cargo run -- run examples/p2pk/txmanifest.json Pay --wallet wallet.json
+cargo build
+cargo test
 ```
 
-### Commands
+The `simplicityhl` dependency is a fork that adds Bitcoin support; see
+[`txmanifest_lib/Cargo.toml`](txmanifest_lib/Cargo.toml).
+[`contrib/regtest`](contrib/regtest) builds a local Bitcoin node with Simplicity active.
+CI runs `cargo fmt --check` and `cargo clippy -- -D warnings`.
 
-| Command | Description |
-|---------|-------------|
-| `run <manifest> <action>` | Walk through a manifest action interactively (resolve inputs → build → sign → broadcast). |
-| `prepare <manifest> <action>` | Ensure the wallet holds the UTXOs the action needs; broadcasts a split tx if not. |
-| `validate <manifest>` | Static schema/sanity checks on a manifest. |
-| `describe <manifest>` | Interactively explore a manifest's classes and actions. |
-| `create-wallet` | Generate a new wallet JSON file. |
-| `info` | Show wallet fingerprint, xpub, oracle key, and a receive address. |
-| `sync` | Sync wallet state against an Esplora server and show balance. |
-| `get-balance` | Show last-synced balance (no network call). |
-| `split` | Split a wallet asset into N equal UTXOs. |
-| `config` | Show or update configuration (`default_network`, `default_esplora`). |
-
-Run `cargo run -- <command> --help` for full flag details.
-
-### Configuration
-
-Config lives in a platform data directory and defaults to **Liquid testnet**
-(`https://blockstream.info/liquidtestnet/api`). Switch networks with:
-
-```sh
-cargo run -- config default_network mainnet
-```
-
-## Notes
-
-- This project was renamed from `compose` to `tx-manifest`. Manifest files are
-  conventionally named `txmanifest.json` and carry a `manifest_version` naming the
-  format version they are written against; the current format is `0.2.0`, and a
-  file declaring anything else is refused at parse time.
-- Targets Liquid/Elements. Covenant enforcement is fully on-chain via Simplicity —
-  no trusted backend.
-
-## Security & status
-
-This is **experimental software** built on Simplicity, which is itself early-stage.
-It has **not** been audited. The wallet manages private keys and signs transactions.
-
-- Use it on **Liquid testnet** (the default) — do not use it with real funds.
-- Never commit wallet files. `wallet*.json`, `*_wallet.json`, `oracle.json`, and
-  `*.state.json` / `*.instance.json` are gitignored; keep your keys out of version
-  control regardless.
-- No warranty — see the license.
+Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-Licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
-  <http://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
-
-at your option.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted for
-inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual
-licensed as above, without any additional terms or conditions.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. Unless you explicitly state otherwise, any
+contribution intentionally submitted for inclusion in the work by you, as defined in the
+Apache-2.0 license, shall be dual licensed as above, without any additional terms or
+conditions.
