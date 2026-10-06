@@ -3,7 +3,7 @@ name = "tx-manifest-wallet"
 version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Wallet CLI for executing transaction manifests on Liquid/Elements with SimplicityHL covenants."
+description = "Wallet CLI for executing transaction manifests on Liquid/Elements and Bitcoin with SimplicityHL covenants."
 repository = "https://github.com/stringhandler/txmanifest-wallet"
 
 [dependencies]

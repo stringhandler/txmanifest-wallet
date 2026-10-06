@@ -1,9 +1,9 @@
 [package]
 name = "tx-manifest-lib"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Declarative transaction-manifest engine and SimplicityHL covenant runtime for Liquid/Elements."
+description = "Declarative transaction-manifest engine and SimplicityHL covenant runtime for Liquid/Elements and Bitcoin."
 repository = "https://github.com/stringhandler/txmanifest-wallet"
 keywords = ["liquid", "elements", "simplicity", "covenant", "bitcoin"]
 
@@ -24,17 +24,10 @@ rand = "0.8"
 ureq = "2"
 url = "2"
 base64 = "0.22"
-# Covenant dry-runs, address derivation and witness building only use upstream
-# (master) APIs. The `feat/compile-function-only` fork is a superset of master that
-# additionally provides the standalone compile_function / expression-eval APIs used
-# by the `simplicity_eval` feature, so this one ref satisfies both build configs.
-# simplicityhl = { git = "https://github.com/stringhandler/SimplicityHL", branch = "feat/compile-function-only", features = [
-#     "serde",
-# ] }
 # delta1's Bitcoin-enabled fork: a superset of upstream that adds `BitcoinJetHinter`
 # and a real `BitcoinEnv`, without which a Bitcoin covenant cannot be compiled at all.
 # The Elements jet set, and therefore every Elements CMR and covenant address, must be
-# byte-identical to upstream's — `covenant::tests` and the recon examples pin live
+# byte-identical to upstream's — `covenant::tests` and `tests/interop` pin live
 # addresses precisely so that a pin change cannot move them unnoticed.
 simplicityhl = { git = "https://github.com/delta1/SimplicityHL", branch = "bitcoin", features = [
     "serde",

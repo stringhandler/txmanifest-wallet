@@ -24,9 +24,12 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -37,6 +40,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+
+      # A tag can point at a commit CI never saw; don't ship a binary that fails its own tests.
+      - name: Test
+        run: cargo test --workspace --locked
 
       - name: Build
         run: cargo build --release --locked -p tx-manifest-wallet --target ${{ matrix.target }}
