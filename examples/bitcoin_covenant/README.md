@@ -28,19 +28,23 @@ Two actions:
 
 ## Requirements
 
-A node that executes Simplicity. No public network has activated it, so this needs
-`contrib/regtest`:
+A node that executes Simplicity. Two configs are provided:
 
-```sh
-docker build -t simplicity-regtest contrib/regtest
-docker run -d --name simplicity-regtest -p 18443:18443 simplicity-regtest \
-  -regtest -server -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 \
-  -rpcuser=tx -rpcpassword=manifest -fallbackfee=0.0001 -txindex=1
-```
+- **`config.json`** — the public Simplicity signet, through its Esplora at
+  `signet.simplicity-lang.org`. Nothing to run locally; fund the wallet with signet coins
+  for that network.
+- **`config.regtest.json`** — a local node from [`contrib/regtest`](../../contrib/regtest),
+  funded by its `faucet.sh`:
 
-`config.json` here sets `simplicity_activated: true`. Without it the run is refused before
-anything is derived — the wallet will not build a covenant address for a node that cannot
-spend it:
+  ```sh
+  docker build -t simplicity-regtest contrib/regtest
+  docker run -d --name simplicity-regtest -p 18443:18443 simplicity-regtest \
+    -regtest -server -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 \
+    -rpcuser=tx -rpcpassword=manifest -fallbackfee=0.0001 -txindex=1
+  ```
+
+Both set `simplicity_activated: true`. Without it the run is refused before anything is
+derived — the wallet will not build a covenant address for a node that cannot spend it:
 
 ```
 Error: network 'bitcoin-regtest' cannot provide what this manifest requires (simplicity)
@@ -48,28 +52,24 @@ Error: network 'bitcoin-regtest' cannot provide what this manifest requires (sim
 
 ## Running it
 
-Fund a wallet with the faucet, then put its **Wallet Signing Key** into `params.json` as
-`PUB_KEY` — that is the key the covenant will demand, so it has
-to be one this wallet can produce:
+The commands below use the signet config. For regtest, swap in `config.regtest.json`, fund
+with `./contrib/regtest/faucet.sh --config examples/bitcoin_covenant/config.regtest.json
+--wallet $W`, and run `./contrib/regtest/mine.sh` after each broadcast.
+
+Create and fund a wallet, then put its **Wallet Signing Key** into `params.json` as
+`PUB_KEY` — that is the key the covenant will demand, so it has to be one this wallet can
+produce:
 
 ```sh
 CFG="--config examples/bitcoin_covenant/config.json"
-W=/tmp/txm-regtest/wallet.json
+W=/tmp/txm-signet/wallet.json
 
-./contrib/regtest/faucet.sh --config examples/bitcoin_covenant/config.json --wallet $W
-cargo run -p tx-manifest-wallet -- $CFG info --wallet $W   # copy "Wallet Signing Key"
+cargo run -p tx-manifest-wallet -- $CFG create-wallet --out $W
+cargo run -p tx-manifest-wallet -- $CFG info --wallet $W   # fund the address; copy "Wallet Signing Key"
 ```
 
-Lock:
-
-```sh
-cargo run -p tx-manifest-wallet -- $CFG \
-  run examples/bitcoin_covenant/txmanifest.json Lock \
-  --wallet $W --params examples/bitcoin_covenant/params.json
-```
-
-`Lock` writes a state file recording the covenant it created, so `Unlock` can find it —
-pass the one `Lock` wrote:
+Lock, then unlock. `Lock` writes a state file recording the covenant it created; pass it to
+`Unlock` so it can find the coins:
 
 ```sh
 cargo run -p tx-manifest-wallet -- $CFG \
@@ -77,7 +77,7 @@ cargo run -p tx-manifest-wallet -- $CFG \
   --wallet $W --params examples/bitcoin_covenant/params.json \
   --state-out /tmp/cov.state.json
 
-./contrib/regtest/mine.sh
+# wait for the Lock transaction to confirm
 
 cargo run -p tx-manifest-wallet -- $CFG \
   run examples/bitcoin_covenant/txmanifest.json Unlock \
