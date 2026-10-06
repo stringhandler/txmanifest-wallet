@@ -309,7 +309,7 @@ pub fn encode_leaf_bytes(item: &serde_json::Value, resolved: &str) -> Result<Vec
             }
             b
         }
-        "bytes32" | "bytes" | "pubkey" => hex_to_bytes(&resolved)?,
+        "bytes32" | "bytes" | "pubkey" => hex_to_bytes(resolved)?,
         other => bail!("Unsupported taproot leaf value type '{other}'"),
     };
 
@@ -341,7 +341,7 @@ pub fn encode_leaf_bytes(item: &serde_json::Value, resolved: &str) -> Result<Vec
 /// Decode a (0x-prefixed or bare) even-length hex string into bytes.
 fn hex_to_bytes(s: &str) -> Result<Vec<u8>> {
     let hex = s.trim().trim_start_matches("0x").trim_start_matches("0X");
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         bail!("odd-length hex '{hex}'");
     }
     (0..hex.len())
@@ -381,7 +381,7 @@ fn eval_op_return_concat(
             .trim()
             .trim_start_matches("0x")
             .trim_start_matches("0X");
-        if hex.len() % 2 != 0 {
+        if !hex.len().is_multiple_of(2) {
             bail!("OP_RETURN data part '{arg}' resolved to odd-length hex '{hex}'");
         }
         let mut bytes: Vec<u8> = (0..hex.len())
@@ -408,8 +408,8 @@ fn eval_op_return_concat(
 ///   - `Some(true)`  — the operands differ (validation passes)
 ///   - `Some(false)` — the operands are equal (validation is violated)
 ///   - `None`        — the expression is not a `!=` comparison, or an operand
-///                     could not be resolved; the caller treats this as
-///                     informational (not enforced).
+///     could not be resolved; the caller treats this as
+///     informational (not enforced).
 ///
 /// Only `!=` is handled here. Equality/relational operators are intentionally
 /// left unenforced so existing `==` / `>=` validations keep their current

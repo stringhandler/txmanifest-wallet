@@ -151,6 +151,16 @@ fn check_hook(report: &mut Report, loc: &str, hook: &crate::manifest::HookBlock,
 }
 
 /// Run all structural checks against a parsed manifest file.
+/// An action as `validate` walks it: dot-path location, bare name, the action, its
+/// param types, and whether it is a contract-template method.
+type ActionSite<'a> = (
+    String,
+    String,
+    &'a Action,
+    std::collections::BTreeMap<String, String>,
+    bool,
+);
+
 pub fn validate(manifest: &Manifest) -> Report {
     let mut report = Report::default();
 
@@ -160,13 +170,7 @@ pub fn validate(manifest: &Manifest) -> Report {
 
     // Collect every action, whether top-level or a class method, tagged with a
     // dot-path location and its bare name (for lifecycle cross-checks).
-    let mut actions: Vec<(
-        String,
-        String,
-        &Action,
-        std::collections::BTreeMap<String, String>,
-        bool,
-    )> = Vec::new();
+    let mut actions: Vec<ActionSite> = Vec::new();
     for (name, action) in &manifest.actions {
         actions.push((
             format!("actions.{name}"),
@@ -1008,6 +1012,60 @@ fn check_destination(
     }
 }
 
+/// Cross-check `requires` against what the manifest uses, and the manifest against its chain.
+///
+/// Two independent checks, because they fail for different reasons and need different
+/// fixes:
+///
+/// 1. **`requires` vs. contents** — a covenant manifest that does not declare
+///    `simplicity`. An error: `requires` is what a target gets checked against before a
+///    build, so a gap here means the check passes and the broadcast fails. The reverse —
+///    declaring what nothing uses — is a warning only, because inference reads field
+///    presence rather than semantics and must not block a run on its own guess.
+/// 2. **Contents vs. `chain`** — an issuance input on a Bitcoin manifest. An error, and
+///    not expressible through `requires` at all: `chain: "bitcoin"` already says there is
+///    no issuance, so there is nothing an author could add to `requires` to make it work.
+///    The fix is to change the manifest or change the chain.
+///
+/// Namespaced capabilities are checked in neither direction. This crate cannot know what
+/// `custom::my-feature` means, so it will not claim the manifest needs it, and will not
+/// claim it does not.
+fn check_capabilities(report: &mut Report, manifest: &Manifest) {
+    let family = manifest.chain_family();
+    let declared = &manifest.requires;
+    let inferred = manifest.inferred_capabilities();
+
+    for used in inferred.iter() {
+        if !declared.contains(used) {
+            report.error(
+                "requires",
+                format!(
+                    "manifest uses '{used}' but does not declare it; add \"{used}\" to `requires`"
+                ),
+            );
+        }
+    }
+
+    for extra in declared.iter() {
+        // Only core capabilities can be judged unused — a namespaced one is satisfied by
+        // machinery this crate has never seen, so silence is the only honest answer.
+        if !extra.is_core() || inferred.contains(extra) {
+            continue;
+        }
+        report.warn(
+            "requires",
+            format!("declares '{extra}' but nothing in this manifest appears to use it"),
+        );
+    }
+
+    for m in manifest.chain_mismatches() {
+        report.error(
+            m.location.clone(),
+            format!("uses {} but chain '{family}' has no {}", m.uses, m.missing),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1831,60 +1889,6 @@ mod tests {
             surplus_errors(&inputs_only).is_empty(),
             "{:?}",
             inputs_only.issues
-        );
-    }
-}
-
-/// Cross-check `requires` against what the manifest uses, and the manifest against its chain.
-///
-/// Two independent checks, because they fail for different reasons and need different
-/// fixes:
-///
-/// 1. **`requires` vs. contents** — a covenant manifest that does not declare
-///    `simplicity`. An error: `requires` is what a target gets checked against before a
-///    build, so a gap here means the check passes and the broadcast fails. The reverse —
-///    declaring what nothing uses — is a warning only, because inference reads field
-///    presence rather than semantics and must not block a run on its own guess.
-/// 2. **Contents vs. `chain`** — an issuance input on a Bitcoin manifest. An error, and
-///    not expressible through `requires` at all: `chain: "bitcoin"` already says there is
-///    no issuance, so there is nothing an author could add to `requires` to make it work.
-///    The fix is to change the manifest or change the chain.
-///
-/// Namespaced capabilities are checked in neither direction. This crate cannot know what
-/// `custom::my-feature` means, so it will not claim the manifest needs it, and will not
-/// claim it does not.
-fn check_capabilities(report: &mut Report, manifest: &Manifest) {
-    let family = manifest.chain_family();
-    let declared = &manifest.requires;
-    let inferred = manifest.inferred_capabilities();
-
-    for used in inferred.iter() {
-        if !declared.contains(used) {
-            report.error(
-                "requires",
-                format!(
-                    "manifest uses '{used}' but does not declare it; add \"{used}\" to `requires`"
-                ),
-            );
-        }
-    }
-
-    for extra in declared.iter() {
-        // Only core capabilities can be judged unused — a namespaced one is satisfied by
-        // machinery this crate has never seen, so silence is the only honest answer.
-        if !extra.is_core() || inferred.contains(extra) {
-            continue;
-        }
-        report.warn(
-            "requires",
-            format!("declares '{extra}' but nothing in this manifest appears to use it"),
-        );
-    }
-
-    for m in manifest.chain_mismatches() {
-        report.error(
-            m.location.clone(),
-            format!("uses {} but chain '{family}' has no {}", m.uses, m.missing),
         );
     }
 }

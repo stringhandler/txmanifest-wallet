@@ -354,7 +354,7 @@ fn wallet_nets(buckets: &[Bucket], wallet: Option<&WalletDelta>) -> Vec<(AssetMe
         .filter_map(|sym| {
             let (prec, units, exact) = acc[&sym];
             // Drop assets that merely round-trip, but keep inexact ones visible.
-            (units != 0 || !exact).then(|| {
+            (units != 0 || !exact).then_some({
                 (
                     AssetMeta {
                         symbol: sym,

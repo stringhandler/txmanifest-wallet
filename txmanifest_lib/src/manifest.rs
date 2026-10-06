@@ -1985,7 +1985,7 @@ mod tests {
         }"#;
         // Top-level `source` — never set by any manifest; the engine now always
         // falls back to "covenant.simf". Per-utxo_type `script.source` is unaffected.
-        let source = r#"{
+        let _source = r#"{
             "manifest_version": "0.3.0", "protocol": "test",
             "source": "./covenant.simf"
         }"#;
