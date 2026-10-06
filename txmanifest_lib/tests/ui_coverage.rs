@@ -23,10 +23,6 @@ use tx_manifest_lib::manifest::{Action, Manifest};
 const EXEMPT: &[(&str, &str)] = &[
     ("last_will", "11 legs / 4 actions, no ui text authored yet"),
     (
-        "lending",
-        "90 legs / 10 actions; largely superseded by lending_v3",
-    ),
-    (
         "lending_v2",
         "90 legs / 9 actions; wire-compat variant of lending",
     ),

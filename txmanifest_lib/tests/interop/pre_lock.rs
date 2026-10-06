@@ -21,9 +21,13 @@ fn hexs(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn main() {
+#[test]
+fn reproduces_indexer_pre_lock_covenant() {
     let net = ElementsNetwork::LiquidTestnet;
-    let dir = std::path::Path::new("examples/lending_v2");
+    let dir = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../examples/lending_v2"
+    ));
 
     // Offer params decoded from the on-chain tx (adf5353d...).
     let collateral_asset = "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49";
@@ -202,5 +206,10 @@ fn main() {
         "pre_lock spk (this wallet, debug=true) = {:x}",
         addr.script_pubkey()
     );
-    println!("indexer reconstruction (simplicity-lending) = 512050... (old) / f2b6fe... (correct)");
+    // What the simplicity-lending indexer reconstructs for this offer.
+    assert_eq!(
+        format!("{:x}", addr.script_pubkey()),
+        "5120f2b6fe3cb489b5ee0ce8d6fb0311271939f3b5d5caf3ee0ac8297fc6145625d4",
+        "pre_lock spk must match the indexer's reconstruction"
+    );
 }

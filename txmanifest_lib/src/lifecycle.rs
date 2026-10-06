@@ -5641,7 +5641,7 @@ mod tests {
     }
 
     /// `$inputs.<id>.<field>` reads an instance field straight off a resolved input, with
-    /// no hook in between (examples/deadcat's constructor).
+    /// no hook in between (as in a Deadcat-style market constructor).
     ///
     /// The assertion that matters is `issued_asset` != `asset`. On an input carrying a new
     /// issuance those are different things — the spent UTXO is L-BTC, the created asset is
@@ -5887,7 +5887,7 @@ mod tests {
             .as_ref()
             .expect("CreateOffer has create_instance");
 
-        // Live offer 43ab4efe parameters (same as examples/lending_recon.rs).
+        // Live offer 43ab4efe parameters (same as tests/interop/lending_collateral.rs).
         let collateral = "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49";
         let principal = "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5";
         let borrower_nft = "78d61185c79f855fac51a87c191b00266f02d28752f50b3d9092ccf6b978181e";
@@ -6060,7 +6060,7 @@ mod tests {
             .expect("out[3] lender_nft_script_auth covenant address compiles");
 
         // out[4]: the wired OP_RETURN output reproduces the on-chain 50-byte lending metadata
-        // (same offer params as examples/opreturn_recon.rs → identical payload).
+        // (same offer params as tests/interop/lending_opreturn.rs → identical payload).
         let op_out = action
             .outputs
             .as_ref()
@@ -6115,7 +6115,7 @@ mod tests {
             .collect();
 
         // out[0]: active lending covenant (storage slot0 = is_active=1) — the storage-transition
-        // address from examples/lending_active_recon.rs.
+        // address from tests/interop/lending_active.rs.
         let act_ut = manifest
             .utxo_type("lending_collateral_active")
             .expect("active utxo_type");
