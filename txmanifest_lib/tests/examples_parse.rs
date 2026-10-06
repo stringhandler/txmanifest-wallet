@@ -1,4 +1,4 @@
-//! Every manifest under `examples/` must deserialize into [`Manifest`].
+//! Every manifest under `examples/` must deserialize into [`Manifest`] and pass `validate`.
 //!
 //! This is the guard rail for schema work: it fails the moment an example uses a
 //! key the Rust model does not know about (once `deny_unknown_fields` is on), or
@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use tx_manifest_lib::manifest::Manifest;
+use tx_manifest_lib::validate;
 
 /// Absolute path to the workspace-level `examples/` directory.
 fn examples_dir() -> PathBuf {
@@ -49,6 +50,35 @@ fn every_example_manifest_parses() {
         "{} of {} example manifests failed to parse:\n{}",
         failures.len(),
         manifests.len(),
+        failures.join("\n")
+    );
+}
+
+/// Every example must also pass `validate` cleanly. Examples are what a new user copies
+/// first; one that fails validation belongs in `tests/fixtures/`, not here.
+#[test]
+fn every_example_manifest_validates() {
+    let mut failures = Vec::new();
+    for path in &example_manifests() {
+        let raw = std::fs::read_to_string(path).expect("read example manifest");
+        let manifest = Manifest::from_json_str(&raw).expect("parsed by the test above");
+        let report = validate::validate(&manifest);
+        if !report.is_ok() || report.warnings() > 0 {
+            let name = path.parent().and_then(Path::file_name).unwrap_or_default();
+            for issue in &report.issues {
+                failures.push(format!(
+                    "  {}: {} — {}",
+                    name.to_string_lossy(),
+                    issue.location,
+                    issue.message
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "example manifests have validation issues:\n{}",
         failures.join("\n")
     );
 }

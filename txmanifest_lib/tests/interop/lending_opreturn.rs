@@ -15,8 +15,12 @@ fn program_id(simf_path: &std::path::Path) -> String {
     h[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn main() {
-    let d = std::path::Path::new("examples/lending_v3");
+#[test]
+fn reproduces_offer_creation_opreturn() {
+    let d = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../examples/lending_v3"
+    ));
     let lending_program_id = program_id(&d.join("lending.simf"));
     assert_eq!(
         lending_program_id, "f80c6162",

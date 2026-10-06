@@ -3,8 +3,12 @@ use lwk_wollet::ElementsNetwork;
 use std::collections::HashMap;
 use tx_manifest_lib::covenant;
 
-fn main() {
-    let d = std::path::Path::new("examples/lending_v3");
+#[test]
+fn reproduces_onchain_issuance_factory_covenant() {
+    let d = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../examples/lending_v3"
+    ));
     let mut p = HashMap::new();
     let mut h = HashMap::new();
     p.insert("ISSUING_UTXOS_COUNT".to_string(), "2".to_string());
@@ -20,7 +24,9 @@ fn main() {
         true,
     )
     .unwrap();
-    eprintln!("---- result ----");
-    println!("factory out[1] spk (repro) = {:x}", addr.script_pubkey());
-    println!("factory out[1] spk (chain) = 5120456881785cc7d561caaa059e02f1a2823066bd860423996bea3e92c621bb064b");
+    assert_eq!(
+        format!("{:x}", addr.script_pubkey()),
+        "5120456881785cc7d561caaa059e02f1a2823066bd860423996bea3e92c621bb064b",
+        "factory out[1] spk must match the on-chain one"
+    );
 }

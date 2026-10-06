@@ -20,9 +20,13 @@ fn hx(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn main() {
+#[test]
+fn reproduces_onchain_lending_collateral_covenant() {
     let net = ElementsNetwork::LiquidTestnet;
-    let d = std::path::Path::new("examples/lending_v3");
+    let d = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../examples/lending_v3"
+    ));
     let sh = |simf: &str, p: &HashMap<String, String>, h: &HashMap<String, String>| -> String {
         hx(&covenant::compute_covenant_script_hash(&d.join(simf), p, h, net, true).unwrap())
     };
@@ -204,4 +208,9 @@ fn main() {
     println!("principal_out = {principal_out}");
     println!("lending out[5] spk (repro) = {:x}", addr.script_pubkey());
     println!("lending out[5] spk (chain) = {out5}");
+    assert_eq!(
+        format!("{:x}", addr.script_pubkey()),
+        out5,
+        "lending out[5] spk must match the on-chain one"
+    );
 }

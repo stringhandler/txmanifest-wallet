@@ -20,14 +20,18 @@ fn hx(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn main() {
+#[test]
+fn activation_flips_the_lending_covenant_address() {
     let net = ElementsNetwork::LiquidTestnet;
-    let d = std::path::Path::new("examples/lending_v3");
+    let d = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../examples/lending_v3"
+    ));
     let sh = |simf: &str, p: &HashMap<String, String>, h: &HashMap<String, String>| -> String {
         hx(&covenant::compute_covenant_script_hash(&d.join(simf), p, h, net, true).unwrap())
     };
 
-    // Live offer 43ab4efe params (same as lending_recon.rs).
+    // Live offer 43ab4efe params (same as lending_collateral.rs).
     let collateral = "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49";
     let principal = "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5";
     let borrower_nft = "78d61185c79f855fac51a87c191b00266f02d28752f50b3d9092ccf6b978181e";

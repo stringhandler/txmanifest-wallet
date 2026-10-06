@@ -17,8 +17,12 @@ fn program_id(simf_path: &std::path::Path) -> String {
     h[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn main() {
-    let d = std::path::Path::new("examples/lending_v3");
+#[test]
+fn reproduces_factory_creation_opreturn() {
+    let d = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../examples/lending_v3"
+    ));
     let factory_program_id = program_id(&d.join("issuance_factory.simf"));
     assert_eq!(factory_program_id, "dd1e7f89",
         "FACTORY_PROGRAM_ID constant in the manifest must equal sha256(issuance_factory.simf source)[..4]");
