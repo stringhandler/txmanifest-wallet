@@ -4,6 +4,12 @@ User-facing changes to the `tx-manifest-wallet` CLI and the manifest format.
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/). No changelog was kept before 0.2.0.
 
+## [Unreleased]
+
+### Added
+
+- Release binaries for macOS (Apple Silicon).
+
 ## [0.3.0] - 2026-10-06
 
 ### Breaking
