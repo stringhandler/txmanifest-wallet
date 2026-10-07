@@ -1,14 +1,27 @@
 # Changelog
 
-User-facing changes to the `tx-manifest-wallet` CLI and the manifest format.
+User-facing changes to the `tx-manifest-wallet` CLI. Changes to the manifest format
+itself are in the [format changelog](docs/format-changelog.md).
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/). No changelog was kept before 0.2.0.
 
 ## [Unreleased]
 
+### Breaking
+
+- `run` refuses an *unpinned* manifest: one where a Simplicity program has no content hash, no compiler-version requirement, or doesn't match its hash. Add the hashes with `tx-manifest-wallet pin` and set a compiler version (see the [format changelog](docs/format-changelog.md)), or pass `--allow-unpinned` (or `--debug`) while developing, which turns each of these into a warning.
+
 ### Added
 
 - Release binaries for macOS (Apple Silicon).
+- Supports manifest format [`0.3.1`](docs/format-changelog.md), which adds program pinning. `0.3.0` manifests still load.
+- `pin` command: writes every program's current hash into a manifest without reformatting it; `pin --check` fails if any is missing or stale.
+- `validate --strict`: unpinned programs are errors rather than warnings.
+- `run --debug`: development mode. For now the same as `--allow-unpinned`; it may enable more development-only behaviour later.
+
+### Changed
+
+- `validate` also checks each program file: that it exists, matches its hash, meets its compiler requirement, and declares the witnesses the manifest supplies.
 
 ## [0.3.0] - 2026-10-06
 

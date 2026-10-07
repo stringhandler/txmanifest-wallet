@@ -63,24 +63,33 @@ A manifest declares:
 - **`chain`** and **`requires`** — the ledger it targets and what the wallet must
   support (e.g. `"simplicity"`).
 - **`utxo_types`** — covenant output types, each pointing at a `.simf` program.
-- **`actions`** — the operations a user performs, each with `params`, `inputs`,
-  `outputs` and `validations`.
+- **`actions`** — the operations a user performs, each with `params`, `inputs` and
+  `outputs`.
 
 The full format is defined by the JSON Schema in
 [`schema/txmanifest.schema.json`](schema/txmanifest.schema.json); point your editor at it
-with `"$schema"` for completion and inline errors. `manifest_version` must be `"0.3.0"`.
+with `"$schema"` for completion and inline errors. `manifest_version` is `"0.3.1"`; `"0.3.0"` manifests still load.
 [`examples/p2pk`](examples/p2pk/txmanifest.json) is the smallest complete manifest.
 
-Check a manifest with `validate` (offline structure checks) and `capabilities` (what a
-wallet needs to run it; `--supports` turns it into a CI check for other wallet
-implementations).
+Each program is **pinned** by a hash of its file and a SimplicityHL version requirement,
+so a manifest identifies exactly the programs it runs. `tx-manifest-wallet pin` writes the
+hashes after you edit a `.simf`; set the version with `"simplicity_hl": { "version":
+"0.7.1" }`. Unpinned manifests, including ones whose programs changed since they were
+pinned, are refused by `run` unless you pass `--allow-unpinned` or `--debug`.
+
+Check a manifest with `validate` (structure and programs; `--strict` before publishing)
+and `capabilities` (what a wallet needs to run it; `--supports` turns it into a CI check
+for other wallet implementations).
+
+Terms and design decisions are recorded in [`docs/`](docs).
 
 ## Commands
 
 | Command | What it does |
 |---------|--------------|
 | `run <manifest> <action>` | Run an action: resolve inputs, build, sign, broadcast. |
-| `validate <manifest>` | Check a manifest without touching the network. |
+| `validate <manifest>` | Check a manifest and its programs without touching the network. |
+| `pin <manifest>` | Write each program's current hash into the manifest. |
 | `capabilities <manifest>` | Report what a wallet must support to run a manifest. |
 | `describe <manifest>` | Browse a manifest's actions interactively. |
 | `prepare <manifest> <action>` | Split wallet funds so an action has the UTXOs it needs (Liquid). |
@@ -124,7 +133,8 @@ The `simplicityhl` dependency is a fork that adds Bitcoin support; see
 [`contrib/regtest`](contrib/regtest) builds a local Bitcoin node with Simplicity active.
 CI runs `cargo fmt --check` and `cargo clippy -- -D warnings`.
 
-Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+Changes to the CLI are listed in [CHANGELOG.md](CHANGELOG.md), and changes to the manifest
+format in [docs/format-changelog.md](docs/format-changelog.md).
 
 ## License
 

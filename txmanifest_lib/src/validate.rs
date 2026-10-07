@@ -33,6 +33,9 @@ pub struct Issue {
     /// Dot-path to the offending element, e.g. `actions.Pay.outputs.p2pk_out`.
     pub location: String,
     pub message: String,
+    /// A program is not pinned. A warning while developing; [`Report::strict`] makes it an
+    /// error, as publishing and wallets require.
+    pub unpinned: bool,
 }
 
 /// The result of validating a manifest file.
@@ -47,6 +50,7 @@ impl Report {
             severity: Severity::Error,
             location: location.into(),
             message: message.into(),
+            unpinned: false,
         });
     }
 
@@ -55,7 +59,33 @@ impl Report {
             severity: Severity::Warning,
             location: location.into(),
             message: message.into(),
+            unpinned: false,
         });
+    }
+
+    fn unpinned(&mut self, location: impl Into<String>, message: impl Into<String>) {
+        self.issues.push(Issue {
+            severity: Severity::Warning,
+            location: location.into(),
+            message: message.into(),
+            unpinned: true,
+        });
+    }
+
+    /// The same findings, with every unpinned program an error: the bar for publishing a
+    /// manifest or handing it to a wallet.
+    pub fn strict(mut self) -> Self {
+        for issue in &mut self.issues {
+            if issue.unpinned {
+                issue.severity = Severity::Error;
+            }
+        }
+        self
+    }
+
+    /// Append another report's findings, e.g. [`validate_programs`] after [`validate`].
+    pub fn extend(&mut self, other: Report) {
+        self.issues.extend(other.issues);
     }
 
     /// Number of error-severity issues.
@@ -241,7 +271,30 @@ pub fn validate(manifest: &Manifest) -> Report {
         }
     }
 
+    check_program_refs(&mut report, manifest);
+
     report
+}
+
+/// Program references and their pins, as far as they can be judged without reading the
+/// files: names that resolve, references that agree, hashes and versions that parse, and a
+/// hash on every program. Whether the hashes *match* is [`validate_programs`]' job.
+fn check_program_refs(report: &mut Report, manifest: &Manifest) {
+    let (pins, issues) = crate::programs::resolve(manifest);
+    for issue in issues {
+        report.error(issue.location, issue.message);
+    }
+    for pin in pins.values() {
+        if pin.hash.is_none() {
+            report.unpinned(
+                pin.locations.first().cloned().unwrap_or_default(),
+                format!(
+                    "unpinned: {} has no hash; run `tx-manifest-wallet pin` to add it",
+                    pin.source
+                ),
+            );
+        }
+    }
 }
 
 /// Cross-check every covenant input's `witnesses` map against the witness list its `.simf`
@@ -261,6 +314,55 @@ pub fn validate(manifest: &Manifest) -> Report {
 pub fn validate_programs(manifest: &Manifest, base_dir: &std::path::Path) -> Report {
     let mut report = Report::default();
 
+    // Each program file against its pin. A file that is missing or fails its pin is not
+    // used for the witness checks below, so it is reported once, here.
+    let (pins, _) = crate::programs::resolve(manifest);
+    let mut sources: std::collections::BTreeMap<
+        std::path::PathBuf,
+        crate::programs::ProgramSource,
+    > = std::collections::BTreeMap::new();
+    for pin in pins.values() {
+        let location = pin.locations.first().cloned().unwrap_or_default();
+        let path = base_dir.join(&pin.source);
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                report.error(location, format!("cannot read {}: {e}", path.display()));
+                continue;
+            }
+        };
+        match crate::programs::check(pin, &bytes) {
+            Ok(checked) => {
+                // A stale hash is an error even while developing: it is the message that
+                // says to re-run `pin`, and `--allow-unpinned` exists only on `run`.
+                if let Some(mismatch) = checked.mismatch {
+                    report.error(location.clone(), mismatch);
+                }
+                let text = checked.text;
+                let has_directive = matches!(
+                    simplicityhl::version::SimcDirective::requirement_of(&text),
+                    Ok(Some(_))
+                );
+                if pin.version.is_none() && !has_directive {
+                    report.unpinned(
+                        location,
+                        format!(
+                            "unpinned: {} has no compiler-version requirement; set \
+                             \"simplicity_hl_version\", \"simplicity_hl.version\", or a simc \
+                             directive in the file",
+                            pin.source
+                        ),
+                    );
+                }
+                sources.insert(
+                    path.clone(),
+                    crate::programs::ProgramSource::new(path, text),
+                );
+            }
+            Err(e) => report.error(location, format!("{e:#}")),
+        }
+    }
+
     let no_types = std::collections::BTreeMap::new();
     let utxo_types = manifest.utxo_types.as_ref().unwrap_or(&no_types);
     let opts = manifest.compile_opts();
@@ -274,37 +376,50 @@ pub fn validate_programs(manifest: &Manifest, base_dir: &std::path::Path) -> Rep
     > = std::collections::BTreeMap::new();
     let mut by_type: std::collections::BTreeMap<&str, &std::collections::BTreeMap<String, String>> =
         std::collections::BTreeMap::new();
+    let mut type_paths: Vec<(&str, std::path::PathBuf)> = Vec::new();
 
     for (name, ut) in utxo_types {
         let Some(script) = &ut.script else { continue };
         if script.type_ != "simplicity" {
             continue;
         }
-        let Some(source) = &script.source else {
-            report.error(
-                format!("utxo_types.{name}.script"),
-                "a simplicity script needs a \"source\" path to its .simf file",
-            );
-            continue;
-        };
-        let path = base_dir.join(source);
-        by_source.entry(path.clone()).or_insert_with(|| {
-            crate::covenant::program_witness_types(&path, &opts).map_err(|e| format!("{e:#}"))
-        });
-    }
-    for (name, ut) in utxo_types {
-        let Some(source) = ut.script.as_ref().and_then(|s| s.source.as_ref()) else {
-            continue;
-        };
-        match by_source.get(&base_dir.join(source)) {
-            Some(Ok(types)) => {
-                by_type.insert(name.as_str(), types);
+        let source = match (&script.program, &script.source) {
+            (Some(program), _) => manifest
+                .programs
+                .as_ref()
+                .and_then(|t| t.get(program))
+                .map(|def| &def.source),
+            (None, Some(source)) => Some(source),
+            (None, None) => {
+                report.error(
+                    format!("utxo_types.{name}.script"),
+                    "a simplicity script needs a \"source\" path to its .simf file, or a \
+                     \"program\" naming one",
+                );
+                continue;
             }
-            Some(Err(e)) => report.error(
-                format!("utxo_types.{name}.script.source"),
-                format!("cannot read witnesses from '{source}': {e}"),
+        };
+        // An unknown program name is reported by `validate`; an unreadable or mismatched
+        // file, above.
+        let Some(program) = source.and_then(|src| sources.get(&base_dir.join(src))) else {
+            continue;
+        };
+        by_source
+            .entry(program.path().to_path_buf())
+            .or_insert_with(|| {
+                crate::covenant::program_witness_types(program, &opts).map_err(|e| format!("{e:#}"))
+            });
+        type_paths.push((name.as_str(), program.path().to_path_buf()));
+    }
+    for (name, path) in type_paths {
+        match &by_source[&path] {
+            Ok(types) => {
+                by_type.insert(name, types);
+            }
+            Err(e) => report.error(
+                format!("utxo_types.{name}.script"),
+                format!("cannot read witnesses from '{}': {e}", path.display()),
             ),
-            None => {}
         }
     }
 

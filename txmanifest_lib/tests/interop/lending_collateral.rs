@@ -28,7 +28,14 @@ fn reproduces_onchain_lending_collateral_covenant() {
         "/../examples/lending_v3"
     ));
     let sh = |simf: &str, p: &HashMap<String, String>, h: &HashMap<String, String>| -> String {
-        hx(&covenant::compute_covenant_script_hash(&d.join(simf), p, h, net, true).unwrap())
+        hx(&covenant::compute_covenant_script_hash(
+            &tx_manifest_lib::programs::ProgramSource::read_unpinned(d.join(simf)).unwrap(),
+            p,
+            h,
+            net,
+            true,
+        )
+        .unwrap())
     };
 
     // Live offer 43ab4efe… params.
@@ -196,9 +203,15 @@ fn reproduces_onchain_lending_collateral_covenant() {
     slot1[24..32].copy_from_slice(&2000u64.to_be_bytes());
     let extra = [slot0, slot1];
 
-    let addr =
-        covenant::compute_covenant_address(&d.join("lending.simf"), &p, &h, &extra, net, true)
-            .unwrap();
+    let addr = covenant::compute_covenant_address(
+        &tx_manifest_lib::programs::ProgramSource::read_unpinned(d.join("lending.simf")).unwrap(),
+        &p,
+        &h,
+        &extra,
+        net,
+        true,
+    )
+    .unwrap();
 
     eprintln!("---- result ----");
     println!("F_lender  = {f_lender}");

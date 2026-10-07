@@ -54,7 +54,8 @@ fn every_example_manifest_parses() {
     );
 }
 
-/// Every example must also pass `validate` cleanly. Examples are what a new user copies
+/// Every example must also pass `validate --strict` cleanly: its programs compile, match
+/// their pinned hashes, and name a compiler version. Examples are what a new user copies
 /// first; one that fails validation belongs in `tests/fixtures/`, not here.
 #[test]
 fn every_example_manifest_validates() {
@@ -62,7 +63,12 @@ fn every_example_manifest_validates() {
     for path in &example_manifests() {
         let raw = std::fs::read_to_string(path).expect("read example manifest");
         let manifest = Manifest::from_json_str(&raw).expect("parsed by the test above");
-        let report = validate::validate(&manifest);
+        let mut report = validate::validate(&manifest);
+        report.extend(validate::validate_programs(
+            &manifest,
+            path.parent().expect("manifest has a directory"),
+        ));
+        let report = report.strict();
         if !report.is_ok() || report.warnings() > 0 {
             let name = path.parent().and_then(Path::file_name).unwrap_or_default();
             for issue in &report.issues {

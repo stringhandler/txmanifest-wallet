@@ -100,7 +100,13 @@ fn tapdata_state_leaf_matches_a_longhand_derivation() {
     ctx.set_compile_param("PUB_KEY", &pub_key);
 
     let simf = std::path::Path::new(SIMF);
-    let tapleaf = covenant::compute_tapleaf_hash(simf, &params, &hints, false).expect("tapleaf");
+    let tapleaf = covenant::compute_tapleaf_hash(
+        &tx_manifest_lib::programs::ProgramSource::read_unpinned(simf).unwrap(),
+        &params,
+        &hints,
+        false,
+    )
+    .expect("tapleaf");
 
     let states = [0, 1, 2, u64::MAX];
     let manifest = manifest(&states);
@@ -117,7 +123,7 @@ fn tapdata_state_leaf_matches_a_longhand_derivation() {
         );
 
         let addr = covenant::compute_covenant_address(
-            simf,
+            &tx_manifest_lib::programs::ProgramSource::read_unpinned(simf).unwrap(),
             &params,
             &hints,
             &leaves,

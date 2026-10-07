@@ -28,7 +28,14 @@ fn activation_flips_the_lending_covenant_address() {
         "/../examples/lending_v3"
     ));
     let sh = |simf: &str, p: &HashMap<String, String>, h: &HashMap<String, String>| -> String {
-        hx(&covenant::compute_covenant_script_hash(&d.join(simf), p, h, net, true).unwrap())
+        hx(&covenant::compute_covenant_script_hash(
+            &tx_manifest_lib::programs::ProgramSource::read_unpinned(d.join(simf)).unwrap(),
+            p,
+            h,
+            net,
+            true,
+        )
+        .unwrap())
     };
 
     // Live offer 43ab4efe params (same as lending_collateral.rs).
@@ -187,17 +194,29 @@ fn activation_flips_the_lending_covenant_address() {
 
     // Pending: slot0 = is_active(false) = all zeros; slot1 = current_debt.
     let pending = [vec![0u8; 32], debt.clone()];
-    let addr_p =
-        covenant::compute_covenant_address(&d.join("lending.simf"), &p, &h, &pending, net, true)
-            .unwrap();
+    let addr_p = covenant::compute_covenant_address(
+        &tx_manifest_lib::programs::ProgramSource::read_unpinned(d.join("lending.simf")).unwrap(),
+        &p,
+        &h,
+        &pending,
+        net,
+        true,
+    )
+    .unwrap();
 
     // Active: slot0 = is_active(true) = value 1 (byte[31]=0x01); slot1 = current_debt.
     let mut slot0_active = vec![0u8; 32];
     slot0_active[31] = 1;
     let active = [slot0_active, debt.clone()];
-    let addr_a =
-        covenant::compute_covenant_address(&d.join("lending.simf"), &p, &h, &active, net, true)
-            .unwrap();
+    let addr_a = covenant::compute_covenant_address(
+        &tx_manifest_lib::programs::ProgramSource::read_unpinned(d.join("lending.simf")).unwrap(),
+        &p,
+        &h,
+        &active,
+        net,
+        true,
+    )
+    .unwrap();
 
     eprintln!("---- result ----");
     println!("pending out[5] spk (repro) = {:x}", addr_p.script_pubkey());

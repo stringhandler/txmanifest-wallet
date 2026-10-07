@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use crate::chain::{ChainFamily, Network, TaprootTag, SIMPLICITY_LEAF_VERSION};
+pub use crate::programs::ProgramSource;
 use anyhow::{Context, Result};
 use lwk_wollet::elements::{
     hashes::{sha256, Hash as ElementsHash, HashEngine},
@@ -132,14 +132,13 @@ fn jet_hinter(family: ChainFamily) -> Result<Box<dyn simplicityhl::ast::JetHinte
 /// `input_script_hash` jet returns for a UTXO at that covenant's address, use
 /// `compute_covenant_script_hash` instead.
 pub fn compute_tapleaf_hash(
-    simf_path: &Path,
+    program: &ProgramSource,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     opts: impl Into<CompileOpts>,
 ) -> Result<[u8; 32]> {
     let opts = opts.into();
-    let source = std::fs::read_to_string(simf_path)
-        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let source = program.text().to_owned();
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
@@ -158,14 +157,14 @@ pub fn compute_tapleaf_hash(
 /// that covenant address, and therefore the correct value for `*_COV_HASH` instance fields used
 /// by `script_auth.simf` and similar programs that verify co-spending.
 pub fn compute_covenant_script_hash(
-    simf_path: &Path,
+    program: &ProgramSource,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     network: lwk_wollet::ElementsNetwork,
     opts: impl Into<CompileOpts>,
 ) -> Result<[u8; 32]> {
     compute_covenant_script_hash_with_leaves(
-        simf_path,
+        program,
         compile_params,
         type_hints,
         &[],
@@ -179,7 +178,7 @@ pub fn compute_covenant_script_hash(
 /// a covenant WITH storage — e.g. the pending lending offer's own script hash, which the
 /// `script_auth` covenant (offer out[3]) commits to (`ScriptAuth::from_simplex_program`).
 pub fn compute_covenant_script_hash_with_leaves(
-    simf_path: &Path,
+    program: &ProgramSource,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
@@ -187,7 +186,7 @@ pub fn compute_covenant_script_hash_with_leaves(
     opts: impl Into<CompileOpts>,
 ) -> Result<[u8; 32]> {
     let addr = compute_covenant_address(
-        simf_path,
+        program,
         compile_params,
         type_hints,
         extra_leaf_payloads,
@@ -202,14 +201,13 @@ pub fn compute_covenant_script_hash_with_leaves(
 ///
 /// Returns `Ok(())` if compilation succeeds. Used for the Step 9 dry-run check.
 pub fn check_compile(
-    simf_path: &Path,
+    program: &ProgramSource,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     opts: impl Into<CompileOpts>,
 ) -> Result<()> {
     let opts = opts.into();
-    let source = std::fs::read_to_string(simf_path)
-        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let source = program.text().to_owned();
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
@@ -224,12 +222,11 @@ pub fn check_compile(
 /// compile params. That is what lets `validate` check witness declarations against the
 /// program at a point where instance fields and action params are still unknown.
 pub fn program_witness_types(
-    simf_path: &Path,
+    program: &ProgramSource,
     opts: impl Into<CompileOpts>,
 ) -> Result<std::collections::BTreeMap<String, String>> {
     let opts = opts.into();
-    let source = std::fs::read_to_string(simf_path)
-        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let source = program.text().to_owned();
     let template = simplicityhl::TemplateProgram::new_with_unstable(
         source,
         &opts.unstable_features,
@@ -251,15 +248,14 @@ pub fn program_witness_types(
 /// `TemplateProgram::compile_function` API, which is not in master.
 #[cfg(feature = "simplicity_eval")]
 pub fn compile_simf_function(
-    simf_path: &Path,
+    program: &ProgramSource,
     fn_name: Option<&str>,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     opts: impl Into<CompileOpts>,
 ) -> Result<simplicityhl::CompiledFunction> {
     let opts = opts.into();
-    let source = std::fs::read_to_string(simf_path)
-        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let source = program.text().to_owned();
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
@@ -285,7 +281,7 @@ pub fn compile_simf_function(
 /// `compile_function` API, which is not in master.
 #[cfg(feature = "simplicity_eval")]
 pub fn execute_simf_function(
-    simf_path: &Path,
+    program: &ProgramSource,
     fn_name: Option<&str>,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
@@ -293,8 +289,7 @@ pub fn execute_simf_function(
     opts: impl Into<CompileOpts>,
 ) -> Result<String> {
     let opts = opts.into();
-    let source = std::fs::read_to_string(simf_path)
-        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let source = program.text().to_owned();
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
@@ -328,7 +323,7 @@ pub fn execute_simf_function(
 /// master, so it fails at runtime here. Rebuild with `--features simplicity_eval`.
 #[cfg(not(feature = "simplicity_eval"))]
 pub fn execute_simf_function(
-    _simf_path: &Path,
+    _program: &ProgramSource,
     _fn_name: Option<&str>,
     _compile_params: &HashMap<String, String>,
     _type_hints: &HashMap<String, String>,
@@ -411,7 +406,7 @@ impl ExecTracker for JetTracker {
 /// specify SimplicityHL type syntax.
 #[allow(clippy::too_many_arguments)]
 pub fn dry_run_covenant(
-    simf_path: &Path,
+    program: &ProgramSource,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
@@ -434,7 +429,7 @@ pub fn dry_run_covenant(
     writeln!(
         out,
         "[dry_run] ── input_index={input_index}  simf={}",
-        simf_path.display()
+        program.path().display()
     )
     .ok();
     writeln!(out, "[dry_run] compile_params ({}):", compile_params.len()).ok();
@@ -490,8 +485,7 @@ pub fn dry_run_covenant(
     drop(out);
 
     // Compile
-    let source = std::fs::read_to_string(simf_path)
-        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let source = program.text().to_owned();
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
@@ -718,7 +712,7 @@ fn inject_computed_signatures(
 
 #[allow(clippy::too_many_arguments)]
 pub fn finalize_covenant_input(
-    simf_path: &Path,
+    program: &ProgramSource,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
@@ -735,8 +729,7 @@ pub fn finalize_covenant_input(
 ) -> Result<()> {
     let opts = opts.into();
     // Compile
-    let source = std::fs::read_to_string(simf_path)
-        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let source = program.text().to_owned();
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
@@ -839,7 +832,7 @@ pub fn finalize_covenant_input(
 /// disagreeing (correctly) about the tweak. `opts.family` decides the TapBranch tag domain
 /// and the jet set, both of which change the result.
 fn covenant_merkle_root(
-    simf_path: &Path,
+    program: &ProgramSource,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
@@ -848,8 +841,7 @@ fn covenant_merkle_root(
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    let source = std::fs::read_to_string(simf_path)
-        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let source = program.text().to_owned();
     let compiled = compile_program(source, arguments, opts)?;
 
     let cmr = compiled.commit().cmr();
@@ -861,7 +853,7 @@ fn covenant_merkle_root(
 }
 
 pub fn compute_covenant_address(
-    simf_path: &Path,
+    program: &ProgramSource,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
@@ -888,7 +880,7 @@ pub fn compute_covenant_address(
     eprintln!(
         "[covenant] compute_covenant_address: {} extra leaf(s), simf={}",
         extra_leaf_payloads.len(),
-        simf_path.display()
+        program.path().display()
     );
     eprintln!(
         "[covenant] compile_params ({} entries):",
@@ -912,8 +904,7 @@ pub fn compute_covenant_address(
     eprintln!("[covenant] Arguments parsed OK");
 
     // Compile the simf file
-    let source = std::fs::read_to_string(simf_path)
-        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let source = program.text().to_owned();
     eprintln!("[covenant] simf source loaded ({} bytes)", source.len());
 
     let compiled = compile_program(source, arguments, &opts)?;
@@ -974,7 +965,7 @@ pub fn compute_covenant_address(
 /// Elements-derived script is a perfectly well-formed P2TR output on Bitcoin, and a
 /// transaction paying it looks entirely normal right up until nobody can ever spend it.
 pub fn covenant_script_pubkey_for(
-    simf_path: &Path,
+    program: &ProgramSource,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
@@ -988,7 +979,7 @@ pub fn covenant_script_pubkey_for(
                 .elements_network()
                 .ok_or_else(|| anyhow::anyhow!("{network} has no Elements network mapping"))?;
             let address = compute_covenant_address(
-                simf_path,
+                program,
                 compile_params,
                 type_hints,
                 extra_leaf_payloads,
@@ -998,7 +989,7 @@ pub fn covenant_script_pubkey_for(
             Ok(address.script_pubkey().to_bytes())
         }
         ChainFamily::Bitcoin => Ok(compute_bitcoin_covenant_address(
-            simf_path,
+            program,
             compile_params,
             type_hints,
             extra_leaf_payloads,
@@ -1017,7 +1008,7 @@ pub fn covenant_script_pubkey_for(
 /// with [`build_tapbranch`] under their own chain's tag) and differs only in the final
 /// tweak-and-encode, which is exactly where the two chains diverge.
 pub fn compute_bitcoin_covenant_address(
-    simf_path: &Path,
+    program: &ProgramSource,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
@@ -1038,7 +1029,7 @@ pub fn compute_bitcoin_covenant_address(
     }
 
     let merkle_root = covenant_merkle_root(
-        simf_path,
+        program,
         compile_params,
         type_hints,
         extra_leaf_payloads,
@@ -1488,7 +1479,7 @@ fn network_to_params(network: lwk_wollet::ElementsNetwork) -> &'static AddressPa
 ///   regular stack item's leading byte would be misread as.
 #[allow(clippy::too_many_arguments)]
 pub fn finalize_bitcoin_covenant_input(
-    simf_path: &Path,
+    program: &ProgramSource,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
@@ -1510,8 +1501,7 @@ pub fn finalize_bitcoin_covenant_input(
         );
     }
 
-    let source = std::fs::read_to_string(simf_path)
-        .with_context(|| format!("Cannot read simf file: {}", simf_path.display()))?;
+    let source = program.text().to_owned();
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
@@ -1527,7 +1517,7 @@ pub fn finalize_bitcoin_covenant_input(
     // block has to reproduce the merkle root the output committed to, or the spend fails
     // with nothing to point at.
     let merkle_root = covenant_merkle_root(
-        simf_path,
+        program,
         compile_params,
         type_hints,
         extra_leaf_payloads,
@@ -1793,9 +1783,16 @@ mod tests {
             ..CompileOpts::default()
         };
 
-        let root = covenant_merkle_root(simf, &params, &hints, &[], &opts).expect("root");
+        let root = covenant_merkle_root(
+            &crate::programs::ProgramSource::read_unpinned(simf).unwrap(),
+            &params,
+            &hints,
+            &[],
+            &opts,
+        )
+        .expect("root");
         let address = compute_covenant_address(
-            simf,
+            &crate::programs::ProgramSource::read_unpinned(simf).unwrap(),
             &params,
             &hints,
             &[],
@@ -1838,7 +1835,7 @@ mod tests {
         let hints = HashMap::from([("PUB_KEY".to_string(), "pubkey".to_string())]);
 
         let elements = covenant_script_pubkey_for(
-            simf,
+            &crate::programs::ProgramSource::read_unpinned(simf).unwrap(),
             &params,
             &hints,
             &[],
@@ -1851,7 +1848,7 @@ mod tests {
         .expect("elements script");
 
         let bitcoin = covenant_script_pubkey_for(
-            simf,
+            &crate::programs::ProgramSource::read_unpinned(simf).unwrap(),
             &params,
             &hints,
             &[],
@@ -1883,7 +1880,7 @@ mod tests {
             "/../examples/p2pk/p2pk.simf"
         ));
         let err = compute_bitcoin_covenant_address(
-            simf,
+            &crate::programs::ProgramSource::read_unpinned(simf).unwrap(),
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -1899,7 +1896,7 @@ mod tests {
 
         // ...and an Elements network is refused outright.
         let err = compute_bitcoin_covenant_address(
-            simf,
+            &crate::programs::ProgramSource::read_unpinned(simf).unwrap(),
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -2104,11 +2101,21 @@ mod tests {
             .join("tests/fixtures/unstable_enums.simf");
         let (params, hints) = (HashMap::new(), HashMap::new());
 
-        check_compile(&simf_path, &params, &hints, manifest.compile_opts())
-            .expect("the fixture should compile with the manifest's unstable features");
+        check_compile(
+            &crate::programs::ProgramSource::read_unpinned(&simf_path).unwrap(),
+            &params,
+            &hints,
+            manifest.compile_opts(),
+        )
+        .expect("the fixture should compile with the manifest's unstable features");
 
-        let err = check_compile(&simf_path, &params, &hints, CompileOpts::default())
-            .expect_err("gated syntax must not compile with no unstable features enabled");
+        let err = check_compile(
+            &crate::programs::ProgramSource::read_unpinned(&simf_path).unwrap(),
+            &params,
+            &hints,
+            CompileOpts::default(),
+        )
+        .expect_err("gated syntax must not compile with no unstable features enabled");
         assert!(
             err.to_string().contains("enums"),
             "error should name the missing feature: {err}"
@@ -2135,7 +2142,13 @@ mod tests {
         hints.insert("COLD_PUB_KEY".to_string(), "pubkey".to_string());
         hints.insert("INHERIT_BLOCKS".to_string(), "u16".to_string());
 
-        check_compile(&simf_path, &params, &hints, false).expect("last_will.simf should compile");
+        check_compile(
+            &crate::programs::ProgramSource::read_unpinned(&simf_path).unwrap(),
+            &params,
+            &hints,
+            false,
+        )
+        .expect("last_will.simf should compile");
     }
 
     /// `build_args_json` must include params whose type is inferred by naming convention
@@ -2276,8 +2289,13 @@ mod tests {
         hints.insert("SCRIPT_HASH".to_string(), "bytes32".to_string());
 
         // Path A — the function under test. (Debug-symbol setting must match Path B.)
-        let hash_a =
-            compute_tapleaf_hash(&simf_path, &params, &hints, true).expect("compute_tapleaf_hash");
+        let hash_a = compute_tapleaf_hash(
+            &crate::programs::ProgramSource::read_unpinned(&simf_path).unwrap(),
+            &params,
+            &hints,
+            true,
+        )
+        .expect("compute_tapleaf_hash");
 
         // Path B — compile directly, get CMR, use TapLeafHash::from_script.
         let source = std::fs::read_to_string(&simf_path).expect("read simf");
@@ -2463,7 +2481,7 @@ mod tests {
 
         // Hash A: explicit params only (mirrors IssueUtilityNFTs PRE_LOCK_COV_HASH computation)
         let hash_a = compute_covenant_script_hash(
-            &simf_path,
+            &crate::programs::ProgramSource::read_unpinned(&simf_path).unwrap(),
             &explicit_params,
             &explicit_hints,
             network,
@@ -2533,9 +2551,14 @@ mod tests {
         );
 
         // Hash B: all params (mirrors how LockCollateral creates the pre_lock output)
-        let hash_b =
-            compute_covenant_script_hash(&simf_path, &all_params, &all_hints, network, false)
-                .expect("hash with all params");
+        let hash_b = compute_covenant_script_hash(
+            &crate::programs::ProgramSource::read_unpinned(&simf_path).unwrap(),
+            &all_params,
+            &all_hints,
+            network,
+            false,
+        )
+        .expect("hash with all params");
 
         let hex_a: String = hash_a.iter().map(|b| format!("{b:02x}")).collect();
         let hex_b: String = hash_b.iter().map(|b| format!("{b:02x}")).collect();
@@ -2670,8 +2693,14 @@ mod tests {
             "pubkey",
         );
 
-        let hash = compute_covenant_script_hash(&simf_path, &params, &hints, network, false)
-            .expect("compute_covenant_script_hash");
+        let hash = compute_covenant_script_hash(
+            &crate::programs::ProgramSource::read_unpinned(&simf_path).unwrap(),
+            &params,
+            &hints,
+            network,
+            false,
+        )
+        .expect("compute_covenant_script_hash");
         let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
 
         // Expected: SHA256(scriptPubKey of the pre_lock covenant address) for the given

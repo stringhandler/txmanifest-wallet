@@ -148,7 +148,7 @@ pub trait AssemblyContext {
     /// never be hoisted into the shared assembly.
     fn covenant_script_pubkey(
         &self,
-        simf_path: &std::path::Path,
+        program: &crate::programs::ProgramSource,
         compile_params: &std::collections::HashMap<String, String>,
         type_hints: &std::collections::HashMap<String, String>,
         extra_leaf_payloads: &[Vec<u8>],
@@ -208,14 +208,14 @@ impl AssemblyContext for ElementsContext<'_> {
 
     fn covenant_script_pubkey(
         &self,
-        simf_path: &std::path::Path,
+        program: &crate::programs::ProgramSource,
         compile_params: &std::collections::HashMap<String, String>,
         type_hints: &std::collections::HashMap<String, String>,
         extra_leaf_payloads: &[Vec<u8>],
         opts: &CompileOpts,
     ) -> Result<Script> {
         crate::pset_builder::covenant_script_pubkey(
-            simf_path,
+            program,
             compile_params,
             type_hints,
             extra_leaf_payloads,
@@ -354,14 +354,14 @@ impl AssemblyContext for BitcoinContext<'_> {
 
     fn covenant_script_pubkey(
         &self,
-        simf_path: &std::path::Path,
+        program: &crate::programs::ProgramSource,
         compile_params: &std::collections::HashMap<String, String>,
         type_hints: &std::collections::HashMap<String, String>,
         extra_leaf_payloads: &[Vec<u8>],
         opts: &CompileOpts,
     ) -> Result<Script> {
         let bytes = crate::covenant::covenant_script_pubkey_for(
-            simf_path,
+            program,
             compile_params,
             type_hints,
             extra_leaf_payloads,

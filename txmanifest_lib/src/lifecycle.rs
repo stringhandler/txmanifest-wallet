@@ -296,6 +296,9 @@ pub fn run(
     export_pset_path: Option<&Path>,
     // If true, run the jet debugger on every covenant dry-run and print each jet's I/O.
     debug_jets: bool,
+    // Whether a manifest whose programs are not all pinned may run. Only the CLI's
+    // development flag passes `Allow`; see `crate::programs`.
+    unpinned: crate::programs::Unpinned,
 ) -> Result<()> {
     // ------------------------------------------------------------------
     // Step 0 — load and parse
@@ -309,6 +312,17 @@ pub fn run(
     // this manifest. `validate` cannot do this: it is offline and has no idea which node
     // the wallet points at, and Simplicity on Bitcoin is a property of the node.
     check_target_capabilities(&manifest, target)?;
+
+    // Every program this run can compile, read once and checked against its pin, before
+    // anything is derived from one. A mismatched hash stops the run here.
+    let programs = crate::programs::Programs::load(
+        &manifest,
+        manifest_file.parent().unwrap_or(Path::new(".")),
+        unpinned,
+    )?;
+    for why in programs.unpinned() {
+        println!("  {} unpinned: {why}", style("[warn]").yellow());
+    }
 
     // How every `.simf` in this run compiles: debug symbols (which affect every CMR and
     // address, so interop targets like simplicity-lending can be matched without
@@ -929,9 +943,11 @@ pub fn run(
 
             let Some(crate::manifest::ParamCompute::SimfFn {
                 simf,
+                program: program_name,
                 fn_name,
                 compile_params: cp_names,
                 input,
+                ..
             }) = def.compute.as_ref().and_then(|c| c.as_spec())
             else {
                 continue;
@@ -960,10 +976,7 @@ pub fn run(
                 .as_deref()
                 .and_then(|path| eval::eval_expr_str(path, &ctx).ok());
 
-            let simf_path = manifest_file
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .join(simf.as_str());
+            let simf_path = programs.for_compute(simf.as_deref(), program_name.as_deref())?;
 
             // Ensure input_hex has a "0x" prefix so SimplicityHL can parse it as a byte array.
             let input_hex_owned: String;
@@ -976,7 +989,7 @@ pub fn run(
                 None => "",
             };
             match covenant::execute_simf_function(
-                &simf_path,
+                simf_path,
                 fn_name.as_deref(),
                 &cp_map,
                 &compile_param_type_hints,
@@ -1114,12 +1127,6 @@ pub fn run(
 
     let mut covenant_output_meta: Vec<CovenantOutputMeta> = Vec::new();
 
-    // Computed here so both Step 7 (PSET building) and Step 9 (dry-run) can use them.
-    let simf_path = manifest_file
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join("covenant.simf");
-
     // For constructor actions: pre-compute create_instance tapleaf fields (e.g.
     // FUNDING_SCRIPT_HASH) so they are present in compile_params_map for Step 7.
     // Without this, missing template fields fall back to the literal param name as a
@@ -1140,7 +1147,7 @@ pub fn run(
             let pre_fields = eval_create_instance_fields(
                 ci,
                 &ctx,
-                manifest_file,
+                &programs,
                 &pre_hints,
                 net_for_hash,
                 false,
@@ -1404,19 +1411,9 @@ pub fn run(
                 };
                 let (leaf_payloads, inp_params, inp_hints) =
                     (site.leaf_payloads, site.compile_params, site.type_hints);
-                let inp_simf_path = inp_ut
-                    .script
-                    .as_ref()
-                    .and_then(|s| s.source.as_deref())
-                    .map(|src| {
-                        manifest_file
-                            .parent()
-                            .unwrap_or(std::path::Path::new("."))
-                            .join(src)
-                    })
-                    .unwrap_or_else(|| simf_path.clone());
+                let inp_simf_path = programs.for_script(inp_ut.script.as_ref())?;
                 let script_pubkey = match actx.covenant_script_pubkey(
-                    &inp_simf_path,
+                    inp_simf_path,
                     &inp_params,
                     &inp_hints,
                     &leaf_payloads,
@@ -1814,19 +1811,9 @@ pub fn run(
                         };
                         let (leaf_payloads, out_params, out_hints) =
                             (site.leaf_payloads, site.compile_params, site.type_hints);
-                        let out_simf_path = ut
-                            .script
-                            .as_ref()
-                            .and_then(|s| s.source.as_deref())
-                            .map(|src| {
-                                manifest_file
-                                    .parent()
-                                    .unwrap_or(std::path::Path::new("."))
-                                    .join(src)
-                            })
-                            .unwrap_or_else(|| simf_path.clone());
+                        let out_simf_path = programs.for_script(ut.script.as_ref())?;
                         let script_pubkey = match actx.covenant_script_pubkey(
-                            &out_simf_path,
+                            out_simf_path,
                             &out_params,
                             &out_hints,
                             &leaf_payloads,
@@ -2226,19 +2213,9 @@ pub fn run(
                             action,
                             &ctx,
                         )?;
-                        let path = ut
-                            .script
-                            .as_ref()
-                            .and_then(|sc| sc.source.as_deref())
-                            .map(|src| {
-                                manifest_file
-                                    .parent()
-                                    .unwrap_or(std::path::Path::new("."))
-                                    .join(src)
-                            })
-                            .unwrap_or_else(|| simf_path.clone());
+                        let program = programs.for_script(ut.script.as_ref())?.clone();
                         Ok(CovenantSpendSpec {
-                            simf_path: path,
+                            program,
                             params: site.compile_params,
                             hints: site.type_hints,
                             leaf_payloads: site.leaf_payloads,
@@ -2459,20 +2436,8 @@ pub fn run(
             for inp in &covenant_inputs {
                 let type_name = inp.utxo_type_name().unwrap();
                 let check_ut = manifest.utxo_type(&type_name).ok();
-                let check_simf_path = check_ut
-                    .as_ref()
-                    .and_then(|ut| {
-                        ut.script
-                            .as_ref()
-                            .and_then(|s| s.source.as_deref())
-                            .map(|src| {
-                                manifest_file
-                                    .parent()
-                                    .unwrap_or(std::path::Path::new("."))
-                                    .join(src)
-                            })
-                    })
-                    .unwrap_or_else(|| simf_path.clone());
+                let check_simf_path =
+                    programs.for_script(check_ut.as_ref().and_then(|ut| ut.script.as_ref()))?;
                 let check_site = check_ut.map(|ut| {
                     resolve_utxo_site(
                         ut,
@@ -2505,7 +2470,7 @@ pub fn run(
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
                 match covenant::check_compile(
-                    &check_simf_path,
+                    check_simf_path,
                     &check_params,
                     &check_hints,
                     &compile_opts,
@@ -2593,17 +2558,8 @@ pub fn run(
                                         dry_site.compile_params,
                                         dry_site.type_hints,
                                     );
-                                    let dry_simf_path = dry_ut
-                                        .script
-                                        .as_ref()
-                                        .and_then(|s| s.source.as_deref())
-                                        .map(|src| {
-                                            manifest_file
-                                                .parent()
-                                                .unwrap_or(std::path::Path::new("."))
-                                                .join(src)
-                                        })
-                                        .unwrap_or_else(|| simf_path.clone());
+                                    let dry_simf_path =
+                                        programs.for_script(dry_ut.script.as_ref())?;
 
                                     use std::io::Write;
                                     print!(
@@ -2637,7 +2593,7 @@ pub fn run(
                                         wallet::sign_schnorr_for_pubkey(w, resolved, hash)
                                     };
                                     match covenant::dry_run_covenant(
-                                        &dry_simf_path,
+                                        dry_simf_path,
                                         &dry_params,
                                         &dry_hints,
                                         &leaf_payloads,
@@ -2780,17 +2736,7 @@ pub fn run(
                                     fin_site.compile_params,
                                     fin_site.type_hints,
                                 );
-                                let fin_simf_path = fin_ut
-                                    .script
-                                    .as_ref()
-                                    .and_then(|s| s.source.as_deref())
-                                    .map(|src| {
-                                        manifest_file
-                                            .parent()
-                                            .unwrap_or(std::path::Path::new("."))
-                                            .join(src)
-                                    })
-                                    .unwrap_or_else(|| simf_path.clone());
+                                let fin_simf_path = programs.for_script(fin_ut.script.as_ref())?;
 
                                 print!(
                                     "  {} Input '{}' ({}) — finalizing… ",
@@ -2828,7 +2774,7 @@ pub fn run(
                                 };
 
                                 match covenant::finalize_covenant_input(
-                                    &fin_simf_path,
+                                    fin_simf_path,
                                     &fin_params,
                                     &fin_hints,
                                     &leaf_payloads,
@@ -2897,7 +2843,7 @@ pub fn run(
         let fields = eval_create_instance_fields(
             ci,
             &ctx,
-            manifest_file,
+            &programs,
             &create_instance_hints,
             net_for_hash,
             true,
@@ -4133,7 +4079,7 @@ fn resolve_create_instance_leaves(
 fn eval_create_instance_fields(
     ci: &crate::manifest::InstanceCreate,
     ctx: &ExecutionContext,
-    manifest_file: &std::path::Path,
+    programs: &crate::programs::Programs,
     type_hints: &std::collections::HashMap<String, String>,
     network: lwk_wollet::ElementsNetwork,
     verbose: bool,
@@ -4186,9 +4132,11 @@ fn eval_create_instance_fields(
                     match compute {
                         crate::manifest::ParamCompute::Tapleaf {
                             simf,
+                            program: program_name,
                             params,
                             depends_on,
                             extra_leaves,
+                            ..
                         } => {
                             // Build simf_params: if params is empty use depends_on (or all ctx params)
                             let simf_params: Option<std::collections::HashMap<String, String>> =
@@ -4312,10 +4260,8 @@ fn eval_create_instance_fields(
                                         }
                                     }
 
-                                    let simf_path = manifest_file
-                                        .parent()
-                                        .unwrap_or(std::path::Path::new("."))
-                                        .join(simf.as_str());
+                                    let program = programs
+                                        .for_compute(simf.as_deref(), program_name.as_deref());
 
                                     // Resolve optional storage leaves (task 11): each payload item is a
                                     // hex literal or a typed value-ref that resolves against the in-progress
@@ -4332,9 +4278,11 @@ fn eval_create_instance_fields(
                                     match leaves_result {
                                         None => None, // a leaf ref not yet computed — retry in a later pass
                                         Some(leaves) => {
-                                            match covenant::compute_covenant_script_hash_with_leaves(
-                                                &simf_path, &p, &hints, &leaves, network, &opts,
-                                            ) {
+                                            match program.and_then(|program| {
+                                                covenant::compute_covenant_script_hash_with_leaves(
+                                                    program, &p, &hints, &leaves, network, &opts,
+                                                )
+                                            }) {
                                                 Ok(hash_bytes) => Some(
                                                     hash_bytes
                                                         .iter()
@@ -4548,6 +4496,7 @@ pub fn run_headless(
         false, // manual_inputs
         Some(&export_path),
         false, // debug_jets
+        crate::programs::Unpinned::Refuse,
     );
 
     // Best-effort cleanup of temp files regardless of run_result.
@@ -4627,7 +4576,7 @@ fn check_target_capabilities(manifest: &Manifest, bound: &crate::target::Target)
 
 /// Everything needed to satisfy one covenant input, resolved from the manifest.
 pub(crate) struct CovenantSpendSpec {
-    pub simf_path: std::path::PathBuf,
+    pub program: crate::programs::ProgramSource,
     pub params: std::collections::HashMap<String, String>,
     pub hints: std::collections::HashMap<String, String>,
     pub leaf_payloads: Vec<Vec<u8>>,
@@ -4753,7 +4702,7 @@ fn run_bitcoin_build(
             };
 
             match covenant::finalize_bitcoin_covenant_input(
-                &spec.simf_path,
+                &spec.program,
                 &spec.params,
                 &spec.hints,
                 &spec.leaf_payloads,
@@ -5495,6 +5444,9 @@ mod tests {
             script: Some(UtxoScript {
                 type_: "simplicity".to_string(),
                 source: None,
+                source_hash: None,
+                simplicity_hl_version: None,
+                program: None,
                 extra_leaves: None,
                 compile_params: cp_map,
             }),
@@ -5682,7 +5634,7 @@ mod tests {
         let result = eval_create_instance_fields(
             &ci,
             &ctx,
-            std::path::Path::new("/nonexistent"),
+            &crate::programs::Programs::default(),
             &std::collections::HashMap::new(),
             lwk_wollet::ElementsNetwork::LiquidTestnet,
             false,
@@ -5849,7 +5801,7 @@ mod tests {
         let result = eval_create_instance_fields(
             &ci,
             &ctx,
-            std::path::Path::new("/nonexistent"),
+            &crate::programs::Programs::default(),
             &std::collections::HashMap::new(),
             lwk_wollet::ElementsNetwork::LiquidTestnet,
             false,
@@ -5932,8 +5884,20 @@ mod tests {
             }
         }
 
-        let fields =
-            eval_create_instance_fields(ci, &ctx, &manifest_path, &hints, net, false, true);
+        let fields = eval_create_instance_fields(
+            ci,
+            &ctx,
+            &crate::programs::Programs::load(
+                &manifest,
+                manifest_path.parent().unwrap(),
+                crate::programs::Unpinned::Allow,
+            )
+            .unwrap(),
+            &hints,
+            net,
+            false,
+            true,
+        );
 
         // The 5 nested hashes must match the independently-verified recon values.
         assert_eq!(
@@ -6006,7 +5970,7 @@ mod tests {
 
         let lending_simf = manifest_path.parent().unwrap().join("lending.simf");
         let addr = crate::covenant::compute_covenant_address(
-            &lending_simf,
+            &crate::programs::ProgramSource::read_unpinned(&lending_simf).unwrap(),
             &lending_params,
             &lending_hints,
             &leaves,
@@ -6056,8 +6020,15 @@ mod tests {
             "script_auth SCRIPT_HASH resolves to the with-storage lending cov hash"
         );
         let sa_simf = manifest_path.parent().unwrap().join("script_auth.simf");
-        crate::covenant::compute_covenant_address(&sa_simf, &sa_params, &sa_hints, &[], net, true)
-            .expect("out[3] lender_nft_script_auth covenant address compiles");
+        crate::covenant::compute_covenant_address(
+            &crate::programs::ProgramSource::read_unpinned(&sa_simf).unwrap(),
+            &sa_params,
+            &sa_hints,
+            &[],
+            net,
+            true,
+        )
+        .expect("out[3] lender_nft_script_auth covenant address compiles");
 
         // out[4]: the wired OP_RETURN output reproduces the on-chain 50-byte lending metadata
         // (same offer params as tests/interop/lending_opreturn.rs → identical payload).
@@ -6092,7 +6063,7 @@ mod tests {
             .unwrap()
             .join("issuance_factory.simf");
         let fac_addr = crate::covenant::compute_covenant_address(
-            &fac_simf,
+            &crate::programs::ProgramSource::read_unpinned(&fac_simf).unwrap(),
             &fac_params,
             &fac_hints,
             &[],
@@ -6128,7 +6099,7 @@ mod tests {
             "active slot0 byte[31] = 1 (is_active)"
         );
         let act_addr = crate::covenant::compute_covenant_address(
-            &lending_simf,
+            &crate::programs::ProgramSource::read_unpinned(&lending_simf).unwrap(),
             &act_params,
             &act_hints,
             &act_leaves,
@@ -6154,7 +6125,7 @@ mod tests {
         let (pa_params, pa_hints) = apply_utxo_compile_params(&base_now, &hints, pa_ut);
         let pa_simf = manifest_path.parent().unwrap().join("asset_auth.simf");
         let pa_addr = crate::covenant::compute_covenant_address(
-            &pa_simf,
+            &crate::programs::ProgramSource::read_unpinned(&pa_simf).unwrap(),
             &pa_params,
             &pa_hints,
             &[],
@@ -6257,8 +6228,20 @@ mod tests {
             }
         }
 
-        let fields =
-            eval_create_instance_fields(ci, &ctx, &manifest_path, &hints, net, false, true);
+        let fields = eval_create_instance_fields(
+            ci,
+            &ctx,
+            &crate::programs::Programs::load(
+                &manifest,
+                manifest_path.parent().unwrap(),
+                crate::programs::Unpinned::Allow,
+            )
+            .unwrap(),
+            &hints,
+            net,
+            false,
+            true,
+        );
         for (k, v) in &fields {
             ctx.set_compile_param(k, v);
         }
@@ -6296,9 +6279,15 @@ mod tests {
             Some("bytes32"),
             "the zero finalized-hash must carry a bytes32 hint into the compiler"
         );
-        let lender_addr =
-            crate::covenant::compute_covenant_address(&vault_simf, &lp, &lh, &[], net, true)
-                .expect("lender_vault_finalized address compiles");
+        let lender_addr = crate::covenant::compute_covenant_address(
+            &crate::programs::ProgramSource::read_unpinned(&vault_simf).unwrap(),
+            &lp,
+            &lh,
+            &[],
+            net,
+            true,
+        )
+        .expect("lender_vault_finalized address compiles");
         let lender_hash: String = sha256::Hash::hash(lender_addr.script_pubkey().as_bytes())
             .to_byte_array()
             .iter()
@@ -6312,9 +6301,15 @@ mod tests {
             .utxo_type("protocol_fee_vault_finalized")
             .expect("protocol_fee_vault_finalized utxo_type");
         let (pp, ph) = apply_utxo_compile_params(&base, &hints, proto_ut);
-        let proto_addr =
-            crate::covenant::compute_covenant_address(&vault_simf, &pp, &ph, &[], net, true)
-                .expect("protocol_fee_vault_finalized address compiles");
+        let proto_addr = crate::covenant::compute_covenant_address(
+            &crate::programs::ProgramSource::read_unpinned(&vault_simf).unwrap(),
+            &pp,
+            &ph,
+            &[],
+            net,
+            true,
+        )
+        .expect("protocol_fee_vault_finalized address compiles");
         let proto_hash: String = sha256::Hash::hash(proto_addr.script_pubkey().as_bytes())
             .to_byte_array()
             .iter()
@@ -6397,7 +6392,7 @@ mod tests {
             .expect("active storage leaves");
         let lending_simf = manifest_path.parent().unwrap().join("lending.simf");
         let act_addr = crate::covenant::compute_covenant_address(
-            &lending_simf,
+            &crate::programs::ProgramSource::read_unpinned(&lending_simf).unwrap(),
             &ap,
             &ah,
             &act_leaves,
@@ -6495,7 +6490,12 @@ mod tests {
         let fields = eval_create_instance_fields(
             ci,
             &ctx,
-            &manifest_path,
+            &crate::programs::Programs::load(
+                &manifest,
+                manifest_path.parent().unwrap(),
+                crate::programs::Unpinned::Allow,
+            )
+            .unwrap(),
             &hints,
             net,
             false,
@@ -6514,7 +6514,7 @@ mod tests {
                 .into_iter()
                 .collect();
         let payout_addr = crate::covenant::compute_covenant_address(
-            &payout_simf,
+            &crate::programs::ProgramSource::read_unpinned(&payout_simf).unwrap(),
             &payout_params,
             &payout_hints,
             &[],
@@ -6561,7 +6561,7 @@ mod tests {
         );
         let offer_simf = manifest_path.parent().unwrap().join("tessera.simf");
         let offer_addr = crate::covenant::compute_covenant_address(
-            &offer_simf,
+            &crate::programs::ProgramSource::read_unpinned(&offer_simf).unwrap(),
             &offer_params,
             &offer_hints,
             &[],
@@ -6574,7 +6574,7 @@ mod tests {
         let mut bumped = offer_params.clone();
         bumped.insert("AMOUNT_B".to_string(), "50001".to_string());
         let bumped_addr = crate::covenant::compute_covenant_address(
-            &offer_simf,
+            &crate::programs::ProgramSource::read_unpinned(&offer_simf).unwrap(),
             &bumped,
             &offer_hints,
             &[],
@@ -6594,7 +6594,7 @@ mod tests {
         other_side.insert("OFFER_ASSET_ID".to_string(), lbtc_testnet.to_string());
         other_side.insert("OFFER_AMOUNT".to_string(), "999".to_string());
         let other_side_addr = crate::covenant::compute_covenant_address(
-            &offer_simf,
+            &crate::programs::ProgramSource::read_unpinned(&offer_simf).unwrap(),
             &other_side,
             &offer_hints,
             &[],

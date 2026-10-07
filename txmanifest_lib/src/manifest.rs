@@ -19,7 +19,7 @@ use crate::chain::{Capabilities, Capability, ChainFamily};
 /// This is the version of the *file format*, not of this crate. The two move
 /// independently: a release that changes no format field leaves this alone, and a
 /// format change lands here whether or not the crate version moved with it.
-pub const FORMAT_VERSION: &str = "0.3.0";
+pub const FORMAT_VERSION: &str = "0.3.1";
 
 /// Split a version string into `(major, minor)`, ignoring the patch and any
 /// pre-release or build metadata.
@@ -106,6 +106,12 @@ pub struct Manifest {
     pub requires: Capabilities,
     /// SimplicityHL toolchain settings for this manifest's `.simf` programs.
     pub simplicity_hl: Option<SimplicityHl>,
+    /// Named Simplicity programs, each pinned by hash and optionally by compiler version.
+    ///
+    /// One of two ways to reference a program: a `utxo_type` script or a computed param
+    /// names an entry here with `"program"`, instead of giving a `source` / `simf` path
+    /// directly. Both forms may be mixed; see [`crate::programs`].
+    pub programs: Option<BTreeMap<String, ProgramDef>>,
     pub utxo_types: Option<BTreeMap<String, UtxoType>>,
     /// Standalone actions that require no template instance (e.g. Prepare).
     #[serde(default)]
@@ -117,13 +123,6 @@ pub struct Manifest {
 
 /// SimplicityHL toolchain settings — how the `.simf` programs are compiled, as
 /// distinct from what the protocol does.
-///
-/// Deliberately carries **no** compiler-version field. SimplicityHL has its own
-/// `simc "<range>";` source directive, which the compiler enforces fail-fast before
-/// lexing, across the entry file and every reachable dependency — none of which a
-/// manifest key can do. Tooling that wants the requirement without compiling can read
-/// it via `version::SimcDirective::requirement_of`. Declaring it here as well would
-/// only create a second place to disagree.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SimplicityHl {
@@ -157,6 +156,19 @@ pub struct SimplicityHl {
     /// Defaults to empty: nothing unstable is enabled.
     #[serde(default)]
     pub unstable_features: Vec<UnstableFeatureName>,
+
+    /// The SimplicityHL versions every program in this manifest is written for, as a
+    /// semver requirement (`"0.7.1"` means `^0.7.1`, as in Cargo and in SimplicityHL's own
+    /// `simc "<range>";` directive).
+    ///
+    /// A per-program `simplicity_hl_version` overrides this, and this overrides a
+    /// program's own `simc` directive. It can only *narrow* that directive, never widen
+    /// it: the compiler still refuses a source whose directive it does not satisfy.
+    /// What this adds is a requirement a wallet can check from the manifest alone, and
+    /// one that covers sources which cannot be edited to carry a directive — a byte-exact
+    /// copy of another protocol's program, say, where any added line would move every
+    /// debug-symbol position and with it the program's address.
+    pub version: Option<String>,
 }
 
 /// One entry of [`SimplicityHl::unstable_features`], parsed straight into the compiler's
@@ -389,7 +401,14 @@ pub enum ParamCompute {
         expr: String,
     },
     Tapleaf {
-        simf: String,
+        /// Path to the `.simf` file, relative to the manifest. Give this or `program`.
+        simf: Option<String>,
+        /// The content hash of `simf`, as in [`ProgramDef::hash`].
+        simf_hash: Option<String>,
+        /// The SimplicityHL versions `simf` is written for.
+        simplicity_hl_version: Option<String>,
+        /// The name of an entry in [`Manifest::programs`]. Give this or `simf`.
+        program: Option<String>,
         /// Explicit param map for the simf. Each entry combines the value (a compile-param
         /// reference or string literal) with an optional manifest type hint.
         /// Omit entirely to pass ALL current compile params (auto-populate mode).
@@ -454,7 +473,14 @@ pub enum ParamCompute {
     /// Its runtime input is read from `input` (a dot-path into ctx, e.g. `"params.STATE_BYTES"`).
     /// The return value is stored as the param value.
     SimfFn {
-        simf: String,
+        /// Path to the `.simf` file, relative to the manifest. Give this or `program`.
+        simf: Option<String>,
+        /// The content hash of `simf`, as in [`ProgramDef::hash`].
+        simf_hash: Option<String>,
+        /// The SimplicityHL versions `simf` is written for.
+        simplicity_hl_version: Option<String>,
+        /// The name of an entry in [`Manifest::programs`]. Give this or `simf`.
+        program: Option<String>,
         /// Name of the function to call. If omitted the file must define exactly one function.
         #[serde(rename = "fn", default)]
         fn_name: Option<String>,
@@ -494,6 +520,26 @@ fn normalize_compute_value<E: serde::de::Error>(
         // When both keys are present `type` wins and `lang` is simply dropped.
         if let Some(lang) = obj.remove("lang") {
             obj.entry("type".to_string()).or_insert(lang);
+        }
+        // `simf` and `program` are both optional to serde, so that either form of program
+        // reference parses; exactly one is required, and checking it here keeps that a
+        // parse error naming the field rather than a failure much later in a run.
+        let kind = obj.get("type").and_then(|t| t.as_str()).unwrap_or_default();
+        if matches!(kind, "tapleaf" | "simf_fn") {
+            match (obj.contains_key("simf"), obj.contains_key("program")) {
+                (true, true) => {
+                    return Err(E::custom(format!(
+                        "a {kind} compute gives both \"simf\" and \"program\"; give one"
+                    )))
+                }
+                (false, false) => {
+                    return Err(E::custom(format!(
+                        "a {kind} compute needs \"simf\" (a path to a .simf file) or \
+                         \"program\" (the name of an entry in \"programs\")"
+                    )))
+                }
+                _ => {}
+            }
         }
     }
     ParamCompute::deserialize(value).map_err(E::custom)
@@ -1221,12 +1267,36 @@ impl<'de> Deserialize<'de> for ComputeSpec {
 // UtxoType
 // ---------------------------------------------------------------------------
 
+/// One entry of [`Manifest::programs`]: a Simplicity program file and what pins it.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramDef {
+    pub description: Option<String>,
+    /// Path to the `.simf` file, relative to the manifest.
+    pub source: String,
+    /// The file's content hash, self-describing: `"sha256:<lowercase hex>"`, over the
+    /// file's exact bytes. Optional while developing; a manifest with an unhashed
+    /// program is *unpinned*, which wallets refuse.
+    pub hash: Option<String>,
+    /// The SimplicityHL versions this program is written for, as a semver requirement.
+    /// Overrides [`SimplicityHl::version`].
+    pub simplicity_hl_version: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UtxoScript {
     #[serde(rename = "type")]
     pub type_: String,
+    /// Path to the `.simf` file, relative to the manifest. Give this or `program`.
     pub source: Option<String>,
+    /// The content hash of `source`, as in [`ProgramDef::hash`].
+    pub source_hash: Option<String>,
+    /// The SimplicityHL versions `source` is written for, as in
+    /// [`ProgramDef::simplicity_hl_version`].
+    pub simplicity_hl_version: Option<String>,
+    /// The name of an entry in [`Manifest::programs`]. Give this or `source`.
+    pub program: Option<String>,
     pub extra_leaves: Option<Vec<TaprootLeafSpec>>,
     /// Per-utxo-type compile param remappings: simf_param_name → compile_param_reference.
     /// e.g. `{ "SCRIPT_HASH": "LENDING_COV_HASH" }` passes the value of LENDING_COV_HASH
@@ -1831,6 +1901,8 @@ mod tests {
     /// minor is where a breaking change lands, so 0.1 and 0.2 are separate formats.
     #[test]
     fn format_version_gate_is_minor_exact_at_zero_x() {
+        assert!(check_format_version("0.3.1").is_ok());
+        // 0.3.1 only added fields, so a 0.3.0 manifest still reads.
         assert!(check_format_version("0.3.0").is_ok());
         assert!(check_format_version("0.3.7").is_ok(), "patch must not gate");
         assert!(
@@ -2138,9 +2210,18 @@ mod tests {
         .expect("empty simplicity_hl should parse");
         assert!(!empty.include_debug_symbols());
 
-        // ...and a compiler version does NOT belong here: that is the `.simf`
-        // `simc "<range>";` directive's job, so the key must be rejected.
-        for key in ["version", "min_version", "simc"] {
+        // The compiler requirement is spelled `version`; near-misses are rejected rather
+        // than silently ignored, since an ignored requirement pins nothing.
+        let versioned = Manifest::from_json_str(
+            r#"{ "manifest_version": "0.3.0", "protocol": "t",
+                 "simplicity_hl": { "version": "0.7.1" } }"#,
+        )
+        .expect("simplicity_hl.version should parse");
+        assert_eq!(
+            versioned.simplicity_hl.unwrap().version.as_deref(),
+            Some("0.7.1")
+        );
+        for key in ["min_version", "simc"] {
             let json = format!(
                 r#"{{ "manifest_version": "0.3.0", "protocol": "t",
                       "simplicity_hl": {{ "{key}": "0.6.0" }} }}"#

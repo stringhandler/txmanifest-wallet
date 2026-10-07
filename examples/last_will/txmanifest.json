@@ -1,16 +1,18 @@
 {
     "$schema": "../../schema/txmanifest.schema.json",
-    "manifest_version": "0.3.0",
+    "manifest_version": "0.3.1",
     "protocol": "last-will",
     "description": "Last Will — a recursive covenant with three spending paths: inherit (after a 180-day timelock), cold-key break-out, and hot-key refresh. Modelled as a class: one instance per will.",
     "chain": "liquid",
     "requires": ["simplicity"],
+    "simplicity_hl": { "version": "0.7.1" },
     "utxo_types": {
         "last_will": {
             "description": "Funds locked under the last-will covenant.",
             "script": {
                 "type": "simplicity",
                 "source": "./last_will.simf",
+                "source_hash": "sha256:6673a57e6dfe818c21660fa7187c5f48905dd903e214efbf9c7fba5436b2a28a",
                 "compile_params": {
                     "INHERITOR_PUB_KEY": "INHERITOR_PUB_KEY",
                     "HOT_PUB_KEY": "HOT_PUB_KEY",

@@ -1127,7 +1127,7 @@ fn btc_pubkey(
 
 /// Resolve the covenant address for a utxo_type and return its script_pubkey.
 pub fn covenant_script_pubkey(
-    simf_path: &std::path::Path,
+    program: &crate::programs::ProgramSource,
     compile_params: &HashMap<String, String>,
     type_hints: &HashMap<String, String>,
     extra_leaf_payloads: &[Vec<u8>],
@@ -1135,7 +1135,7 @@ pub fn covenant_script_pubkey(
     opts: impl Into<covenant::CompileOpts>,
 ) -> Result<Script> {
     let addr = covenant::compute_covenant_address(
-        simf_path,
+        program,
         compile_params,
         type_hints,
         extra_leaf_payloads,

@@ -126,12 +126,34 @@ enum Commands {
         /// Equality jets show lhs vs rhs so mismatches are immediately visible.
         #[arg(long)]
         debug_jets: bool,
+        /// Run a manifest whose programs are not all pinned: missing a hash or a compiler
+        /// version, or edited since they were pinned. Each is a warning instead of an
+        /// error. For development only: a wallet refuses such a manifest.
+        #[arg(long)]
+        allow_unpinned: bool,
+        /// Development mode. Currently the same as --allow-unpinned; it may turn on more
+        /// development-only behaviour in future, so don't use it where that would matter.
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Validate a manifest file's schema and report any obvious problems
     Validate {
         /// Path to the manifest (txmanifest.json) file
         manifest_file: PathBuf,
+        /// Treat unpinned programs as errors: the bar for publishing a manifest or
+        /// handing it to a wallet
+        #[arg(long)]
+        strict: bool,
+    },
+
+    /// Write the current hash of every Simplicity program into a manifest
+    Pin {
+        /// Path to the manifest (txmanifest.json) file
+        manifest_file: PathBuf,
+        /// Change nothing; exit non-zero if any hash is missing or out of date
+        #[arg(long)]
+        check: bool,
     },
 
     /// Report what a wallet must support to execute a manifest, or check a given wallet
@@ -845,7 +867,7 @@ fn cmd_split(
     Ok(())
 }
 
-fn cmd_validate(manifest_path: &Path) -> Result<()> {
+fn cmd_validate(manifest_path: &Path, strict: bool) -> Result<()> {
     use console::style;
     use tx_manifest_lib::validate::Severity;
 
@@ -864,7 +886,14 @@ fn cmd_validate(manifest_path: &Path) -> Result<()> {
     let manifest = manifest::Manifest::from_json_str(&raw)
         .with_context(|| format!("Cannot parse manifest file: {}", manifest_path.display()))?;
 
-    let report = validate::validate(&manifest);
+    let mut report = validate::validate(&manifest);
+    report.extend(validate::validate_programs(
+        &manifest,
+        manifest_path.parent().unwrap_or(Path::new(".")),
+    ));
+    if strict {
+        report = report.strict();
+    }
 
     for issue in &report.issues {
         let tag = match issue.severity {
@@ -896,6 +925,46 @@ fn cmd_validate(manifest_path: &Path) -> Result<()> {
         println!("{} {}", style("FAILED:").red().bold(), summary);
         anyhow::bail!("manifest file failed validation");
     }
+}
+
+fn cmd_pin(manifest_path: &Path, check: bool) -> Result<()> {
+    use console::style;
+
+    let text = std::fs::read_to_string(manifest_path)
+        .with_context(|| format!("Cannot read manifest file: {}", manifest_path.display()))?;
+    let outcome = tx_manifest_lib::programs::pin_text(
+        &text,
+        manifest_path.parent().unwrap_or(Path::new(".")),
+    )
+    .with_context(|| format!("Cannot pin {}", manifest_path.display()))?;
+
+    for change in &outcome.changes {
+        println!("  {change}");
+    }
+    if outcome.changes.is_empty() {
+        println!(
+            "{} every program hash in {} is up to date",
+            style("✓").green().bold(),
+            manifest_path.display()
+        );
+        return Ok(());
+    }
+    if check {
+        anyhow::bail!(
+            "{} program hash(es) missing or out of date in {}",
+            outcome.changes.len(),
+            manifest_path.display()
+        );
+    }
+    std::fs::write(manifest_path, &outcome.text)
+        .with_context(|| format!("Cannot write {}", manifest_path.display()))?;
+    println!(
+        "{} pinned {} hash(es) in {}",
+        style("✓").green().bold(),
+        outcome.changes.len(),
+        manifest_path.display()
+    );
+    Ok(())
 }
 
 fn cmd_describe(manifest_path: &Path, action_name: Option<&str>) -> Result<()> {
@@ -985,7 +1054,10 @@ fn main() -> Result<()> {
             manual_inputs,
             export_pset,
             debug_jets,
+            allow_unpinned,
+            debug,
         } => {
+            let allow_unpinned = allow_unpinned || debug;
             let target = bind(explicit_config, &wallet, network.as_deref())?;
             let data_dir = data_dir.unwrap_or_else(wallet::default_data_dir);
 
@@ -1018,10 +1090,22 @@ fn main() -> Result<()> {
                 manual_inputs,
                 export_pset.as_deref(),
                 debug_jets,
+                if allow_unpinned {
+                    tx_manifest_lib::programs::Unpinned::Allow
+                } else {
+                    tx_manifest_lib::programs::Unpinned::Refuse
+                },
             )
         }
 
-        Commands::Validate { manifest_file } => cmd_validate(&manifest_file),
+        Commands::Validate {
+            manifest_file,
+            strict,
+        } => cmd_validate(&manifest_file, strict),
+        Commands::Pin {
+            manifest_file,
+            check,
+        } => cmd_pin(&manifest_file, check),
         Commands::Capabilities {
             manifest_file,
             supports,

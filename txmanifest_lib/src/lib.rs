@@ -17,6 +17,7 @@ pub mod manifest;
 pub mod params;
 pub mod prepare;
 pub mod preview;
+pub mod programs;
 pub mod prompt;
 pub mod psbt_builder;
 pub mod pset_builder;
