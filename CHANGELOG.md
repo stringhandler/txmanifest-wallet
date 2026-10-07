@@ -21,6 +21,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 ### Changed
 
+- `validate` errors when a manifest uses a Simplicity program in a `tapleaf` or `simf_fn` compute, or a `programs` entry, without declaring `"requires": ["simplicity"]`. Previously only covenant `utxo_types` triggered this. Add `"simplicity"` to `requires` if `validate` now reports it.
 - `validate` also checks each program file: that it exists, matches its hash, meets its compiler requirement, and declares the witnesses the manifest supplies.
 
 ## [0.3.0] - 2026-10-06

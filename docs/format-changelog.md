@@ -15,7 +15,8 @@ The JSON Schema for the current version is
 
 ## [0.3.1] - unreleased
 
-Additive: every `0.3.0` manifest is a valid `0.3.1` manifest.
+Additive, with one tightened rule (below): a `0.3.0` manifest is a valid `0.3.1` manifest
+unless it uses a Simplicity program without declaring `simplicity`.
 
 ### Added
 
@@ -45,6 +46,14 @@ Additive: every `0.3.0` manifest is a valid `0.3.1` manifest.
 - Every reference to one file must agree on its hash and compiler requirement. A
   reference that gives neither inherits them from the others.
 - A `program` must name an entry in `programs`.
+
+### Changed
+
+- `"requires": ["simplicity"]` is required by any use of a Simplicity program, not only by
+  covenant `utxo_types`: also a `tapleaf` or `simf_fn` compute, or a `programs` entry.
+  Each of these needs a compiler, and `requires` is how a wallet without one knows to
+  refuse the manifest before trying it. A manifest that relied on the narrower rule was
+  already unrunnable by such a wallet; it now fails validation instead.
 
 ## [0.3.0] - 2026-10-06
 
