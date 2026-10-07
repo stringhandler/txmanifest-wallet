@@ -140,6 +140,26 @@ pub struct ProgramRef {
 pub struct RefIssue {
     pub location: String,
     pub message: String,
+    /// Two references to one file disagree on its hash or compiler requirement. `pin`
+    /// rewrites conflicting hashes, so it needs to tell these from other problems.
+    pub conflict: bool,
+}
+
+impl RefIssue {
+    fn new(location: impl Into<String>, message: impl Into<String>) -> Self {
+        RefIssue {
+            location: location.into(),
+            message: message.into(),
+            conflict: false,
+        }
+    }
+
+    fn conflict(location: impl Into<String>, message: impl Into<String>) -> Self {
+        RefIssue {
+            conflict: true,
+            ..RefIssue::new(location, message)
+        }
+    }
 }
 
 /// Every program reference in `manifest`, plus the reference problems found on the way.
@@ -223,27 +243,26 @@ impl Refs<'_> {
                 hash: def.hash.clone(),
                 version: def.simplicity_hl_version.clone(),
             }),
-            None => self.issues.push(RefIssue {
+            None => self.issues.push(RefIssue::new(
                 location,
-                message: format!("names program \"{name}\", which is not in \"programs\""),
-            }),
+                format!("names program \"{name}\", which is not in \"programs\""),
+            )),
         }
     }
 
     fn script(&mut self, script: &UtxoScript, location: String) {
         match (&script.program, &script.source) {
-            (Some(_), Some(_)) => self.issues.push(RefIssue {
+            (Some(_), Some(_)) => self.issues.push(RefIssue::new(
                 location,
-                message: "gives both \"program\" and \"source\"; give one".into(),
-            }),
+                "gives both \"program\" and \"source\"; give one",
+            )),
             (Some(name), None) => {
                 if script.source_hash.is_some() || script.simplicity_hl_version.is_some() {
-                    self.issues.push(RefIssue {
-                        location: location.clone(),
-                        message: "\"source_hash\" and \"simplicity_hl_version\" belong on the \
-                                  \"programs\" entry when the script names a \"program\""
-                            .into(),
-                    });
+                    self.issues.push(RefIssue::new(
+                        location.clone(),
+                        "\"source_hash\" and \"simplicity_hl_version\" belong on the \
+                         \"programs\" entry when the script names a \"program\"",
+                    ));
                 }
                 self.by_name(location, name);
             }
@@ -326,19 +345,9 @@ pub struct Pin {
 /// found merging their references. Needs no filesystem.
 pub fn resolve(manifest: &Manifest) -> (BTreeMap<String, Pin>, Vec<RefIssue>) {
     let (refs, mut issues) = references(manifest);
-    let global = manifest
-        .simplicity_hl
-        .as_ref()
-        .and_then(|s| s.version.clone());
-    if let Some(v) = &global {
-        if let Err(e) = VersionRequirement::parse(v) {
-            issues.push(RefIssue {
-                location: "simplicity_hl.version".into(),
-                message: format!("\"{v}\" is not a semver requirement: {e}"),
-            });
-        }
-    }
 
+    // First what the references themselves say. A reference that gives no hash or version
+    // inherits the file's from the others, so only a stated value can conflict.
     let mut pins: BTreeMap<String, Pin> = BTreeMap::new();
     for r in refs {
         let pin = pins.entry(normalise(&r.source)).or_insert_with(|| Pin {
@@ -350,46 +359,61 @@ pub fn resolve(manifest: &Manifest) -> (BTreeMap<String, Pin>, Vec<RefIssue>) {
         if let Some(h) = &r.hash {
             match ContentHash::parse(h) {
                 Ok(hash) => match pin.hash {
-                    Some(existing) if existing != hash => issues.push(RefIssue {
-                        location: r.location.clone(),
-                        message: format!(
+                    Some(existing) if existing != hash => issues.push(RefIssue::conflict(
+                        &r.location,
+                        format!(
                             "gives {} the hash {hash}, but another reference gives {existing}",
                             r.source
                         ),
-                    }),
+                    )),
                     _ => pin.hash = Some(hash),
                 },
-                Err(e) => issues.push(RefIssue {
-                    location: r.location.clone(),
-                    message: format!("{e:#}"),
-                }),
+                Err(e) => issues.push(RefIssue::new(&r.location, format!("{e:#}"))),
             }
         }
 
-        let Some(v) = r.version.clone().or_else(|| global.clone()) else {
-            continue;
-        };
-        match VersionRequirement::parse(&v) {
-            Ok(req) => match &pin.version_text {
-                Some(existing) if *existing != v => issues.push(RefIssue {
-                    location: r.location.clone(),
-                    message: format!(
-                        "gives {} the compiler requirement \"{v}\", but another reference \
-                         gives \"{existing}\"",
-                        r.source
-                    ),
-                }),
-                _ => {
-                    pin.version = Some(req);
-                    pin.version_text = Some(v);
+        if let Some(v) = &r.version {
+            match VersionRequirement::parse(v) {
+                Ok(req) => match &pin.version_text {
+                    Some(existing) if existing != v => issues.push(RefIssue::conflict(
+                        &r.location,
+                        format!(
+                            "gives {} the compiler requirement \"{v}\", but another reference \
+                             gives \"{existing}\"",
+                            r.source
+                        ),
+                    )),
+                    _ => {
+                        pin.version = Some(req);
+                        pin.version_text = Some(v.clone());
+                    }
+                },
+                Err(e) => issues.push(RefIssue::new(
+                    &r.location,
+                    format!("\"{v}\" is not a semver requirement: {e}"),
+                )),
+            }
+        }
+    }
+
+    // Then the manifest-wide requirement, for files no reference gave one. It is the
+    // lowest priority, so it never conflicts with a per-program value.
+    if let Some(v) = manifest
+        .simplicity_hl
+        .as_ref()
+        .and_then(|s| s.version.as_ref())
+    {
+        match VersionRequirement::parse(v) {
+            Ok(req) => {
+                for pin in pins.values_mut().filter(|p| p.version.is_none()) {
+                    pin.version = Some(req.clone());
+                    pin.version_text = Some(v.clone());
                 }
-            },
-            // The manifest-wide value is reported once, above.
-            Err(e) if r.version.is_some() => issues.push(RefIssue {
-                location: r.location.clone(),
-                message: format!("\"{v}\" is not a semver requirement: {e}"),
-            }),
-            Err(_) => {}
+            }
+            Err(e) => issues.push(RefIssue::new(
+                "simplicity_hl.version",
+                format!("\"{v}\" is not a semver requirement: {e}"),
+            )),
         }
     }
     (pins, issues)
@@ -564,11 +588,11 @@ impl Programs {
         &self.unpinned
     }
 
-    /// The program a `utxo_type` script runs.
+    /// The program a `utxo_type` script runs. A type with no script has none.
     pub fn for_script(&self, script: Option<&UtxoScript>) -> Result<&ProgramSource> {
         match script {
             Some(s) => self.lookup(s.source.as_deref(), s.program.as_deref()),
-            None => self.lookup(None, None),
+            None => bail!("it has no script, so there is no covenant program to use"),
         }
     }
 
@@ -608,10 +632,7 @@ pub fn pin_text(text: &str, base_dir: &Path) -> Result<PinOutcome> {
     let manifest = Manifest::from_json_str(text)?;
     let (pins, issues) = resolve(&manifest);
     // Conflicting hashes are about to be overwritten; anything else must be fixed first.
-    if let Some(i) = issues
-        .iter()
-        .find(|i| !i.message.contains("another reference gives"))
-    {
+    if let Some(i) = issues.iter().find(|i| !i.conflict) {
         bail!("cannot pin: {}: {}", i.location, i.message);
     }
     let mut hashes = BTreeMap::new();
@@ -973,9 +994,49 @@ mod tests {
         assert_eq!(pins["a.simf"].version_text.as_deref(), Some("0.7"));
     }
 
+    /// The manifest-wide requirement is the lowest priority: a reference with no version
+    /// inherits the file's from another reference before it falls back to the manifest's.
+    #[test]
+    fn the_manifest_wide_version_does_not_override_another_reference() {
+        let m = manifest(
+            r#"{ "manifest_version": "0.3.1", "protocol": "t", "requires": ["simplicity"],
+                 "simplicity_hl": { "version": "0.7.0" },
+                 "programs": { "a": { "source": "a.simf", "simplicity_hl_version": "0.7.1" } },
+                 "utxo_types": {
+                   "x": { "description": "x", "script": { "type": "simplicity", "program": "a" } },
+                   "y": { "description": "y", "script": { "type": "simplicity", "source": "a.simf" } },
+                   "z": { "description": "z", "script": { "type": "simplicity", "source": "b.simf" } } } }"#,
+        );
+        let (pins, issues) = resolve(&m);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(pins["a.simf"].version_text.as_deref(), Some("0.7.1"));
+        assert_eq!(
+            pins["b.simf"].version_text.as_deref(),
+            Some("0.7.0"),
+            "a file no reference versions gets the manifest-wide requirement"
+        );
+    }
+
+    #[test]
+    fn a_null_simf_is_not_a_program_reference() {
+        let json = r#"{ "manifest_version": "0.3.1", "protocol": "t", "actions": { "A": {
+            "params": { "H": { "type": "u256",
+              "compute": { "type": "tapleaf", "simf": null } } } } } }"#;
+        let err = Manifest::from_json_str(json).unwrap_err().to_string();
+        assert!(err.contains("needs \"simf\""), "{err}");
+    }
+
+    #[test]
+    fn a_type_without_a_script_has_no_program() {
+        let err = Programs::default()
+            .for_script(None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no script"), "{err}");
+    }
+
     #[test]
     fn the_source_directive_pins_the_version_and_cannot_be_widened() {
-        let dir = scratch("directive");
         let current = compiler_version();
         let pin = Pin {
             source: "a.simf".into(),
@@ -1000,7 +1061,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("can only narrow"), "{err}");
-        let _ = dir;
     }
 
     #[test]

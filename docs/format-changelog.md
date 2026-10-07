@@ -6,8 +6,10 @@ anyone implementing the format in a wallet. Changes to the `tx-manifest-wallet` 
 the [app changelog](../CHANGELOG.md).
 
 A manifest declares the format it's written against in `manifest_version`. While the major
-version is `0`, a different minor version is a different, incompatible format; the patch
-version only adds things, so a reader of `0.3.x` accepts any `0.3` manifest. The format's
+version is `0`, a different minor version is a different, incompatible format. A patch
+version only adds things, so a newer reader accepts an older patch's manifests (a `0.3.1`
+reader reads `0.3.0`). Not the reverse: an older reader rejects fields it doesn't know,
+rather than ignoring them. The format's
 history before `0.2.0` was not recorded.
 
 The JSON Schema for the current version is
@@ -15,7 +17,8 @@ The JSON Schema for the current version is
 
 ## [0.3.1] - unreleased
 
-Additive: every `0.3.0` manifest is a valid `0.3.1` manifest.
+Additive, with one tightened rule (below): a `0.3.0` manifest is a valid `0.3.1` manifest
+unless it uses a Simplicity program without declaring `simplicity`.
 
 ### Added
 
@@ -45,6 +48,14 @@ Additive: every `0.3.0` manifest is a valid `0.3.1` manifest.
 - Every reference to one file must agree on its hash and compiler requirement. A
   reference that gives neither inherits them from the others.
 - A `program` must name an entry in `programs`.
+
+### Changed
+
+- `"requires": ["simplicity"]` is required by any use of a Simplicity program, not only by
+  covenant `utxo_types`: also a `tapleaf` or `simf_fn` compute, or a `programs` entry.
+  Each of these needs a compiler, and `requires` is how a wallet without one knows to
+  refuse the manifest before trying it. A manifest that relied on the narrower rule was
+  already unrunnable by such a wallet; it now fails validation instead.
 
 ## [0.3.0] - 2026-10-06
 

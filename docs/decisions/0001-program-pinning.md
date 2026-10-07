@@ -41,8 +41,9 @@ different compilers could in principle produce different programs from the same 
    - allowed while developing (`validate` warns; `run --allow-unpinned` runs it). A
      program edited since it was pinned counts as unpinned here, so `run --allow-unpinned`
      warns about the stale hash instead of refusing;
-   - refused for publishing (`validate --strict` errors) and by wallets (`run` refuses by
-     default, and a wallet library has no way to opt out).
+   - refused for publishing (`validate --strict` errors) and by wallets, which must not
+     run an unpinned manifest. `run` refuses by default; the library's `Unpinned::Allow`
+     exists only for development tooling such as `--allow-unpinned`.
 
    Manifests written before this change load as unpinned.
 6. **Introduced in manifest format `0.3.1`.** The change only adds fields, so it's a patch

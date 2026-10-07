@@ -526,7 +526,10 @@ fn normalize_compute_value<E: serde::de::Error>(
         // parse error naming the field rather than a failure much later in a run.
         let kind = obj.get("type").and_then(|t| t.as_str()).unwrap_or_default();
         if matches!(kind, "tapleaf" | "simf_fn") {
-            match (obj.contains_key("simf"), obj.contains_key("program")) {
+            // `null` counts as absent: serde reads it as `None`, so a `"simf": null` that
+            // passed here would leave the compute naming no program at all.
+            let given = |key: &str| obj.get(key).is_some_and(|v| !v.is_null());
+            match (given("simf"), given("program")) {
                 (true, true) => {
                     return Err(E::custom(format!(
                         "a {kind} compute gives both \"simf\" and \"program\"; give one"
@@ -1666,8 +1669,13 @@ impl Manifest {
     /// `requires` claims.
     ///
     /// Only the residue that [`Manifest::chain`] does not settle, which today means: does
-    /// any `utxo_type` carry a `script`. Namespaced capabilities are never inferred — this
-    /// crate does not know what they mean, so only the author can say one is needed.
+    /// anything need a Simplicity compiler. That is any `utxo_type` with a `script`, and
+    /// any other program reference — a `tapleaf` or `simf_fn` compute, or a `programs`
+    /// entry — since computing a tapleaf hash compiles the program just as deriving a
+    /// covenant address does. A wallet without a compiler relies on this to refuse such a
+    /// manifest up front rather than fail partway through. Namespaced capabilities are
+    /// never inferred — this crate does not know what they mean, so only the author can
+    /// say one is needed.
     pub fn inferred_capabilities(&self) -> Capabilities {
         let mut caps = Capabilities::none();
         let uses_covenants = self
@@ -1675,7 +1683,8 @@ impl Manifest {
             .iter()
             .flatten()
             .any(|(_, t)| t.script.is_some());
-        if uses_covenants {
+        let (program_refs, _) = crate::programs::references(self);
+        if uses_covenants || !program_refs.is_empty() {
             caps.insert(Capability::SIMPLICITY);
         }
         caps

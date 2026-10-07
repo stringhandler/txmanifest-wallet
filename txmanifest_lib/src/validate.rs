@@ -1222,6 +1222,42 @@ mod tests {
         assert!(report.is_ok(), "{:?}", report.issues);
     }
 
+    /// The compiler is needed for a computed tapleaf hash as much as for a covenant output,
+    /// so a manifest with no covenant `utxo_types` still requires `simplicity` when it
+    /// computes one. Otherwise a wallet without a compiler would accept the manifest and
+    /// fail partway through a run.
+    #[test]
+    fn a_computed_program_reference_requires_simplicity() {
+        for compute in [
+            r#"{ "type": "tapleaf", "simf": "./x.simf" }"#,
+            r#"{ "type": "simf_fn", "simf": "./x.simf" }"#,
+            r#"{ "type": "tapleaf", "program": "x" }"#,
+        ] {
+            let manifest = |requires: &str| {
+                Manifest::from_json_str(&format!(
+                    r#"{{ "manifest_version": "0.3.1", "protocol": "t", "chain": "elements",
+                          "requires": {requires},
+                          "programs": {{ "x": {{ "source": "./x.simf" }} }},
+                          "actions": {{ "A": {{ "params": {{ "H": {{ "type": "u256",
+                            "compute": {compute} }} }} }} }} }}"#
+                ))
+                .expect("manifest should parse")
+            };
+            let report = validate(&manifest("[]"));
+            assert!(
+                messages(&report).contains("uses 'simplicity' but does not declare it"),
+                "{compute}: {}",
+                messages(&report)
+            );
+            let report = validate(&manifest(r#"["simplicity"]"#));
+            assert!(
+                !messages(&report).contains("does not declare it"),
+                "{compute}: {}",
+                messages(&report)
+            );
+        }
+    }
+
     /// Simplicity is legal to *declare* on Bitcoin — it is a specified soft fork, and
     /// whether a given node honours it is settled by the target, not by `validate`.
     #[test]
