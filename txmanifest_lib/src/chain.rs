@@ -14,9 +14,10 @@
 //!   says there are no native assets, and a manifest repeating that in a feature list
 //!   would only create a second place to disagree.
 //! - **[`Capability`]** — what a *manifest* must state because the chain alone does not
-//!   settle it. Today that is exactly one thing, [`Capability::SIMPLICITY`], because
-//!   Simplicity is a soft fork on Bitcoin rather than a property of it. Plus whatever
-//!   third parties define under their own namespace.
+//!   settle it. Today that is two things: [`Capability::SIMPLICITY`], because Simplicity
+//!   is a soft fork on Bitcoin rather than a property of it, and [`Capability::HOOKS`],
+//!   because running hooks is a property of the wallet rather than of any chain. Plus
+//!   whatever third parties define under their own namespace.
 //! - **[`Activation`]** — what the specific node being talked to actually provides. This
 //!   is configuration, not discovery.
 //!
@@ -29,8 +30,9 @@
 //! using issuance on Bitcoin is still an error — they just read the chain instead of a
 //! restatement of it. See [`ChainFamily::has_native_assets`] and its neighbours.
 //!
-//! What is left in [`Capability`] is the residue that genuinely cannot be inferred: a soft
-//! fork's activation state, and features this crate has never heard of.
+//! What is left in [`Capability`] is the residue the chain cannot settle: a soft fork's
+//! activation state, an optional part of the format a wallet may not implement (hooks),
+//! and features this crate has never heard of.
 //!
 //! # Namespaces
 //!
@@ -251,15 +253,22 @@ pub enum CoreCapability {
     /// Covenant `utxo_types` backed by SimplicityHL programs, spent through a Simplicity
     /// tapleaf the validator executes.
     ///
-    /// The one core capability, because it is the one thing the `chain` field does not
-    /// settle. On Elements it is live. On Bitcoin it is a proposed soft fork (BINANA
+    /// Not settled by the `chain` field. On Elements it is live. On Bitcoin it is a proposed soft fork (BINANA
     /// 2026-0003) — implemented in the C library, but not activated on mainnet, testnet,
     /// or the default signet — so whether a given Bitcoin node honours it is a property of
     /// that node, not of Bitcoin.
     ///
-    /// A manifest that declares no `utxo_types` with a `script` does not need this, and
-    /// can target a stock Bitcoin node.
+    /// A manifest that uses no Simplicity program does not need this, and can target a
+    /// stock Bitcoin node.
     Simplicity,
+    /// Hooks: `on_resolved` on an input, `on_pre_broadcast` / `on_post_broadcast` on an
+    /// action, which set values while a transaction is being built.
+    ///
+    /// An optional part of the format rather than a property of any chain: the existing
+    /// browser-extension wallets run none of them, and a wallet that doesn't must be able to
+    /// refuse a manifest that relies on them before it starts, not partway through.
+    /// `create_instance` is not a hook and needs no capability.
+    Hooks,
 }
 
 impl CoreCapability {
@@ -267,6 +276,7 @@ impl CoreCapability {
     pub fn as_str(self) -> &'static str {
         match self {
             CoreCapability::Simplicity => "simplicity",
+            CoreCapability::Hooks => "hooks",
         }
     }
 }
@@ -275,8 +285,11 @@ impl Capability {
     /// The Simplicity capability, spelled out for call sites.
     pub const SIMPLICITY: Capability = Capability::Core(CoreCapability::Simplicity);
 
+    /// The hooks capability, spelled out for call sites.
+    pub const HOOKS: Capability = Capability::Core(CoreCapability::Hooks);
+
     /// Every core capability this build defines.
-    pub const CORE: [CoreCapability; 1] = [CoreCapability::Simplicity];
+    pub const CORE: [CoreCapability; 2] = [CoreCapability::Simplicity, CoreCapability::Hooks];
 
     /// Build a namespaced capability, validating both halves.
     pub fn namespaced(
@@ -313,6 +326,11 @@ impl Capability {
                 "covenant programs need a validator that executes Simplicity tapleaves; on \
                  Bitcoin that is the BINANA 2026-0003 soft fork, which no public network has \
                  activated"
+                    .to_string()
+            }
+            Capability::Core(CoreCapability::Hooks) => {
+                "the manifest sets values in on_resolved / on_pre_broadcast / \
+                 on_post_broadcast hooks, which this wallet does not run"
                     .to_string()
             }
             Capability::Namespaced { namespace, .. } => format!(
@@ -553,6 +571,8 @@ impl Network {
         if simplicity_live {
             caps.insert(Capability::SIMPLICITY);
         }
+        // Hooks are run by this wallet, not by the node, so every network has them.
+        caps.insert(Capability::HOOKS);
         caps
     }
 

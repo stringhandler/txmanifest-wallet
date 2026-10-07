@@ -1258,6 +1258,48 @@ mod tests {
         }
     }
 
+    /// Hooks are optional for a wallet to implement, so a manifest that sets a value in one
+    /// must say so: an undeclared hook is the same kind of error as undeclared Simplicity.
+    #[test]
+    fn a_manifest_using_hooks_must_declare_them() {
+        let manifest = |requires: &str, hook: &str| {
+            Manifest::from_json_str(&format!(
+                r#"{{ "manifest_version": "0.3.1", "protocol": "t", "chain": "elements",
+                      "requires": {requires},
+                      "actions": {{ "A": {{
+                        "params": {{ "B": {{ "type": "u64", "compute": {{ "type": "hook" }} }} }},
+                        {hook} }} }} }}"#
+            ))
+            .expect("manifest should parse")
+        };
+        for hook in [
+            r#""on_pre_broadcast": { "set": { "params.B": "1" } }"#,
+            r#""on_post_broadcast": { "set": { "params.B": "1" } }"#,
+            r#""inputs": [ { "id": "i", "utxo_source": "wallet",
+                             "on_resolved": { "set": { "params.B": "1" } } } ]"#,
+        ] {
+            let report = validate(&manifest("[]", hook));
+            assert!(
+                messages(&report).contains("uses 'hooks' but does not declare it"),
+                "{hook}: {}",
+                messages(&report)
+            );
+            let report = validate(&manifest(r#"["hooks"]"#, hook));
+            assert!(
+                !messages(&report).contains("'hooks'"),
+                "{hook}: {}",
+                messages(&report)
+            );
+        }
+        // An empty hook block sets nothing, so it needs nothing.
+        let report = validate(&manifest("[]", r#""on_pre_broadcast": { "set": {} }"#));
+        assert!(
+            !messages(&report).contains("'hooks'"),
+            "{}",
+            messages(&report)
+        );
+    }
+
     /// Simplicity is legal to *declare* on Bitcoin — it is a specified soft fork, and
     /// whether a given node honours it is settled by the target, not by `validate`.
     #[test]
@@ -1805,6 +1847,7 @@ mod tests {
             &serde_json::json!({
                 "manifest_version": "0.3.0",
                 "protocol": "test",
+                "requires": ["hooks"],
                 "actions": { "A": { "params": params, "on_pre_broadcast": { "set": set } } }
             })
             .to_string(),
