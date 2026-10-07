@@ -526,7 +526,10 @@ fn normalize_compute_value<E: serde::de::Error>(
         // parse error naming the field rather than a failure much later in a run.
         let kind = obj.get("type").and_then(|t| t.as_str()).unwrap_or_default();
         if matches!(kind, "tapleaf" | "simf_fn") {
-            match (obj.contains_key("simf"), obj.contains_key("program")) {
+            // `null` counts as absent: serde reads it as `None`, so a `"simf": null` that
+            // passed here would leave the compute naming no program at all.
+            let given = |key: &str| obj.get(key).is_some_and(|v| !v.is_null());
+            match (given("simf"), given("program")) {
                 (true, true) => {
                     return Err(E::custom(format!(
                         "a {kind} compute gives both \"simf\" and \"program\"; give one"

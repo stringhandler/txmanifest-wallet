@@ -1411,7 +1411,9 @@ pub fn run(
                 };
                 let (leaf_payloads, inp_params, inp_hints) =
                     (site.leaf_payloads, site.compile_params, site.type_hints);
-                let inp_simf_path = programs.for_script(inp_ut.script.as_ref())?;
+                let inp_simf_path = programs
+                    .for_script(inp_ut.script.as_ref())
+                    .with_context(|| format!("utxo_type '{type_name}'"))?;
                 let script_pubkey = match actx.covenant_script_pubkey(
                     inp_simf_path,
                     &inp_params,
@@ -1811,7 +1813,9 @@ pub fn run(
                         };
                         let (leaf_payloads, out_params, out_hints) =
                             (site.leaf_payloads, site.compile_params, site.type_hints);
-                        let out_simf_path = programs.for_script(ut.script.as_ref())?;
+                        let out_simf_path = programs
+                            .for_script(ut.script.as_ref())
+                            .with_context(|| format!("utxo_type '{type_name}'"))?;
                         let script_pubkey = match actx.covenant_script_pubkey(
                             out_simf_path,
                             &out_params,
@@ -2213,7 +2217,10 @@ pub fn run(
                             action,
                             &ctx,
                         )?;
-                        let program = programs.for_script(ut.script.as_ref())?.clone();
+                        let program = programs
+                            .for_script(ut.script.as_ref())
+                            .with_context(|| format!("utxo_type '{type_name}'"))?
+                            .clone();
                         Ok(CovenantSpendSpec {
                             program,
                             params: site.compile_params,
@@ -2436,8 +2443,9 @@ pub fn run(
             for inp in &covenant_inputs {
                 let type_name = inp.utxo_type_name().unwrap();
                 let check_ut = manifest.utxo_type(&type_name).ok();
-                let check_simf_path =
-                    programs.for_script(check_ut.as_ref().and_then(|ut| ut.script.as_ref()))?;
+                let check_simf_path = programs
+                    .for_script(check_ut.as_ref().and_then(|ut| ut.script.as_ref()))
+                    .with_context(|| format!("utxo_type '{type_name}'"))?;
                 let check_site = check_ut.map(|ut| {
                     resolve_utxo_site(
                         ut,
@@ -2558,8 +2566,9 @@ pub fn run(
                                         dry_site.compile_params,
                                         dry_site.type_hints,
                                     );
-                                    let dry_simf_path =
-                                        programs.for_script(dry_ut.script.as_ref())?;
+                                    let dry_simf_path = programs
+                                        .for_script(dry_ut.script.as_ref())
+                                        .with_context(|| format!("utxo_type '{type_name}'"))?;
 
                                     use std::io::Write;
                                     print!(
@@ -2736,7 +2745,9 @@ pub fn run(
                                     fin_site.compile_params,
                                     fin_site.type_hints,
                                 );
-                                let fin_simf_path = programs.for_script(fin_ut.script.as_ref())?;
+                                let fin_simf_path = programs
+                                    .for_script(fin_ut.script.as_ref())
+                                    .with_context(|| format!("utxo_type '{type_name}'"))?;
 
                                 print!(
                                     "  {} Input '{}' ({}) — finalizing… ",

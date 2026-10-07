@@ -6,8 +6,10 @@ anyone implementing the format in a wallet. Changes to the `tx-manifest-wallet` 
 the [app changelog](../CHANGELOG.md).
 
 A manifest declares the format it's written against in `manifest_version`. While the major
-version is `0`, a different minor version is a different, incompatible format; the patch
-version only adds things, so a reader of `0.3.x` accepts any `0.3` manifest. The format's
+version is `0`, a different minor version is a different, incompatible format. A patch
+version only adds things, so a newer reader accepts an older patch's manifests (a `0.3.1`
+reader reads `0.3.0`). Not the reverse: an older reader rejects fields it doesn't know,
+rather than ignoring them. The format's
 history before `0.2.0` was not recorded.
 
 The JSON Schema for the current version is
