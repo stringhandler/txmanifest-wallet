@@ -3361,6 +3361,7 @@ dependencies = [
  "lwk_wollet",
  "rand 0.8.7",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "simplicityhl",

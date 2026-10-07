@@ -45,8 +45,15 @@ fn reproduces_indexer_pre_lock_covenant() {
     add(&mut p, &mut h, "ASSET_AMOUNT", "1", "u64");
     add(&mut p, &mut h, "WITH_ASSET_BURN", "true", "bool");
     let lender_principal_cov = hexs(
-        &covenant::compute_covenant_script_hash(&dir.join("asset_auth.simf"), &p, &h, net, true)
-            .unwrap(),
+        &covenant::compute_covenant_script_hash(
+            &tx_manifest_lib::programs::ProgramSource::read_unpinned(dir.join("asset_auth.simf"))
+                .unwrap(),
+            &p,
+            &h,
+            net,
+            true,
+        )
+        .unwrap(),
     );
 
     // 2. LENDING_COV_HASH = script_hash(lending, ...)
@@ -105,16 +112,30 @@ fn reproduces_indexer_pre_lock_covenant() {
         "liquid.asset_id",
     );
     let lending_cov = hexs(
-        &covenant::compute_covenant_script_hash(&dir.join("lending.simf"), &p, &h, net, true)
-            .unwrap(),
+        &covenant::compute_covenant_script_hash(
+            &tx_manifest_lib::programs::ProgramSource::read_unpinned(dir.join("lending.simf"))
+                .unwrap(),
+            &p,
+            &h,
+            net,
+            true,
+        )
+        .unwrap(),
     );
 
     // 3. PARAMETERS_NFT_OUTPUT_SCRIPT_HASH = script_hash(script_auth, SCRIPT_HASH=lending_cov)
     let (mut p, mut h) = (HashMap::new(), HashMap::new());
     add(&mut p, &mut h, "SCRIPT_HASH", &lending_cov, "bytes32");
     let params_nft_out = hexs(
-        &covenant::compute_covenant_script_hash(&dir.join("script_auth.simf"), &p, &h, net, true)
-            .unwrap(),
+        &covenant::compute_covenant_script_hash(
+            &tx_manifest_lib::programs::ProgramSource::read_unpinned(dir.join("script_auth.simf"))
+                .unwrap(),
+            &p,
+            &h,
+            net,
+            true,
+        )
+        .unwrap(),
     );
 
     // 4. pre_lock address
@@ -194,9 +215,16 @@ fn reproduces_indexer_pre_lock_covenant() {
         borrower_pubkey,
         "pubkey",
     );
-    let addr =
-        covenant::compute_covenant_address(&dir.join("pre_lock.simf"), &p, &h, &[], net, true)
-            .unwrap();
+    let addr = covenant::compute_covenant_address(
+        &tx_manifest_lib::programs::ProgramSource::read_unpinned(dir.join("pre_lock.simf"))
+            .unwrap(),
+        &p,
+        &h,
+        &[],
+        net,
+        true,
+    )
+    .unwrap();
 
     eprintln!("---- result ----");
     println!("LENDER_PRINCIPAL_COV_HASH = {lender_principal_cov}");

@@ -33,6 +33,8 @@ simplicityhl = { git = "https://github.com/delta1/SimplicityHL", branch = "bitco
     "serde",
 ] }
 schemars = "0.8"
+# Program version requirements; already in the tree via simplicityhl.
+semver = "1"
 
 [dev-dependencies]
 jsonschema = { version = "0.17", default-features = false }

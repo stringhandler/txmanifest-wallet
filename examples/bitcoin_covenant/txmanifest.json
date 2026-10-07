@@ -1,11 +1,11 @@
 {
   "$schema": "https://raw.githubusercontent.com/stringhandler/txmanifest-wallet/main/schema/txmanifest.schema.json",
-  "manifest_version": "0.3.0",
+  "manifest_version": "0.3.1",
   "protocol": "bitcoin-covenant",
   "description": "A Simplicity covenant on Bitcoin. Locks coins under a program the node itself executes, then spends them by satisfying it — the same p2pk.simf that runs on Liquid, unchanged.",
   "chain": "bitcoin",
   "requires": ["simplicity"],
-  "simplicity_hl": { "debug_symbols": false },
+  "simplicity_hl": { "version": "0.7.1", "debug_symbols": false },
   "utxo_types": {
     "p2pk_vault": {
       "description": "Coins spendable only by a BIP340 signature over the whole transaction, checked on-chain by Simplicity rather than by Bitcoin script.",
@@ -15,7 +15,7 @@
           "description": "x-only key the covenant checks against. Take it from `info` (Wallet Signing Key), so this wallet can satisfy it."
         }
       },
-      "script": { "type": "simplicity", "source": "./p2pk.simf" }
+      "script": { "type": "simplicity", "source": "./p2pk.simf", "source_hash": "sha256:658bf994eac2f8dcbf5486787910513a1e4a79bd56f6e3c6c2a74dac25c0e2bf" }
     }
   },
   "actions": {

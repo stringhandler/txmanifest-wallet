@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/stringhandler/txmanifest-wallet/main/schema/txmanifest.schema.json",
-  "manifest_version": "0.3.0",
+  "manifest_version": "0.3.1",
   "protocol": "bitcoin-pay",
   "description": "A plain Bitcoin payment. The smallest manifest that runs on Bitcoin, and the one that shows what `requires: []` buys you: no covenant, no Simplicity, nothing a stock node lacks.",
   "chain": "bitcoin",

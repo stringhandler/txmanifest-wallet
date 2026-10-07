@@ -597,8 +597,33 @@
               "description": "Explicit param map for the simf. Each entry combines the value (a compile-param reference or string literal) with an optional manifest type hint. Omit entirely to pass ALL current compile params (auto-populate mode).",
               "type": "object"
             },
+            "program": {
+              "description": "The name of an entry in [`Manifest::programs`]. Give this or `simf`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "simf": {
-              "type": "string"
+              "description": "Path to the `.simf` file, relative to the manifest. Give this or `program`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "simf_hash": {
+              "description": "The content hash of `simf`, as in [`ProgramDef::hash`].",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "simplicity_hl_version": {
+              "description": "The SimplicityHL versions `simf` is written for.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "type": {
               "enum": [
@@ -608,7 +633,6 @@
             }
           },
           "required": [
-            "simf",
             "type"
           ],
           "type": "object"
@@ -713,8 +737,33 @@
                 "null"
               ]
             },
+            "program": {
+              "description": "The name of an entry in [`Manifest::programs`]. Give this or `simf`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "simf": {
-              "type": "string"
+              "description": "Path to the `.simf` file, relative to the manifest. Give this or `program`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "simf_hash": {
+              "description": "The content hash of `simf`, as in [`ProgramDef::hash`].",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "simplicity_hl_version": {
+              "description": "The SimplicityHL versions `simf` is written for.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "type": {
               "enum": [
@@ -724,7 +773,6 @@
             }
           },
           "required": [
-            "simf",
             "type"
           ],
           "type": "object"
@@ -771,9 +819,47 @@
       ],
       "type": "object"
     },
+    "ProgramDef": {
+      "additionalProperties": false,
+      "description": "One entry of [`Manifest::programs`]: a Simplicity program file and what pins it.",
+      "properties": {
+        "$comment": {
+          "description": "Documentation only; ignored by the engine.",
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hash": {
+          "description": "The file's content hash, self-describing: `\"sha256:<lowercase hex>\"`, over the file's exact bytes. Optional while developing; a manifest with an unhashed program is *unpinned*, which wallets refuse.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "simplicity_hl_version": {
+          "description": "The SimplicityHL versions this program is written for, as a semver requirement. Overrides [`SimplicityHl::version`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "Path to the `.simf` file, relative to the manifest.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "type": "object"
+    },
     "SimplicityHl": {
       "additionalProperties": false,
-      "description": "SimplicityHL toolchain settings — how the `.simf` programs are compiled, as distinct from what the protocol does.\n\nDeliberately carries **no** compiler-version field. SimplicityHL has its own `simc \"<range>\";` source directive, which the compiler enforces fail-fast before lexing, across the entry file and every reachable dependency — none of which a manifest key can do. Tooling that wants the requirement without compiling can read it via `version::SimcDirective::requirement_of`. Declaring it here as well would only create a second place to disagree.",
+      "description": "SimplicityHL toolchain settings — how the `.simf` programs are compiled, as distinct from what the protocol does.",
       "properties": {
         "$comment": {
           "description": "Documentation only; ignored by the engine.",
@@ -790,6 +876,13 @@
             "$ref": "#/definitions/UnstableFeatureName"
           },
           "type": "array"
+        },
+        "version": {
+          "description": "The SimplicityHL versions every program in this manifest is written for, as a semver requirement (`\"0.7.1\"` means `^0.7.1`, as in Cargo and in SimplicityHL's own `simc \"<range>\";` directive).\n\nA per-program `simplicity_hl_version` overrides this, and this overrides a program's own `simc` directive. It can only *narrow* that directive, never widen it: the compiler still refuses a source whose directive it does not satisfy. What this adds is a requirement a wallet can check from the manifest alone, and one that covers sources which cannot be edited to carry a directive — a byte-exact copy of another protocol's program, say, where any added line would move every debug-symbol position and with it the program's address.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -1038,7 +1131,29 @@
             "null"
           ]
         },
+        "program": {
+          "description": "The name of an entry in [`Manifest::programs`]. Give this or `source`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "simplicity_hl_version": {
+          "description": "The SimplicityHL versions `source` is written for, as in [`ProgramDef::simplicity_hl_version`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "source": {
+          "description": "Path to the `.simf` file, relative to the manifest. Give this or `program`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_hash": {
+          "description": "The content hash of `source`, as in [`ProgramDef::hash`].",
           "type": [
             "string",
             "null"
@@ -1169,6 +1284,16 @@
     "manifest_version": {
       "description": "Version of the manifest **format** this file is written against, as specified by ELIP-205 — not the version of any tool that reads it. Checked against [`FORMAT_VERSION`] at parse time; see [`check_format_version`] for the compatibility rule.",
       "type": "string"
+    },
+    "programs": {
+      "additionalProperties": {
+        "$ref": "#/definitions/ProgramDef"
+      },
+      "description": "Named Simplicity programs, each pinned by hash and optionally by compiler version.\n\nOne of two ways to reference a program: a `utxo_type` script or a computed param names an entry here with `\"program\"`, instead of giving a `source` / `simf` path directly. Both forms may be mixed; see [`crate::programs`].",
+      "type": [
+        "object",
+        "null"
+      ]
     },
     "protocol": {
       "type": "string"
