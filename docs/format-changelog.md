@@ -17,8 +17,9 @@ The JSON Schema for the current version is
 
 ## [0.3.1] - unreleased
 
-Additive, with one tightened rule (below): a `0.3.0` manifest is a valid `0.3.1` manifest
-unless it uses a Simplicity program without declaring `simplicity`.
+Additive, with two tightened rules (below): a `0.3.0` manifest is a valid `0.3.1` manifest
+unless it uses a Simplicity program without declaring `simplicity`, or a hook without
+declaring `hooks`.
 
 ### Added
 
@@ -36,6 +37,9 @@ unless it uses a Simplicity program without declaring `simplicity`.
     SimplicityHL's `simc` directive (`"0.7.1"` means `^0.7.1`). Priority: the reference or
     entry, then the manifest-wide value, then the file's own `simc` directive. The manifest
     can narrow the directive but not widen it.
+- **`hooks` capability** ([decision 0002](decisions/0002-hooks-capability.md)): hooks
+  (`on_resolved`, `on_pre_broadcast`, `on_post_broadcast`) are an optional part of the
+  format. A wallet may not implement them, and refuses manifests that require them.
 - **Pinned and unpinned manifests.** A program is pinned when it has a hash and a
   compiler-version requirement; a manifest is pinned when all its programs are. Wallets
   must refuse unpinned manifests and programs that don't match their hash. Tools may
@@ -56,6 +60,8 @@ unless it uses a Simplicity program without declaring `simplicity`.
   Each of these needs a compiler, and `requires` is how a wallet without one knows to
   refuse the manifest before trying it. A manifest that relied on the narrower rule was
   already unrunnable by such a wallet; it now fails validation instead.
+- A manifest that sets a value in any hook must declare `"requires": ["hooks"]`. A hook
+  block with an empty `set` needs nothing.
 
 ## [0.3.0] - 2026-10-06
 

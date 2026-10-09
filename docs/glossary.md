@@ -6,8 +6,10 @@ Terms as this repo uses them. Where a term is defined in more detail, the entry 
 outputs it creates. Declared under `actions`, or under a contract template.
 
 **Capability.** Something a wallet must support to run a manifest, listed in the
-manifest's `requires` (e.g. `"simplicity"`). Third parties may define their own under a
-namespace (`ns::name`).
+manifest's `requires`. The format defines `simplicity` (the manifest uses a Simplicity
+program) and `hooks` (it sets values in hooks; see
+[decision 0002](decisions/0002-hooks-capability.md)). Third parties may define their own
+under a namespace (`ns::name`).
 
 **Compiler-version requirement.** The SimplicityHL versions a program is written for, as a
 semver requirement in the syntax of SimplicityHL's `simc` directive: `"0.7.1"` means
@@ -18,6 +20,10 @@ hex>"`. See [decision 0001](decisions/0001-program-pinning.md).
 
 **Contract template.** A reusable contract definition under `contract_templates`: typed
 fields plus the actions that operate on one instance of it.
+
+**Hook.** A block that sets values while a transaction is being built: `on_resolved` on an
+input, `on_pre_broadcast` / `on_post_broadcast` on an action. Optional for a wallet to
+support; a manifest using one requires `hooks`.
 
 **Instance.** One deployed contract made from a template: the values its fields were given
 when it was created.

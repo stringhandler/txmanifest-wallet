@@ -1669,7 +1669,8 @@ impl Manifest {
     /// `requires` claims.
     ///
     /// Only the residue that [`Manifest::chain`] does not settle, which today means: does
-    /// anything need a Simplicity compiler. That is any `utxo_type` with a `script`, and
+    /// anything set a value in a hook (`hooks`), and does anything need a Simplicity
+    /// compiler. That is any `utxo_type` with a `script`, and
     /// any other program reference — a `tapleaf` or `simf_fn` compute, or a `programs`
     /// entry — since computing a tapleaf hash compiles the program just as deriving a
     /// covenant address does. A wallet without a compiler relies on this to refuse such a
@@ -1687,7 +1688,25 @@ impl Manifest {
         if uses_covenants || !program_refs.is_empty() {
             caps.insert(Capability::SIMPLICITY);
         }
+        if self.uses_hooks() {
+            caps.insert(Capability::HOOKS);
+        }
         caps
+    }
+
+    /// Whether any action or input sets a value in a hook. A hook block with an empty
+    /// `set` does nothing, so it does not count.
+    fn uses_hooks(&self) -> bool {
+        let used = |h: &Option<HookBlock>| h.as_ref().is_some_and(|h| !h.set.is_empty());
+        let mut actions = self.actions.values().collect::<Vec<_>>();
+        for t in self.contract_templates.iter().flat_map(|t| t.values()) {
+            actions.extend(t.actions.values());
+        }
+        actions.into_iter().any(|a| {
+            used(&a.on_pre_broadcast)
+                || used(&a.on_post_broadcast)
+                || a.inputs.iter().flatten().any(|i| used(&i.on_resolved))
+        })
     }
 
     /// Places where this manifest uses something its declared [`Manifest::chain`] does not
