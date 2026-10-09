@@ -17,7 +17,8 @@ use lwk_wollet::elements::bitcoin::{
 };
 use tx_manifest_lib::chain::ChainFamily;
 use tx_manifest_lib::covenant::{
-    bitcoin_covenant_sighash, finalize_bitcoin_covenant_input, CompileOpts, ProgramSource,
+    bitcoin_covenant_sighash, estimate_bitcoin_covenant_witness_wu,
+    finalize_bitcoin_covenant_input, CompileOpts, ProgramSource,
 };
 
 fn hex(bytes: &[u8]) -> String {
@@ -100,8 +101,14 @@ fn a_signature_over_the_computed_sighash_satisfies_the_program() {
     let sig = hex(sig.as_ref());
 
     // The second run rebuilds the same transaction, so the signature verifies.
-    finalize(&tx, &prevouts, &sig)
+    let stack = finalize(&tx, &prevouts, &sig)
         .unwrap_or_else(|e| panic!("a signature over the computed hash should verify: {e:#}"));
+
+    // p2pk has one path and a fixed-size witness, so the fee estimate's witness weight,
+    // computed from the program alone, is exact.
+    let estimate = estimate_bitcoin_covenant_witness_wu(&program, &params, &hints, &[], bitcoin())
+        .expect("estimate the witness weight");
+    assert_eq!(estimate, Witness::from_slice(&stack).size());
 
     // A transaction that differs by one sat has another hash, so the same signature fails.
     // This is why the second run has to rebuild the first run's transaction exactly.

@@ -19,11 +19,12 @@ use lwk_wollet::elements::bitcoin::{
     absolute::LockTime, transaction::Version, Amount, OutPoint, ScriptBuf, Sequence, Transaction,
     TxIn, TxOut, Witness,
 };
-use simplicityhl::simplicity::{jet::Bitcoin, BitIter, Cost, RedeemNode};
+use simplicityhl::simplicity::Cost;
 use tx_manifest_lib::chain::ChainFamily;
 use tx_manifest_lib::covenant::{
-    bitcoin_covenant_sighash, compute_tapleaf_hash, finalize_bitcoin_covenant_input,
-    program_witness_types, CompileOpts, ProgramSource,
+    bitcoin_covenant_sighash, bitcoin_node_check, compute_tapleaf_hash,
+    estimate_bitcoin_covenant_witness_wu, finalize_bitcoin_covenant_input, program_witness_types,
+    CompileOpts, ProgramSource,
 };
 
 fn verifier_dir() -> PathBuf {
@@ -112,63 +113,9 @@ fn finalize(witnesses: &serde_json::Value) -> anyhow::Result<Vec<Vec<u8>>> {
     )
 }
 
-/// The Simplicity signet node's acceptance rule for a Simplicity leaf spend, from
-/// `src/script/interpreter.cpp` on delta1/bitcoin's `simplicity-inquisition` branch, the
-/// node `contrib/regtest` builds.
-///
-/// The node reads the stack from the end: the control block, the CMR, the program, the
-/// witness, and then an optional padding item, so padding comes *first* on the wire. The
-/// program's cost bound must fit the budget the whole stack buys. When there is padding,
-/// the cost must also *not* fit the budget the stack would buy with one byte less of it:
-/// padding has to be minimal, or the spend fails with `SIMPLICITY_ERR_OVERWEIGHT`.
+/// The signet node's acceptance rules, as tx-manifest-lib transcribes them.
 fn node_check(stack: &[Vec<u8>]) -> Result<Cost, String> {
-    let n = stack.len();
-    if !(4..=5).contains(&n) {
-        return Err(format!(
-            "{n} stack items; a Simplicity spend has 4, or 5 with padding"
-        ));
-    }
-    // TAPROOT_CONTROL_BASE_SIZE + k * TAPROOT_CONTROL_NODE_SIZE, k ≤ 128.
-    let control = &stack[n - 1];
-    if control.len() < 33
-        || control.len() > 33 + 128 * 32
-        || !(control.len() - 33).is_multiple_of(32)
-    {
-        return Err(format!(
-            "the last item ({} B) is not a control block, so the node cannot find the leaf",
-            control.len()
-        ));
-    }
-    let program = &stack[n - 3];
-    let witness = &stack[n - 4];
-    let padding = (n == 5).then(|| &stack[0]);
-    if padding.is_some_and(|p| p.iter().any(|&b| b != 0)) {
-        return Err("the first item is padding and must be all zeros".into());
-    }
-
-    let node = RedeemNode::decode::<_, _, Bitcoin>(
-        BitIter::from(&program[..]),
-        BitIter::from(&witness[..]),
-    )
-    .map_err(|e| format!("cannot decode the program: {e:?}"))?;
-    let cost = node.bounds().cost;
-    if !cost.is_budget_valid(stack) {
-        return Err(format!("{cost:?} exceeds the budget the stack buys"));
-    }
-    if let Some(p) = padding {
-        if !p.is_empty() {
-            let mut shorter = stack.to_vec();
-            shorter[0].pop();
-            if cost.is_budget_valid(&shorter) {
-                return Err(format!(
-                    "{cost:?} fits the budget with one byte less padding ({} B), so the \
-                     padding is not minimal",
-                    p.len()
-                ));
-            }
-        }
-    }
-    Ok(cost)
+    bitcoin_node_check(stack)
 }
 
 /// Item sizes of a finalized stack, for the record in the T1 task file.
@@ -344,6 +291,18 @@ fn signed_spend_of_a_shrincs_locked_coin() {
         Ok(cost) => eprintln!("signed spend: the node would accept it; cost bound {cost:?}"),
         Err(why) => panic!("the node would reject the signed spend: {why}"),
     }
+
+    // The fee estimate's witness weight is an upper bound: it is sized for the costliest
+    // branch, the stateless one, so it covers this stateful spend with room to spare.
+    let estimate =
+        estimate_bitcoin_covenant_witness_wu(&wrapper(), &params, &hints, &[], bitcoin())
+            .expect("estimate the witness weight");
+    let actual = Witness::from_slice(&stack).size();
+    eprintln!("signed spend: witness {actual} WU, estimated up to {estimate} WU");
+    assert!(
+        estimate >= actual,
+        "the estimate {estimate} must cover {actual}"
+    );
 
     // The signature covers this transaction: moved to one that pays a sat less, it fails.
     let mut other = tx.clone();

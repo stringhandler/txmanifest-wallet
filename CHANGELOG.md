@@ -18,7 +18,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 - `pin` command: writes every program's current hash into a manifest without reformatting it; `pin --check` fails if any is missing or stale.
 - `validate --strict`: unpinned programs are errors rather than warnings.
 - `run --debug`: development mode. For now the same as `--allow-unpinned`; it may enable more development-only behaviour later.
-- `run --print-sighash` (Bitcoin): build the transaction, print the `sig_all_hash` each covenant input's program will check, and stop without broadcasting. For a covenant witness signed outside the wallet: sign the hash, then run again with the same `--input`, params and `fee_rate`, so the second run builds the same transaction and the signature verifies.
+- `run --print-sighash` (Bitcoin): build the transaction, print the `sig_all_hash` each covenant input's program will check, and stop without broadcasting. Bitcoin runs now print the transaction's txid when it is built, so the two runs can be compared. For a covenant witness signed outside the wallet: sign the hash, then run again with the same `--input`, params and `fee_rate`, so the second run builds the same transaction and the signature verifies.
 
 ### Changed
 
@@ -27,6 +27,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 ### Fixed
 
+- Bitcoin fee estimates size each covenant input's witness from its program instead of assuming about 1 KB, so a large Simplicity witness no longer leaves the transaction below the relay fee. The estimate depends only on the program, so it errs high for programs that branch on a witness: it is sized for the costliest branch.
 - Bitcoin covenant spends whose program needs cost padding are now accepted by the node. The padding item came last, where the node expects the control block, and it was sized for every branch of the program rather than the one the spend takes, so the node rejected it as more padding than the program needs. Programs cheap enough to need no padding, such as `examples/bitcoin_covenant`, were not affected.
 
 ## [0.3.0] - 2026-10-06

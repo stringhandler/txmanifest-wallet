@@ -23,10 +23,9 @@ What it shows:
   [`contrib/shrincs-simplicity-verifier`](../../contrib/shrincs-simplicity-verifier).
   Don't edit it; rerun `build.sh` and `tx-manifest-wallet pin`.
 - `lock.params.json`: lock 20,000 sat at 0.1 sat/vB.
-- `spend.params.json`: spend at `fee_rate` 15. The wallet's fee estimate assumes about
-  1 KB of witness for a covenant input, and this one is about 18.8 KB. 15 sat/vB on that
-  estimate comes to about 5,300 sat, roughly 1.1 sat/vB on the real transaction of about
-  4,790 vB.
+- `spend.params.json`: spend at `fee_rate` 1. The fee estimate sizes the witness for the
+  program's costliest branch (the stateless one, about 50 k WU), so the real
+  transaction, about 4,790 vB, pays roughly 2.6 sat/vB.
 
 ## Run it
 

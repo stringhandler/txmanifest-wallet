@@ -6,6 +6,10 @@
 //   shrincs-signer pubkey --seed FILE                print PK (PK.seed || PK.root)
 //   shrincs-signer sign   --seed FILE --state FILE --msg HEX
 //                                                    print {"SIG": ..., "OTHER_ROOT": ...}
+//   shrincs-signer sign-raw --seed FILE --q N --msg HEX
+//                                                    TEST KEYS ONLY: sign at leaf index N,
+//                                                    keeping no state, and print the raw
+//                                                    signature split into its fields
 //
 // A thin driver around shrincs-cpp (see the Makefile for the commit); the cryptography is
 // all upstream's. Phase 0 only: the plan is for signers to run inside the wallet.
@@ -172,15 +176,60 @@ static int cmd_sign(int argc, char** argv) {
     return 0;
 }
 
+// For test harnesses such as the contest runner, which sign many leaf indexes of
+// published test keys. It keeps no state, so it reuses indexes freely, which is exactly
+// what makes it unsafe for any key that guards coins.
+static int cmd_sign_raw(int argc, char** argv) {
+    auto msg = unhex(flag(argc, argv, "--msg"), 32, "--msg");
+    char* end = nullptr;
+    std::string q_text = flag(argc, argv, "--q");
+    unsigned long q = strtoul(q_text.c_str(), &end, 10);
+    if (end == q_text.c_str() || q < 1 || q > HSF + 1)
+        die("--q must be a leaf index from 1 to " + std::to_string(HSF + 1));
+
+    PublicKey pk;
+    SecretKey sk;
+    State state;
+    restore(flag(argc, argv, "--seed"), pk, sk, state);
+    state.q = (uint32_t)q - 1;
+    state.valid = true;
+    unsigned char* sig = shrincs_sign_stateful(msg.data(), sk, state);
+    uint32_t path_nodes = q > HSF ? HSF : (uint32_t)q;
+    uint32_t sig_len = N + WOTS_SIGN_LEN + path_nodes * N;
+    if (!shrincs_verify_stateful(msg.data(), sig, sig_len, pk)) die("the signature does not verify");
+
+    const unsigned char* p = sig;
+    std::string sl_root = hex(p, N);
+    p += N;
+    std::string r = hex(p, R_LEN);
+    p += R_LEN;
+    std::string counter = hex(p, 4);
+    p += 4;
+    std::string chains, path;
+    for (uint32_t i = 0; i < L; i++, p += N) chains += std::string(i ? ", " : "") + "\"" + hex(p, N) + "\"";
+    for (uint32_t i = 0; i < path_nodes; i++, p += N) path += std::string(i ? ", " : "") + "\"" + hex(p, N) + "\"";
+
+    printf("{\"kind\": \"stateful\", \"q\": %lu, \"msg\": \"%s\", \"pk\": \"%s%s\", "
+           "\"pk_seed\": \"%s\", \"pk_root\": \"%s\", \"raw\": \"%s\", \"sl_root\": \"%s\", "
+           "\"r\": \"%s\", \"counter\": \"%s\", \"chains\": [%s], \"path\": [%s]}\n",
+           q, hex(msg.data(), 32).c_str(), hex(pk.seed.data(), N).c_str(), hex(pk.root.data(), N).c_str(),
+           hex(pk.seed.data(), N).c_str(), hex(pk.root.data(), N).c_str(), hex(sig, sig_len).c_str(),
+           sl_root.c_str(), r.c_str(), counter.c_str(), chains.c_str(), path.c_str());
+    delete[] sig;
+    return 0;
+}
+
 int main(int argc, char** argv) {
     std::string cmd = argc > 1 ? argv[1] : "";
     if (cmd == "new") return cmd_new(argc, argv);
     if (cmd == "pubkey") return cmd_pubkey(argc, argv);
     if (cmd == "sign") return cmd_sign(argc, argv);
+    if (cmd == "sign-raw") return cmd_sign_raw(argc, argv);
     fprintf(stderr,
             "usage:\n"
             "  shrincs-signer new    --seed FILE --state FILE\n"
             "  shrincs-signer pubkey --seed FILE\n"
-            "  shrincs-signer sign   --seed FILE --state FILE --msg HEX\n");
+            "  shrincs-signer sign   --seed FILE --state FILE --msg HEX\n"
+            "  shrincs-signer sign-raw --seed FILE --q N --msg HEX   (test keys only)\n");
     return 2;
 }

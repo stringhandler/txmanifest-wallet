@@ -65,8 +65,7 @@
     "Spend": {
       "description": "Spend the coin with upstream's stateful SHRINCS witness (q=1, message 0).",
       "intent": "Spend the SHRINCS smoke-test coin back to this wallet",
-      "$comment": "The fee estimate assumes 1,024 WU for a covenant witness; this one is about 18,800 WU. Pass a high fee_rate in --params (about 15) so the transaction still relays.",
-      "inputs": [
+            "inputs": [
         {
           "id": "vault_in",
           "utxo_source": {

@@ -1596,6 +1596,94 @@ pub fn bitcoin_covenant_sighash(
     Ok(prepared.env.c_tx_env().sighash_all().to_byte_array())
 }
 
+/// An upper bound on the witness weight a Bitcoin covenant input will carry, in weight
+/// units, for the fee estimate.
+///
+/// Computed from the program alone, never from witness values. A spend whose witness is
+/// signed outside the wallet is built twice (`run --print-sighash`, then the signed run),
+/// and the two must agree on the fee, so the estimate can't depend on anything the second
+/// run knows and the first doesn't.
+///
+/// That makes it an upper bound rather than an exact figure. It satisfies the program with
+/// zero values, leaves it unpruned, and takes:
+/// - the stack: every branch of the program, the widest value of each witness's type,
+///   the CMR and the control block;
+/// - the cost bound, which is the costliest branch, as the budget padding must buy.
+///
+/// The larger of those is the estimate. A program with one path is estimated exactly,
+/// apart from witness types of variable size. One with a `match` on a witness is estimated
+/// for its heaviest branch: SHRINCS's stateful spend, for instance, is about 19 k WU, and
+/// it is estimated as its stateless branch, about 50 k WU. Overshooting costs fee;
+/// undershooting gives a transaction the network won't relay.
+pub fn estimate_bitcoin_covenant_witness_wu(
+    program: &ProgramSource,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    opts: impl Into<CompileOpts>,
+) -> Result<usize> {
+    use simplicity::dag::{DagLike, InternalSharing};
+    use simplicity::node::Inner;
+
+    let opts = opts.into();
+    let source = program.text().to_owned();
+    let args_json = build_args_json(compile_params, type_hints)?;
+    let arguments: Arguments = serde_json::from_str(&args_json)
+        .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
+    let compiled = compile_program(source, arguments, &opts)?;
+    let abi_meta = compiled
+        .generate_abi_meta()
+        .map_err(|e| anyhow::anyhow!("Cannot read program ABI: {e}"))?;
+    let zeros: HashMap<_, _> = abi_meta
+        .witness_types
+        .iter()
+        .map(|(name, ty)| (name.shallow_clone(), zero_value_for_type(ty)))
+        .collect();
+    let satisfied = compiled
+        .satisfy(WitnessValues::from(zeros))
+        .map_err(|e| anyhow::anyhow!("Cannot satisfy the program with zero values: {e}"))?;
+    let redeem = satisfied.redeem();
+
+    let (program_bytes, _) = redeem.to_vec_with_witness();
+    let witness_bits: usize = redeem
+        .as_ref()
+        .post_order_iter::<InternalSharing>()
+        .filter(|data| matches!(data.node.inner(), Inner::Witness(_)))
+        .map(|data| data.node.arrow().target.bit_width())
+        .sum();
+    // A control block is 33 bytes plus 32 for each sibling in the taproot tree.
+    let control_block = 33 + 32 * extra_leaf_payloads.len();
+    let stack = [
+        vec![0; witness_bits.div_ceil(8)],
+        program_bytes,
+        vec![0; 32],
+        vec![0; control_block],
+    ];
+    let mut stack = stack.to_vec();
+    if let Some(len) = bitcoin_padding_len(redeem.bounds().cost, &stack) {
+        stack.insert(0, vec![0; len]);
+    }
+    Ok(witness_stack_wu(&stack))
+}
+
+/// The serialized size of a witness stack, which is its weight: a CompactSize item count,
+/// then each item with a CompactSize length prefix.
+fn witness_stack_wu(stack: &[Vec<u8>]) -> usize {
+    fn compact_size(n: usize) -> usize {
+        match n {
+            0..=0xfc => 1,
+            0xfd..=0xffff => 3,
+            0x1_0000..=0xffff_ffff => 5,
+            _ => 9,
+        }
+    }
+    compact_size(stack.len())
+        + stack
+            .iter()
+            .map(|item| compact_size(item.len()) + item.len())
+            .sum::<usize>()
+}
+
 /// A Bitcoin covenant input up to the point its witness is needed: the compiled program,
 /// the leaf it commits to, and the environment it runs in.
 struct PreparedBitcoinInput {
@@ -1688,6 +1776,73 @@ fn prepare_bitcoin_covenant_input(
         control_block,
         env,
     })
+}
+
+/// Whether the Simplicity signet node would accept `stack` as the witness of a Simplicity
+/// leaf spend, returning the program's cost bound if so.
+///
+/// Transcribed from the node's own rules (delta1/bitcoin `simplicity-inquisition`,
+/// `src/script/interpreter.cpp`), for checking a stack without broadcasting it:
+/// - The node reads the stack from the end: the control block, the CMR, the program, the
+///   witness, and then an optional padding item. So padding comes first on the wire.
+/// - Padding must be all zeros.
+/// - The program's cost bound must fit the budget the whole stack buys.
+/// - When there is padding, the cost must *not* fit the budget the stack would buy with
+///   one byte less of it. Padding has to be minimal, or the node fails the spend with
+///   `SIMPLICITY_ERR_OVERWEIGHT`.
+///
+/// It doesn't execute the program. Pruning against the environment, as
+/// [`finalize_bitcoin_covenant_input`] does, is what runs it.
+pub fn bitcoin_node_check(stack: &[Vec<u8>]) -> std::result::Result<simplicity::Cost, String> {
+    use simplicity::{jet::Bitcoin, BitIter, RedeemNode};
+
+    let n = stack.len();
+    if !(4..=5).contains(&n) {
+        return Err(format!(
+            "{n} stack items; a Simplicity spend has 4, or 5 with padding"
+        ));
+    }
+    // TAPROOT_CONTROL_BASE_SIZE + k * TAPROOT_CONTROL_NODE_SIZE, k <= 128.
+    let control = &stack[n - 1];
+    if control.len() < 33
+        || control.len() > 33 + 128 * 32
+        || !(control.len() - 33).is_multiple_of(32)
+    {
+        return Err(format!(
+            "the last item ({} B) is not a control block, so the node cannot find the leaf",
+            control.len()
+        ));
+    }
+    let program = &stack[n - 3];
+    let witness = &stack[n - 4];
+    let padding = (n == 5).then(|| &stack[0]);
+    if padding.is_some_and(|p| p.iter().any(|&b| b != 0)) {
+        return Err("the first item is padding and must be all zeros".into());
+    }
+
+    let node = RedeemNode::decode::<_, _, Bitcoin>(
+        BitIter::from(&program[..]),
+        BitIter::from(&witness[..]),
+    )
+    .map_err(|e| format!("cannot decode the program: {e:?}"))?;
+    let cost = node.bounds().cost;
+    if !cost.is_budget_valid(stack) {
+        return Err(format!("{cost:?} exceeds the budget the stack buys"));
+    }
+    if let Some(p) = padding {
+        if !p.is_empty() {
+            let mut shorter = stack.to_vec();
+            shorter[0].pop();
+            if cost.is_budget_valid(&shorter) {
+                return Err(format!(
+                    "{cost:?} fits the budget with one byte less padding ({} B), so the \
+                     padding is not minimal",
+                    p.len()
+                ));
+            }
+        }
+    }
+    Ok(cost)
 }
 
 /// The length of the padding item a Bitcoin Simplicity spend needs, or `None` when

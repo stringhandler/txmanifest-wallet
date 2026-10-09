@@ -67,7 +67,7 @@ cargo run -p tx-manifest-wallet -- $CFG run $M/txmanifest.json Lock \
 cp $M/spend.params.json /tmp/pq.spend.json   # then set "PK" and "dest"
 cargo run -p tx-manifest-wallet -- $CFG run $M/txmanifest.json Spend \
   --wallet $W --params /tmp/pq.spend.json --state /tmp/pq.state.json --print-sighash
-#    → prints:  vault_in  <sighash>
+#    → prints the txid, then:  vault_in  <sighash>
 
 # 4. Sign it, and put the signature into the params.
 $SIGNER sign --seed $KEY.seed --state $KEY.q --msg <sighash> > /tmp/pq.sig.json
@@ -81,13 +81,15 @@ cargo run -p tx-manifest-wallet -- $CFG run $M/txmanifest.json Spend \
 ```
 
 Expect a witness of about 18.8 KB, about 14.7 KB of it cost padding, and around 4,800 vB.
-`spend.params.json` sets `fee_rate` to 15 because the wallet's fee estimate assumes about
-1 KB of witness for a covenant input. 15 on that estimate comes to roughly 1.1 sat/vB on
-the real transaction.
+The fee estimate sizes a covenant witness from its program, for its costliest branch.
+Here that is the stateless one, about 50 k WU, so at `fee_rate` 1 the spend pays roughly
+2.6 sat/vB on the real transaction.
 
-If step 5 reports that the program failed, the transaction differs from the one step 3
-printed. Run step 3 again: the printed hash should not change. Then sign the new hash;
-each attempt uses another leaf index.
+Both runs print `PSBT constructed (…, fee N sat, txid …)`. Before signing, check that
+step 5 will build the same thing: the same params file, so the same `fee_rate`, and the
+same state file. If step 5 shows a different txid, its program check fails. For example,
+a `fee_rate` changed between the runs moves the fee and therefore the txid. Run step 3
+again with the final params and sign the new hash; each attempt uses another leaf index.
 
 `txmanifest_lib/tests/shrincs_verifier.rs` (`signed_spend_of_a_shrincs_locked_coin`)
 runs the same spend offline with a test key.

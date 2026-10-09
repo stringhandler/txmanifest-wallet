@@ -17,6 +17,10 @@ bin/shrincs-signer sign   --seed key.seed --state key.q --msg <32-byte hex>
 - `new` writes a random 48-byte seed (`SK.seed ‖ SK.prf ‖ PK.seed`, as hex) and a state
   file at q = 0, both mode 0600. It refuses to overwrite either.
 - `pubkey` prints `PK = PK.seed ‖ PK.root`, the manifest's `bytes32` param.
+- `sign-raw --seed FILE --q N --msg HEX` is for **test keys only**. It signs at leaf
+  index N with no state file, so it reuses indexes freely. It prints the raw signature
+  as JSON, split into the fields a contest converter receives (`q`, `msg`, `pk`, `raw`,
+  `sl_root`, `r`, `counter`, `chains`, `path`). The pq-contest runner uses it.
 - `sign` makes a stateful signature with the next leaf index. It prints
   `{"SIG": …, "OTHER_ROOT": …}` as SimplicityHL values in the layout
   `examples/pq_shrincs/shrincs_spend.simf` reads. It also checks the signature with
