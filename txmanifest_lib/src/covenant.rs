@@ -1490,68 +1490,22 @@ pub fn finalize_bitcoin_covenant_input(
     input_index: u32,
     opts: impl Into<CompileOpts>,
 ) -> Result<Vec<Vec<u8>>> {
-    use lwk_wollet::elements::bitcoin as btc;
-    use simplicityhl::simplicity::jet::bitcoin::BitcoinEnv;
-
-    let opts = opts.into();
-    if opts.family != ChainFamily::Bitcoin {
-        anyhow::bail!(
-            "compile options target chain '{}' but a Bitcoin witness was requested",
-            opts.family
-        );
-    }
-
-    let source = program.text().to_owned();
-    let args_json = build_args_json(compile_params, type_hints)?;
-    let arguments: Arguments = serde_json::from_str(&args_json)
-        .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    let compiled = compile_program(source, arguments, &opts)?;
-    let abi_meta = compiled
-        .generate_abi_meta()
-        .map_err(|e| anyhow::anyhow!("Cannot read program ABI: {e}"))?;
-
-    let commit = compiled.commit();
-    let script_cmr = commit.cmr();
-
-    // The taproot tree, folded exactly as the address derivation folds it — the control
-    // block has to reproduce the merkle root the output committed to, or the spend fails
-    // with nothing to point at.
-    let merkle_root = covenant_merkle_root(
+    let PreparedBitcoinInput {
+        compiled,
+        witness_types,
+        script_cmr,
+        control_block,
+        env,
+    } = prepare_bitcoin_covenant_input(
         program,
         compile_params,
         type_hints,
         extra_leaf_payloads,
-        &opts,
-    )?;
-    let mut sibling_hashes: Vec<btc::taproot::TapNodeHash> = Vec::new();
-    for payload in extra_leaf_payloads {
-        sibling_hashes.push(btc::taproot::TapNodeHash::from_byte_array(tapdata_hash(
-            payload,
-        )));
-    }
-
-    use btc::key::TapTweak as _;
-    let secp = btc::secp256k1::Secp256k1::new();
-    let nums = btc::XOnlyPublicKey::from_slice(&NUMS_KEY_BYTES).context("Invalid NUMS key")?;
-    let root = btc::taproot::TapNodeHash::from_byte_array(merkle_root);
-    let (_, parity) = nums.tap_tweak(&secp, Some(root));
-
-    let control_block = btc::taproot::ControlBlock {
-        leaf_version: btc::taproot::LeafVersion::from_consensus(SIMPLICITY_LEAF_VERSION)
-            .expect("simplicity leaf version"),
-        output_key_parity: parity,
-        internal_key: nums,
-        merkle_branch: btc::taproot::TaprootMerkleBranch::try_from(sibling_hashes)
-            .map_err(|e| anyhow::anyhow!("taproot merkle branch is too long: {e}"))?,
-    };
-
-    let env = BitcoinEnv::new(
-        tx.clone(),
+        tx,
         witness_utxos,
         input_index,
-        script_cmr,
-        control_block.clone(),
-    );
+        &opts.into(),
+    )?;
 
     // Signature witnesses are computed against the environment's own sighash, exactly as
     // on Elements — the program will recompute it with `jet::sig_all_hash`, and a
@@ -1567,9 +1521,8 @@ pub fn finalize_bitcoin_covenant_input(
         witnesses
     };
 
-    let witness_values =
-        build_witness_values_from_types(effective_witnesses, &abi_meta.witness_types)
-            .context("Cannot build witness values")?;
+    let witness_values = build_witness_values_from_types(effective_witnesses, &witness_types)
+        .context("Cannot build witness values")?;
 
     let satisfied = compiled
         .satisfy(witness_values)
@@ -1609,6 +1562,132 @@ pub fn finalize_bitcoin_covenant_input(
         stack.insert(0, vec![0; len]);
     }
     Ok(stack)
+}
+
+/// The `sig_all_hash` a Bitcoin covenant input's program will read, for the transaction
+/// as built so far.
+///
+/// For a witness signed outside the wallet: the signer signs this, and a transaction
+/// rebuilt identically can carry the signature. The environment is the same one
+/// [`finalize_bitcoin_covenant_input`] satisfies against, so the hash is by construction
+/// the one `jet::sig_all_hash` returns there. No witness is needed to compute it, because
+/// the sighash commits to the transaction and the leaf, not to any input's witness.
+#[allow(clippy::too_many_arguments)]
+pub fn bitcoin_covenant_sighash(
+    program: &ProgramSource,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    tx: &lwk_wollet::elements::bitcoin::Transaction,
+    witness_utxos: &[lwk_wollet::elements::bitcoin::TxOut],
+    input_index: u32,
+    opts: impl Into<CompileOpts>,
+) -> Result<[u8; 32]> {
+    let prepared = prepare_bitcoin_covenant_input(
+        program,
+        compile_params,
+        type_hints,
+        extra_leaf_payloads,
+        tx,
+        witness_utxos,
+        input_index,
+        &opts.into(),
+    )?;
+    Ok(prepared.env.c_tx_env().sighash_all().to_byte_array())
+}
+
+/// A Bitcoin covenant input up to the point its witness is needed: the compiled program,
+/// the leaf it commits to, and the environment it runs in.
+struct PreparedBitcoinInput {
+    compiled: CompiledProgram,
+    witness_types: WitnessTypes,
+    script_cmr: simplicity::Cmr,
+    control_block: lwk_wollet::elements::bitcoin::taproot::ControlBlock,
+    env: simplicityhl::simplicity::jet::bitcoin::BitcoinEnv<
+        lwk_wollet::elements::bitcoin::Transaction,
+    >,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_bitcoin_covenant_input(
+    program: &ProgramSource,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    tx: &lwk_wollet::elements::bitcoin::Transaction,
+    witness_utxos: &[lwk_wollet::elements::bitcoin::TxOut],
+    input_index: u32,
+    opts: &CompileOpts,
+) -> Result<PreparedBitcoinInput> {
+    use lwk_wollet::elements::bitcoin as btc;
+    use simplicityhl::simplicity::jet::bitcoin::BitcoinEnv;
+
+    if opts.family != ChainFamily::Bitcoin {
+        anyhow::bail!(
+            "compile options target chain '{}' but a Bitcoin witness was requested",
+            opts.family
+        );
+    }
+
+    let source = program.text().to_owned();
+    let args_json = build_args_json(compile_params, type_hints)?;
+    let arguments: Arguments = serde_json::from_str(&args_json)
+        .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
+    let compiled = compile_program(source, arguments, opts)?;
+    let abi_meta = compiled
+        .generate_abi_meta()
+        .map_err(|e| anyhow::anyhow!("Cannot read program ABI: {e}"))?;
+
+    let commit = compiled.commit();
+    let script_cmr = commit.cmr();
+
+    // The taproot tree, folded exactly as the address derivation folds it — the control
+    // block has to reproduce the merkle root the output committed to, or the spend fails
+    // with nothing to point at.
+    let merkle_root = covenant_merkle_root(
+        program,
+        compile_params,
+        type_hints,
+        extra_leaf_payloads,
+        opts,
+    )?;
+    let mut sibling_hashes: Vec<btc::taproot::TapNodeHash> = Vec::new();
+    for payload in extra_leaf_payloads {
+        sibling_hashes.push(btc::taproot::TapNodeHash::from_byte_array(tapdata_hash(
+            payload,
+        )));
+    }
+
+    use btc::key::TapTweak as _;
+    let secp = btc::secp256k1::Secp256k1::new();
+    let nums = btc::XOnlyPublicKey::from_slice(&NUMS_KEY_BYTES).context("Invalid NUMS key")?;
+    let root = btc::taproot::TapNodeHash::from_byte_array(merkle_root);
+    let (_, parity) = nums.tap_tweak(&secp, Some(root));
+
+    let control_block = btc::taproot::ControlBlock {
+        leaf_version: btc::taproot::LeafVersion::from_consensus(SIMPLICITY_LEAF_VERSION)
+            .expect("simplicity leaf version"),
+        output_key_parity: parity,
+        internal_key: nums,
+        merkle_branch: btc::taproot::TaprootMerkleBranch::try_from(sibling_hashes)
+            .map_err(|e| anyhow::anyhow!("taproot merkle branch is too long: {e}"))?,
+    };
+
+    let env = BitcoinEnv::new(
+        tx.clone(),
+        witness_utxos,
+        input_index,
+        script_cmr,
+        control_block.clone(),
+    );
+
+    Ok(PreparedBitcoinInput {
+        compiled,
+        witness_types: abi_meta.witness_types,
+        script_cmr,
+        control_block,
+        env,
+    })
 }
 
 /// The length of the padding item a Bitcoin Simplicity spend needs, or `None` when

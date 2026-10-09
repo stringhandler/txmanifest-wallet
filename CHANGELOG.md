@@ -18,6 +18,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 - `pin` command: writes every program's current hash into a manifest without reformatting it; `pin --check` fails if any is missing or stale.
 - `validate --strict`: unpinned programs are errors rather than warnings.
 - `run --debug`: development mode. For now the same as `--allow-unpinned`; it may enable more development-only behaviour later.
+- `run --print-sighash` (Bitcoin): build the transaction, print the `sig_all_hash` each covenant input's program will check, and stop without broadcasting. For a covenant witness signed outside the wallet: sign the hash, then run again with the same `--input`, params and `fee_rate`, so the second run builds the same transaction and the signature verifies.
 
 ### Changed
 

@@ -294,6 +294,9 @@ pub fn run(
     manual_inputs: bool,
     // If set, write signed PSET + finalized tx to this path as JSON instead of broadcasting.
     export_pset_path: Option<&Path>,
+    // Bitcoin only: build the transaction, print each covenant input's `sig_all_hash`, and
+    // stop before satisfying or broadcasting anything. See `run_bitcoin_build`.
+    print_sighash: bool,
     // If true, run the jet debugger on every covenant dry-run and print each jet's I/O.
     debug_jets: bool,
     // Whether a manifest whose programs are not all pinned may run. Only the CLI's
@@ -308,6 +311,13 @@ pub fn run(
 
     let manifest: Manifest = Manifest::from_json_str(&raw)
         .with_context(|| format!("Failed to parse manifest file: {}", manifest_file.display()))?;
+
+    if print_sighash && target.network.family() != crate::chain::ChainFamily::Bitcoin {
+        anyhow::bail!(
+            "--print-sighash is only supported on Bitcoin; this run targets {}",
+            target.network
+        );
+    }
     // Refuse before anything is derived, signed or broadcast if the target cannot run
     // this manifest. `validate` cannot do this: it is offline and has no idea which node
     // the wallet points at, and Simplicity on Bitcoin is a property of the node.
@@ -2261,6 +2271,7 @@ pub fn run(
                     &req,
                     bitcoin_run,
                     export_pset_path,
+                    print_sighash,
                     &covenant_specs,
                     &params_snap,
                     &action_params_snap,
@@ -4506,6 +4517,7 @@ pub fn run_headless(
         data_dir,
         false, // manual_inputs
         Some(&export_path),
+        false, // print_sighash
         false, // debug_jets
         crate::programs::Unpinned::Refuse,
     );
@@ -4607,6 +4619,7 @@ fn run_bitcoin_build(
     req: &pset_builder::BuildPsetRequest,
     run: &crate::session::BitcoinRun,
     export_path: Option<&Path>,
+    print_sighash: bool,
     covenant_specs: &std::collections::HashMap<String, CovenantSpendSpec>,
     compile_params: &std::collections::HashMap<String, String>,
     action_params: &std::collections::HashMap<String, String>,
@@ -4674,13 +4687,43 @@ fn run_bitcoin_build(
         );
     }
 
+    let prevouts: Vec<lwk_wollet::elements::bitcoin::TxOut> =
+        psbt_req.inputs.iter().map(|i| i.witness_utxo()).collect();
+    let unsigned = built.psbt.unsigned_tx.clone();
+
+    // `--print-sighash`: the first of two runs, for a covenant witness signed outside the
+    // wallet. There is no witness yet, so stop before satisfying anything, and print what
+    // each program will read from `jet::sig_all_hash`. A second run that rebuilds this
+    // exact transaction (same inputs, outputs and fee) can then carry the signature.
+    if print_sighash {
+        if covenant_inputs.is_empty() {
+            anyhow::bail!("--print-sighash: this transaction spends no covenant input");
+        }
+        println!();
+        println!("  sig_all_hash of each covenant input (nothing was broadcast):");
+        for (index, input_id) in &covenant_inputs {
+            let spec = covenant_specs.get(input_id).ok_or_else(|| {
+                anyhow::anyhow!("covenant input '{input_id}' has no resolved program")
+            })?;
+            let hash = covenant::bitcoin_covenant_sighash(
+                &spec.program,
+                &spec.params,
+                &spec.hints,
+                &spec.leaf_payloads,
+                &unsigned,
+                &prevouts,
+                *index as u32,
+                compile_opts,
+            )
+            .with_context(|| format!("cannot compute the sighash of '{input_id}'"))?;
+            println!("    {input_id}  {}", hex_bytes(&hash));
+        }
+        return Ok(None);
+    }
+
     // Covenant inputs, once every other input's witness is settled: the Simplicity program
     // reads the whole transaction, and `sig_all_hash` commits to it.
     if !covenant_inputs.is_empty() {
-        let prevouts: Vec<lwk_wollet::elements::bitcoin::TxOut> =
-            psbt_req.inputs.iter().map(|i| i.witness_utxo()).collect();
-        let unsigned = built.psbt.unsigned_tx.clone();
-
         for (index, input_id) in &covenant_inputs {
             let spec = covenant_specs.get(input_id).ok_or_else(|| {
                 anyhow::anyhow!("covenant input '{input_id}' has no resolved program")

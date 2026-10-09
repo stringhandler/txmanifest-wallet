@@ -1,0 +1,5 @@
+{
+  "PK": "0x<from shrincs-signer pubkey>",
+  "amount_sat": "20000",
+  "fee_rate": "0.1"
+}

@@ -22,8 +22,8 @@ use lwk_wollet::elements::bitcoin::{
 use simplicityhl::simplicity::{jet::Bitcoin, BitIter, Cost, RedeemNode};
 use tx_manifest_lib::chain::ChainFamily;
 use tx_manifest_lib::covenant::{
-    compute_tapleaf_hash, finalize_bitcoin_covenant_input, program_witness_types, CompileOpts,
-    ProgramSource,
+    bitcoin_covenant_sighash, compute_tapleaf_hash, finalize_bitcoin_covenant_input,
+    program_witness_types, CompileOpts, ProgramSource,
 };
 
 fn verifier_dir() -> PathBuf {
@@ -263,4 +263,93 @@ fn wrapper_commits_to_the_key() {
     };
     let other = "0x0000000000000000000000000000000000000000000000000000000000000001";
     assert_ne!(leaf(UPSTREAM_PK), leaf(other));
+}
+
+// ── T2 + T3: a real SHRINCS-locked spend ─────────────────────────────────────
+
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/shrincs")
+        .join(name)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The public key of `fixtures/shrincs/test_seed.hex`, as
+/// `contrib/shrincs-signer/bin/shrincs-signer pubkey` prints it.
+const TEST_PK: &str = "0x202122232425262728292a2b2c2d2e2fdacfe7d7b4009ca34156124d54de2e72";
+
+/// A coin locked by the wrapper to the test key, spent with a stateful signature (q = 1)
+/// from `contrib/shrincs-signer` over the test transaction's `sig_all_hash`.
+///
+/// The signature is a fixture, so the test needs no C++ toolchain. To regenerate it, take
+/// the sighash this test reports and run, with a fresh state file at q = 0:
+///
+/// ```text
+/// printf '0\n' > /tmp/q.txt
+/// contrib/shrincs-signer/bin/shrincs-signer sign \
+///   --seed txmanifest_lib/tests/fixtures/shrincs/test_seed.hex --state /tmp/q.txt --msg <sighash>
+/// ```
+///
+/// then put `msg`, `SIG` and `OTHER_ROOT` in `fixtures/shrincs/spend_q1.json`.
+#[test]
+fn signed_spend_of_a_shrincs_locked_coin() {
+    let text = std::fs::read_to_string(fixture("spend_q1.json")).expect("read the fixture");
+    let signed: serde_json::Value = serde_json::from_str(&text).expect("fixture is JSON");
+    let params = HashMap::from([("PK".to_string(), TEST_PK.to_string())]);
+    let hints = HashMap::from([("PK".to_string(), "bytes32".to_string())]);
+    let witnesses = serde_json::json!({
+        "SIG": { "type": "simplicityhl", "value": signed["SIG"] },
+        "OTHER_ROOT": { "type": "simplicityhl", "value": signed["OTHER_ROOT"] },
+    });
+    let finalize_wrapper = |tx: &Transaction, prevouts: &[TxOut]| {
+        finalize_bitcoin_covenant_input(
+            &wrapper(),
+            &params,
+            &hints,
+            &[],
+            Some(&witnesses),
+            None,
+            tx,
+            prevouts,
+            0,
+            bitcoin(),
+        )
+    };
+
+    let (tx, prevouts) = spend();
+    let hash = bitcoin_covenant_sighash(
+        &wrapper(),
+        &params,
+        &hints,
+        &[],
+        &tx,
+        &prevouts,
+        0,
+        bitcoin(),
+    )
+    .expect("compute the sighash");
+    assert_eq!(
+        signed["msg"].as_str(),
+        Some(hex(&hash).as_str()),
+        "the fixture signs another message; regenerate it (see this test's doc comment)"
+    );
+
+    let stack = finalize_wrapper(&tx, &prevouts)
+        .unwrap_or_else(|e| panic!("the signed spend should verify: {e:#}"));
+    eprintln!("signed spend: {}", describe(&stack));
+    match node_check(&stack) {
+        Ok(cost) => eprintln!("signed spend: the node would accept it; cost bound {cost:?}"),
+        Err(why) => panic!("the node would reject the signed spend: {why}"),
+    }
+
+    // The signature covers this transaction: moved to one that pays a sat less, it fails.
+    let mut other = tx.clone();
+    other.output[0].value = Amount::from_sat(other.output[0].value.to_sat() - 1);
+    assert!(
+        finalize_wrapper(&other, &prevouts).is_err(),
+        "a signature over one transaction must not spend another"
+    );
 }
