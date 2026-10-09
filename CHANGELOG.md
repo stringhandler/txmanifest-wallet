@@ -24,6 +24,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 - `validate` errors when a manifest uses a Simplicity program in a `tapleaf` or `simf_fn` compute, or a `programs` entry, without declaring `"requires": ["simplicity"]`. Previously only covenant `utxo_types` triggered this. Add `"simplicity"` to `requires` if `validate` now reports it.
 - `validate` also checks each program file: that it exists, matches its hash, meets its compiler requirement, and declares the witnesses the manifest supplies.
 
+### Fixed
+
+- Bitcoin covenant spends whose program needs cost padding are now accepted by the node. The padding item came last, where the node expects the control block, and it was sized for every branch of the program rather than the one the spend takes, so the node rejected it as more padding than the program needs. Programs cheap enough to need no padding, such as `examples/bitcoin_covenant`, were not affected.
+
 ## [0.3.0] - 2026-10-06
 
 ### Breaking

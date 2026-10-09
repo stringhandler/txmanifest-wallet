@@ -1460,23 +1460,23 @@ fn network_to_params(network: lwk_wollet::ElementsNetwork) -> &'static AddressPa
 ///
 /// The Bitcoin counterpart of [`finalize_covenant_input`], and the same shape: compile,
 /// build the taproot control block, satisfy the program against the real transaction, and
-/// write the four-item Simplicity tapscript witness
-/// `[witness, program, cmr, control_block]`.
+/// write the Simplicity tapscript witness `[witness, program, cmr, control_block]`, with a
+/// padding item in front of it when the program needs one.
 ///
 /// Three things differ, and each is a consequence of the chain rather than a choice:
 ///
 /// - **The environment.** `BitcoinEnv` takes the spent outputs and the input index, with
 ///   no genesis hash — Bitcoin's sighash does not commit to one.
-/// - **No pruning.** SimplicityHL's `satisfy_with_env` is typed to `ElementsEnv`, so the
-///   Bitcoin path satisfies without an environment and the program keeps every branch.
-///   Harmless for a single-path program; a program with a `match` will carry dead branches
-///   into the witness, costing size and budget.
-/// - **Cost padding.** Bitcoin's Simplicity validator accepts a program only when its cost
-///   falls inside `(minCost, budget]`, and a cheap program has to be padded *up* into that
-///   window. Elements has no equivalent, so this is the one step with no counterpart
-///   above. The padding is a plain all-zero stack item; it must not be built with
-///   `Cost::get_padding_bytes`, whose Elements form is an annex (`[0x50] + zeros`) that a
-///   regular stack item's leading byte would be misread as.
+/// - **Pruning by hand.** SimplicityHL's `satisfy_with_env` is typed to `ElementsEnv`, so
+///   the Bitcoin path satisfies without an environment and then prunes the result itself
+///   with `RedeemNode::prune`, which is generic over the environment.
+/// - **Cost padding.** A program that costs more than its witness stack buys needs a
+///   padding item. On Elements that is the annex, at the end. On Bitcoin it is a plain
+///   all-zero item at the *start*: the node reads the control block, CMR, program and
+///   witness off the end of the stack and takes whatever is left as padding. The node also
+///   requires the padding to be minimal (see [`bitcoin_padding_len`]). It must not be
+///   built with `Cost::get_padding_bytes`, whose Elements form is an annex
+///   (`[0x50] + zeros`).
 #[allow(clippy::too_many_arguments)]
 pub fn finalize_bitcoin_covenant_input(
     program: &ProgramSource,
@@ -1598,17 +1598,46 @@ pub fn finalize_bitcoin_covenant_input(
         control_block.serialize(),
     ];
 
-    // Pad the cost into the validator's acceptance window, if the program is too cheap.
-    // Sized from the *satisfied* program so it reflects which branches actually run.
-    // `None` means the program's cost already falls inside the budget its witness buys, so
-    // there is nothing to pad. Padding only ever raises a *cheap* program into the window.
-    if let Some(padding) = satisfied.required_padding_bytes(&stack) {
-        if !padding.is_empty() {
-            eprintln!("[covenant] cost padding: {} bytes", padding.len());
-            stack.push(padding);
-        }
+    // Buy the budget the program's cost needs, if its witness stack does not already.
+    //
+    // Sized from the *pruned* program, the one the node runs. The satisfied program still
+    // holds the branches this spend does not take, and its bound is the largest of them:
+    // sized from it, a SHRINCS stateful spend gets the stateless branch's padding, about
+    // 31 KB too much, and the node rejects it as overweight.
+    if let Some(len) = bitcoin_padding_len(redeem.bounds().cost, &stack) {
+        eprintln!("[covenant] cost padding: {len} bytes");
+        stack.insert(0, vec![0; len]);
     }
     Ok(stack)
+}
+
+/// The length of the padding item a Bitcoin Simplicity spend needs, or `None` when
+/// `stack` already buys the budget `cost` needs.
+///
+/// The node accepts a cost in `(minCost, budget]`, where `budget` is what the whole stack
+/// buys and `minCost` is what it would buy with one byte less padding: padding must be
+/// minimal, or the spend fails with `SIMPLICITY_ERR_OVERWEIGHT`. So this is the shortest
+/// item that fits. It starts from rust-simplicity's estimate and walks to the exact answer
+/// rather than trusting the estimate where an item's CompactSize length prefix grows.
+fn bitcoin_padding_len(cost: simplicity::Cost, stack: &[Vec<u8>]) -> Option<usize> {
+    if cost.is_budget_valid(stack) {
+        return None;
+    }
+    let mut padded = Vec::with_capacity(stack.len() + 1);
+    padded.push(Vec::new());
+    padded.extend_from_slice(stack);
+    let mut fits = |len: usize| {
+        padded[0].resize(len, 0);
+        cost.is_budget_valid(&padded)
+    };
+    let mut len = cost.get_padding_size(stack).unwrap_or(0);
+    while !fits(len) {
+        len += 1;
+    }
+    while len > 0 && fits(len - 1) {
+        len -= 1;
+    }
+    Some(len)
 }
 
 /// Resolve `"type": "Signature"` witnesses against a Bitcoin environment.
