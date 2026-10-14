@@ -58,6 +58,10 @@ pub enum PsetInput {
         /// The factors this UTXO was blinded with, if it is confidential. Both halves
         /// must be present; see [`add_covenant_input`].
         blinding: Option<PinnedBlinding>,
+        /// Bitcoin only: an upper bound on this input's witness weight, from its program
+        /// (`covenant::estimate_bitcoin_covenant_witness_wu`), for the fee estimate.
+        /// `None` falls back to a fixed allowance. The Elements builder doesn't read it.
+        witness_wu: Option<usize>,
     },
 }
 
@@ -588,6 +592,8 @@ fn build_inner(
                 issuance,
                 sequence,
                 blinding,
+                // Bitcoin's fee estimate; this builder keeps its fixed allowance.
+                witness_wu: _,
             } => {
                 let idx = add_covenant_input(
                     &mut pset,

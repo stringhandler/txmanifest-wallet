@@ -1460,23 +1460,23 @@ fn network_to_params(network: lwk_wollet::ElementsNetwork) -> &'static AddressPa
 ///
 /// The Bitcoin counterpart of [`finalize_covenant_input`], and the same shape: compile,
 /// build the taproot control block, satisfy the program against the real transaction, and
-/// write the four-item Simplicity tapscript witness
-/// `[witness, program, cmr, control_block]`.
+/// write the Simplicity tapscript witness `[witness, program, cmr, control_block]`, with a
+/// padding item in front of it when the program needs one.
 ///
 /// Three things differ, and each is a consequence of the chain rather than a choice:
 ///
 /// - **The environment.** `BitcoinEnv` takes the spent outputs and the input index, with
 ///   no genesis hash — Bitcoin's sighash does not commit to one.
-/// - **No pruning.** SimplicityHL's `satisfy_with_env` is typed to `ElementsEnv`, so the
-///   Bitcoin path satisfies without an environment and the program keeps every branch.
-///   Harmless for a single-path program; a program with a `match` will carry dead branches
-///   into the witness, costing size and budget.
-/// - **Cost padding.** Bitcoin's Simplicity validator accepts a program only when its cost
-///   falls inside `(minCost, budget]`, and a cheap program has to be padded *up* into that
-///   window. Elements has no equivalent, so this is the one step with no counterpart
-///   above. The padding is a plain all-zero stack item; it must not be built with
-///   `Cost::get_padding_bytes`, whose Elements form is an annex (`[0x50] + zeros`) that a
-///   regular stack item's leading byte would be misread as.
+/// - **Pruning by hand.** SimplicityHL's `satisfy_with_env` is typed to `ElementsEnv`, so
+///   the Bitcoin path satisfies without an environment and then prunes the result itself
+///   with `RedeemNode::prune`, which is generic over the environment.
+/// - **Cost padding.** A program that costs more than its witness stack buys needs a
+///   padding item. On Elements that is the annex, at the end. On Bitcoin it is a plain
+///   all-zero item at the *start*: the node reads the control block, CMR, program and
+///   witness off the end of the stack and takes whatever is left as padding. The node also
+///   requires the padding to be minimal (see [`bitcoin_padding_len`]). It must not be
+///   built with `Cost::get_padding_bytes`, whose Elements form is an annex
+///   (`[0x50] + zeros`).
 #[allow(clippy::too_many_arguments)]
 pub fn finalize_bitcoin_covenant_input(
     program: &ProgramSource,
@@ -1490,10 +1490,226 @@ pub fn finalize_bitcoin_covenant_input(
     input_index: u32,
     opts: impl Into<CompileOpts>,
 ) -> Result<Vec<Vec<u8>>> {
+    let PreparedBitcoinInput {
+        compiled,
+        witness_types,
+        script_cmr,
+        control_block,
+        env,
+    } = prepare_bitcoin_covenant_input(
+        program,
+        compile_params,
+        type_hints,
+        extra_leaf_payloads,
+        tx,
+        witness_utxos,
+        input_index,
+        &opts.into(),
+    )?;
+
+    // Signature witnesses are computed against the environment's own sighash, exactly as
+    // on Elements — the program will recompute it with `jet::sig_all_hash`, and a
+    // signature over anything else simply does not verify.
+    let injected: Option<serde_json::Value>;
+    let effective_witnesses = if let (Some(signer), Some(w)) = (sig_signer, witnesses) {
+        injected = Some(
+            inject_bitcoin_signatures(w, &env, signer)
+                .context("Failed to compute Signature witnesses")?,
+        );
+        injected.as_ref()
+    } else {
+        witnesses
+    };
+
+    let witness_values = build_witness_values_from_types(effective_witnesses, &witness_types)
+        .context("Cannot build witness values")?;
+
+    let satisfied = compiled
+        .satisfy(witness_values)
+        .map_err(|e| anyhow::anyhow!("Covenant satisfaction failed: {e}"))?;
+
+    // Prune against the real transaction, dropping every branch this spend does not take.
+    //
+    // Not optional. Simplicity's anti-DoS rule requires a redeem program to contain no
+    // unexecuted nodes, so an unpruned program with a `match` is rejected outright —
+    // `mempool-script-verify-flag-failed (Anti-DOS check failed)`, which reads like a
+    // resource limit and is really "this program has branches you did not take".
+    //
+    // SimplicityHL's `satisfy_with_env` does this on the Elements side but is typed to
+    // `ElementsEnv`, so it cannot be used here. `RedeemNode::prune` underneath it is
+    // generic over the environment, which is what makes the Bitcoin path possible at all.
+    let redeem = satisfied
+        .redeem()
+        .prune(&env)
+        .map_err(|e| anyhow::anyhow!("Cannot prune covenant program: {e}"))?;
+
+    let (prog, witness) = redeem.to_vec_with_witness();
+    let mut stack = vec![
+        witness,
+        prog,
+        script_cmr.as_ref().to_vec(),
+        control_block.serialize(),
+    ];
+
+    // Buy the budget the program's cost needs, if its witness stack does not already.
+    //
+    // Sized from the *pruned* program, the one the node runs. The satisfied program still
+    // holds the branches this spend does not take, and its bound is the largest of them:
+    // sized from it, a SHRINCS stateful spend gets the stateless branch's padding, about
+    // 31 KB too much, and the node rejects it as overweight.
+    if let Some(len) = bitcoin_padding_len(redeem.bounds().cost, &stack) {
+        eprintln!("[covenant] cost padding: {len} bytes");
+        stack.insert(0, vec![0; len]);
+    }
+    Ok(stack)
+}
+
+/// The `sig_all_hash` a Bitcoin covenant input's program will read, for the transaction
+/// as built so far.
+///
+/// For a witness signed outside the wallet: the signer signs this, and a transaction
+/// rebuilt identically can carry the signature. The environment is the same one
+/// [`finalize_bitcoin_covenant_input`] satisfies against, so the hash is by construction
+/// the one `jet::sig_all_hash` returns there. No witness is needed to compute it, because
+/// the sighash commits to the transaction and the leaf, not to any input's witness.
+#[allow(clippy::too_many_arguments)]
+pub fn bitcoin_covenant_sighash(
+    program: &ProgramSource,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    tx: &lwk_wollet::elements::bitcoin::Transaction,
+    witness_utxos: &[lwk_wollet::elements::bitcoin::TxOut],
+    input_index: u32,
+    opts: impl Into<CompileOpts>,
+) -> Result<[u8; 32]> {
+    let prepared = prepare_bitcoin_covenant_input(
+        program,
+        compile_params,
+        type_hints,
+        extra_leaf_payloads,
+        tx,
+        witness_utxos,
+        input_index,
+        &opts.into(),
+    )?;
+    Ok(prepared.env.c_tx_env().sighash_all().to_byte_array())
+}
+
+/// An upper bound on the witness weight a Bitcoin covenant input will carry, in weight
+/// units, for the fee estimate.
+///
+/// Computed from the program alone, never from witness values. A spend whose witness is
+/// signed outside the wallet is built twice (`run --print-sighash`, then the signed run),
+/// and the two must agree on the fee, so the estimate can't depend on anything the second
+/// run knows and the first doesn't.
+///
+/// That makes it an upper bound rather than an exact figure. It satisfies the program with
+/// zero values, leaves it unpruned, and takes:
+/// - the stack: every branch of the program, the widest value of each witness's type,
+///   the CMR and the control block;
+/// - the cost bound, which is the costliest branch, as the budget padding must buy.
+///
+/// The larger of those is the estimate. A program with one path is estimated exactly,
+/// apart from witness types of variable size. One with a `match` on a witness is estimated
+/// for its heaviest branch: SHRINCS's stateful spend, for instance, is about 19 k WU, and
+/// it is estimated as its stateless branch, about 50 k WU. Overshooting costs fee;
+/// undershooting gives a transaction the network won't relay.
+pub fn estimate_bitcoin_covenant_witness_wu(
+    program: &ProgramSource,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    opts: impl Into<CompileOpts>,
+) -> Result<usize> {
+    use simplicity::dag::{DagLike, InternalSharing};
+    use simplicity::node::Inner;
+
+    let opts = opts.into();
+    let source = program.text().to_owned();
+    let args_json = build_args_json(compile_params, type_hints)?;
+    let arguments: Arguments = serde_json::from_str(&args_json)
+        .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
+    let compiled = compile_program(source, arguments, &opts)?;
+    let abi_meta = compiled
+        .generate_abi_meta()
+        .map_err(|e| anyhow::anyhow!("Cannot read program ABI: {e}"))?;
+    let zeros: HashMap<_, _> = abi_meta
+        .witness_types
+        .iter()
+        .map(|(name, ty)| (name.shallow_clone(), zero_value_for_type(ty)))
+        .collect();
+    let satisfied = compiled
+        .satisfy(WitnessValues::from(zeros))
+        .map_err(|e| anyhow::anyhow!("Cannot satisfy the program with zero values: {e}"))?;
+    let redeem = satisfied.redeem();
+
+    let (program_bytes, _) = redeem.to_vec_with_witness();
+    let witness_bits: usize = redeem
+        .as_ref()
+        .post_order_iter::<InternalSharing>()
+        .filter(|data| matches!(data.node.inner(), Inner::Witness(_)))
+        .map(|data| data.node.arrow().target.bit_width())
+        .sum();
+    // A control block is 33 bytes plus 32 for each sibling in the taproot tree.
+    let control_block = 33 + 32 * extra_leaf_payloads.len();
+    let stack = [
+        vec![0; witness_bits.div_ceil(8)],
+        program_bytes,
+        vec![0; 32],
+        vec![0; control_block],
+    ];
+    let mut stack = stack.to_vec();
+    if let Some(len) = bitcoin_padding_len(redeem.bounds().cost, &stack) {
+        stack.insert(0, vec![0; len]);
+    }
+    Ok(witness_stack_wu(&stack))
+}
+
+/// The serialized size of a witness stack, which is its weight: a CompactSize item count,
+/// then each item with a CompactSize length prefix.
+fn witness_stack_wu(stack: &[Vec<u8>]) -> usize {
+    fn compact_size(n: usize) -> usize {
+        match n {
+            0..=0xfc => 1,
+            0xfd..=0xffff => 3,
+            0x1_0000..=0xffff_ffff => 5,
+            _ => 9,
+        }
+    }
+    compact_size(stack.len())
+        + stack
+            .iter()
+            .map(|item| compact_size(item.len()) + item.len())
+            .sum::<usize>()
+}
+
+/// A Bitcoin covenant input up to the point its witness is needed: the compiled program,
+/// the leaf it commits to, and the environment it runs in.
+struct PreparedBitcoinInput {
+    compiled: CompiledProgram,
+    witness_types: WitnessTypes,
+    script_cmr: simplicity::Cmr,
+    control_block: lwk_wollet::elements::bitcoin::taproot::ControlBlock,
+    env: simplicityhl::simplicity::jet::bitcoin::BitcoinEnv<
+        lwk_wollet::elements::bitcoin::Transaction,
+    >,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_bitcoin_covenant_input(
+    program: &ProgramSource,
+    compile_params: &HashMap<String, String>,
+    type_hints: &HashMap<String, String>,
+    extra_leaf_payloads: &[Vec<u8>],
+    tx: &lwk_wollet::elements::bitcoin::Transaction,
+    witness_utxos: &[lwk_wollet::elements::bitcoin::TxOut],
+    input_index: u32,
+    opts: &CompileOpts,
+) -> Result<PreparedBitcoinInput> {
     use lwk_wollet::elements::bitcoin as btc;
     use simplicityhl::simplicity::jet::bitcoin::BitcoinEnv;
 
-    let opts = opts.into();
     if opts.family != ChainFamily::Bitcoin {
         anyhow::bail!(
             "compile options target chain '{}' but a Bitcoin witness was requested",
@@ -1505,7 +1721,7 @@ pub fn finalize_bitcoin_covenant_input(
     let args_json = build_args_json(compile_params, type_hints)?;
     let arguments: Arguments = serde_json::from_str(&args_json)
         .with_context(|| format!("Failed to parse Arguments from JSON:\n{args_json}"))?;
-    let compiled = compile_program(source, arguments, &opts)?;
+    let compiled = compile_program(source, arguments, opts)?;
     let abi_meta = compiled
         .generate_abi_meta()
         .map_err(|e| anyhow::anyhow!("Cannot read program ABI: {e}"))?;
@@ -1521,7 +1737,7 @@ pub fn finalize_bitcoin_covenant_input(
         compile_params,
         type_hints,
         extra_leaf_payloads,
-        &opts,
+        opts,
     )?;
     let mut sibling_hashes: Vec<btc::taproot::TapNodeHash> = Vec::new();
     for payload in extra_leaf_payloads {
@@ -1553,62 +1769,109 @@ pub fn finalize_bitcoin_covenant_input(
         control_block.clone(),
     );
 
-    // Signature witnesses are computed against the environment's own sighash, exactly as
-    // on Elements — the program will recompute it with `jet::sig_all_hash`, and a
-    // signature over anything else simply does not verify.
-    let injected: Option<serde_json::Value>;
-    let effective_witnesses = if let (Some(signer), Some(w)) = (sig_signer, witnesses) {
-        injected = Some(
-            inject_bitcoin_signatures(w, &env, signer)
-                .context("Failed to compute Signature witnesses")?,
-        );
-        injected.as_ref()
-    } else {
-        witnesses
-    };
+    Ok(PreparedBitcoinInput {
+        compiled,
+        witness_types: abi_meta.witness_types,
+        script_cmr,
+        control_block,
+        env,
+    })
+}
 
-    let witness_values =
-        build_witness_values_from_types(effective_witnesses, &abi_meta.witness_types)
-            .context("Cannot build witness values")?;
+/// Whether the Simplicity signet node would accept `stack` as the witness of a Simplicity
+/// leaf spend, returning the program's cost bound if so.
+///
+/// Transcribed from the node's own rules (delta1/bitcoin `simplicity-inquisition`,
+/// `src/script/interpreter.cpp`), for checking a stack without broadcasting it:
+/// - The node reads the stack from the end: the control block, the CMR, the program, the
+///   witness, and then an optional padding item. So padding comes first on the wire.
+/// - Padding must be all zeros.
+/// - The program's cost bound must fit the budget the whole stack buys.
+/// - When there is padding, the cost must *not* fit the budget the stack would buy with
+///   one byte less of it. Padding has to be minimal, or the node fails the spend with
+///   `SIMPLICITY_ERR_OVERWEIGHT`.
+///
+/// It doesn't execute the program. Pruning against the environment, as
+/// [`finalize_bitcoin_covenant_input`] does, is what runs it.
+pub fn bitcoin_node_check(stack: &[Vec<u8>]) -> std::result::Result<simplicity::Cost, String> {
+    use simplicity::{jet::Bitcoin, BitIter, RedeemNode};
 
-    let satisfied = compiled
-        .satisfy(witness_values)
-        .map_err(|e| anyhow::anyhow!("Covenant satisfaction failed: {e}"))?;
+    let n = stack.len();
+    if !(4..=5).contains(&n) {
+        return Err(format!(
+            "{n} stack items; a Simplicity spend has 4, or 5 with padding"
+        ));
+    }
+    // TAPROOT_CONTROL_BASE_SIZE + k * TAPROOT_CONTROL_NODE_SIZE, k <= 128.
+    let control = &stack[n - 1];
+    if control.len() < 33
+        || control.len() > 33 + 128 * 32
+        || !(control.len() - 33).is_multiple_of(32)
+    {
+        return Err(format!(
+            "the last item ({} B) is not a control block, so the node cannot find the leaf",
+            control.len()
+        ));
+    }
+    let program = &stack[n - 3];
+    let witness = &stack[n - 4];
+    let padding = (n == 5).then(|| &stack[0]);
+    if padding.is_some_and(|p| p.iter().any(|&b| b != 0)) {
+        return Err("the first item is padding and must be all zeros".into());
+    }
 
-    // Prune against the real transaction, dropping every branch this spend does not take.
-    //
-    // Not optional. Simplicity's anti-DoS rule requires a redeem program to contain no
-    // unexecuted nodes, so an unpruned program with a `match` is rejected outright —
-    // `mempool-script-verify-flag-failed (Anti-DOS check failed)`, which reads like a
-    // resource limit and is really "this program has branches you did not take".
-    //
-    // SimplicityHL's `satisfy_with_env` does this on the Elements side but is typed to
-    // `ElementsEnv`, so it cannot be used here. `RedeemNode::prune` underneath it is
-    // generic over the environment, which is what makes the Bitcoin path possible at all.
-    let redeem = satisfied
-        .redeem()
-        .prune(&env)
-        .map_err(|e| anyhow::anyhow!("Cannot prune covenant program: {e}"))?;
-
-    let (prog, witness) = redeem.to_vec_with_witness();
-    let mut stack = vec![
-        witness,
-        prog,
-        script_cmr.as_ref().to_vec(),
-        control_block.serialize(),
-    ];
-
-    // Pad the cost into the validator's acceptance window, if the program is too cheap.
-    // Sized from the *satisfied* program so it reflects which branches actually run.
-    // `None` means the program's cost already falls inside the budget its witness buys, so
-    // there is nothing to pad. Padding only ever raises a *cheap* program into the window.
-    if let Some(padding) = satisfied.required_padding_bytes(&stack) {
-        if !padding.is_empty() {
-            eprintln!("[covenant] cost padding: {} bytes", padding.len());
-            stack.push(padding);
+    let node = RedeemNode::decode::<_, _, Bitcoin>(
+        BitIter::from(&program[..]),
+        BitIter::from(&witness[..]),
+    )
+    .map_err(|e| format!("cannot decode the program: {e:?}"))?;
+    let cost = node.bounds().cost;
+    if !cost.is_budget_valid(stack) {
+        return Err(format!("{cost:?} exceeds the budget the stack buys"));
+    }
+    if let Some(p) = padding {
+        if !p.is_empty() {
+            let mut shorter = stack.to_vec();
+            shorter[0].pop();
+            if cost.is_budget_valid(&shorter) {
+                return Err(format!(
+                    "{cost:?} fits the budget with one byte less padding ({} B), so the \
+                     padding is not minimal",
+                    p.len()
+                ));
+            }
         }
     }
-    Ok(stack)
+    Ok(cost)
+}
+
+/// The length of the padding item a Bitcoin Simplicity spend needs, or `None` when
+/// `stack` already buys the budget `cost` needs.
+///
+/// The node accepts a cost in `(minCost, budget]`, where `budget` is what the whole stack
+/// buys and `minCost` is what it would buy with one byte less padding: padding must be
+/// minimal, or the spend fails with `SIMPLICITY_ERR_OVERWEIGHT`. So this is the shortest
+/// item that fits. It starts from rust-simplicity's estimate and walks to the exact answer
+/// rather than trusting the estimate where an item's CompactSize length prefix grows.
+fn bitcoin_padding_len(cost: simplicity::Cost, stack: &[Vec<u8>]) -> Option<usize> {
+    if cost.is_budget_valid(stack) {
+        return None;
+    }
+    let mut padded = Vec::with_capacity(stack.len() + 1);
+    padded.push(Vec::new());
+    padded.extend_from_slice(stack);
+    let mut fits = |len: usize| {
+        padded[0].resize(len, 0);
+        cost.is_budget_valid(&padded)
+    };
+    let mut len = cost.get_padding_size(stack).unwrap_or(0);
+    while !fits(len) {
+        len += 1;
+    }
+    while len > 0 && fits(len - 1) {
+        len -= 1;
+    }
+    Some(len)
 }
 
 /// Resolve `"type": "Signature"` witnesses against a Bitcoin environment.

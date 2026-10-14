@@ -332,6 +332,7 @@ mod tests {
             ),
             amount: 1_000_000,
             sequence: None,
+            witness_wu: None,
         };
         let t = tx(
             vec![out(999_700, w.script_pubkey(Branch::Receive, 3).unwrap())],
