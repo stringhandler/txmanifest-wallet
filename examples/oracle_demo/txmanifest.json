@@ -17,13 +17,14 @@
       "script": {
         "type": "simplicity",
         "source": "./oracle_mint.simf",
-        "source_hash": "sha256:5604ae17d418a3c8fb87de90df1ceb0e077febe9ae69d4a17a110f05d65b9377",
+        "source_hash": "sha256:2a14736e667e50193aa059abb3d95ecd3616d7f10c4f1631591234a003ed26f6",
         "compile_params": {
           "COLD_PUBKEY": "COLD_PUBKEY",
           "LBTC_ASSET": "LBTC_ASSET",
           "USD_ASSET": "USD_ASSET",
           "WINDOW_BLOCKS": "WINDOW_BLOCKS",
-          "TOLERANCE_BPS": "TOLERANCE_BPS"
+          "TOLERANCE_BPS": "TOLERANCE_BPS",
+          "MAX_FUTURE_SECONDS": "MAX_FUTURE_SECONDS"
         },
         "extra_leaves": [
           {
@@ -64,6 +65,11 @@
           "default": "instance.TOLERANCE_BPS",
           "description": "The challenge tolerance, in basis points."
         },
+        "MAX_FUTURE_SECONDS": {
+          "type": "u32",
+          "default": "instance.MAX_FUTURE_SECONDS",
+          "description": "How far past the chain's median time a request's statement may be dated, in seconds."
+        },
         "REQUEST_PRICE": {
           "type": "u64",
           "description": "The request's price, in US cents per BTC."
@@ -84,7 +90,7 @@
       "script": {
         "type": "simplicity",
         "source": "./oracle_mint.simf",
-        "source_hash": "sha256:5604ae17d418a3c8fb87de90df1ceb0e077febe9ae69d4a17a110f05d65b9377",
+        "source_hash": "sha256:2a14736e667e50193aa059abb3d95ecd3616d7f10c4f1631591234a003ed26f6",
         "extra_leaves": [
           {
             "type": "tapdata",
@@ -117,7 +123,7 @@
   },
   "contract_templates": {
     "oracle_mint": {
-      "description": "One mint service: a treasury of tUSDT, the cold key that certifies oracle keys, and the challenge window's length and tolerance. All five fields are compile params of oracle_mint.simf, so they fix every address the service uses. The oracle keys are not among them: a new or rotated oracle needs only a new certificate.",
+      "description": "One mint service: a treasury of tUSDT, the cold key that certifies oracle keys, and the challenge window's length and tolerance, and how far ahead a statement may be dated. All six fields are compile params of oracle_mint.simf, so they fix every address the service uses. The oracle keys are not among them: a new or rotated oracle needs only a new certificate.",
       "fields": {
         "COLD_PUBKEY": {
           "type": "pubkey"
@@ -133,6 +139,9 @@
         },
         "TOLERANCE_BPS": {
           "type": "u64"
+        },
+        "MAX_FUTURE_SECONDS": {
+          "type": "u32"
         }
       },
       "actions": {
@@ -166,6 +175,11 @@
               "type": "u64",
               "default": "50",
               "description": "How far a newer statement's price may differ from a request's, in basis points of the request's price, before it can cancel the request. 50 is 0.5%."
+            },
+            "MAX_FUTURE_SECONDS": {
+              "type": "u32",
+              "default": "300",
+              "description": "How far past the chain's median time a request's statement may be dated, in seconds. Liquid's median time runs about 5-6 minutes behind the clock, so 300 lets a fresh statement be used within about a minute, while a forged one can't be dated past the present."
             }
           },
           "inputs": [
@@ -237,12 +251,13 @@
               "LBTC_ASSET": "$params.LBTC_ASSET",
               "USD_ASSET": "$params.USD_ASSET",
               "WINDOW_BLOCKS": "$params.WINDOW_BLOCKS",
-              "TOLERANCE_BPS": "$params.TOLERANCE_BPS"
+              "TOLERANCE_BPS": "$params.TOLERANCE_BPS",
+              "MAX_FUTURE_SECONDS": "$params.MAX_FUTURE_SECONDS"
             }
           }
         },
         "RequestMint": {
-          "$comment": "Outputs 0-2 are the ones the treasury checks, in this order. Generate the params with fake_oracle.py request-params, which takes the statement and the certificate for the key that signed it.",
+          "$comment": "Outputs 0-2 are the ones the treasury checks, in this order. The lock time is what proves the statement isn't dated more than MAX_FUTURE_SECONDS ahead of the chain; until the chain's median time passes it, the node refuses the transaction as non-final. Generate the params with fake_oracle.py request-params, which takes the statement and the certificate for the key that signed it.",
           "description": "Step 1 of a mint: present a signed price statement, lock the L-BTC to burn and reserve the tUSDT it buys at that price. Opens the challenge window.",
           "intent": "request {params.USD_AMOUNT} tUSDT for {params.REQUEST_LBTC_AMOUNT} L-BTC at {params.REQUEST_PRICE} cents per BTC",
           "params": {
@@ -317,6 +332,9 @@
               "type": "u64",
               "compute": "params.REQUEST_LBTC_AMOUNT * params.REQUEST_PRICE / 100"
             }
+          },
+          "lock_time": {
+            "time": "params.REQUEST_TIMESTAMP - instance.MAX_FUTURE_SECONDS"
           },
           "inputs": [
             {

@@ -85,6 +85,24 @@ certificate.
   a program can't read. An expired certificate still covers its own old statements, which
   is harmless: they are stale, so any current statement can challenge them.
 
+### Statements dated in the future
+
+A certificate alone doesn't limit what a leaked oracle key can do. It could sign a
+statement dated at the end of its certificate's range, weeks ahead, at any price. No
+honest statement is newer, so nothing could challenge the request before it finalized.
+
+So a request's transaction carries a lock time of `timestamp - MAX_FUTURE_SECONDS`, and
+the covenant checks it (`check_lock_time`). Consensus only mines a time-locked
+transaction once the chain's median time past is beyond its lock time, so a statement
+can be dated at most `MAX_FUTURE_SECONDS` ahead of the chain, and any fresh statement can
+challenge a forged one. Before that point the node refuses the transaction as
+`non-final`.
+
+Liquid's median time runs 5–6 minutes behind the clock, so the default of 300 seconds
+means a fresh statement can be used within about a minute, while a forged one can't be
+dated past the present. A larger value removes the wait but lets a forged statement be
+dated that much further ahead, and the window has to grow to match.
+
 ## How it works
 
 One program, [`oracle_mint.simf`](oracle_mint.simf), holds two kinds of address, told apart
@@ -126,7 +144,7 @@ chosen its input.
 ## Running it on Liquid testnet
 
 You need a funded Liquid testnet wallet (see the [quick start](../../README.md#quick-start-liquid-testnet)).
-Each request below burns 5,000 sat. `run` asks for a fee rate and confirms before each
+Each request below locks 5,000 sat; the honest one burns it and the others are refunded. `run` asks for a fee rate and confirms before each
 broadcast; after each one, wait for it to confirm and `sync` before the next.
 
 ```sh
@@ -141,7 +159,7 @@ certificate for the oracle key with the cold key. `IssueUSDT` writes
 `CreateTreasury` asks for it, for the amount to lock (`SUPPLY`; lock all of it, by default
 100000000000000), and for `COLD_PUBKEY`, which `fake_oracle.py cold-keygen` printed when
 the key was made: `b895fcd559365049a2602890e406a3114ffe7b482beddc09686ecd2586cfbcd3` for
-the committed one. The window and tolerance have defaults.
+the committed one. The window, tolerance and `MAX_FUTURE_SECONDS` have defaults.
 
 ```sh
 python3 fake_oracle.py certify --valid-from $(( $(date +%s) - 7200 )) --out cert.json
@@ -163,6 +181,9 @@ python3 fake_oracle.py request-params now.json --cert cert.json --lbtc-amount 50
 
 $TXM run txmanifest.json RequestMint --wallet $W --params request.json \
   --instance txmanifest.instance.1.json --state txmanifest.state.1.json
+
+# If the node refuses the request as non-final, the chain's median time hasn't caught up
+# with the statement yet; run it again in a minute.
 
 # Finalize before 5 blocks have passed and the node refuses it: non-BIP68-final.
 $TXM run txmanifest.json Finalize --wallet $W --params request.json \
@@ -188,16 +209,48 @@ $TXM run txmanifest.json Challenge --wallet $W --params challenge.json \
 A challenge with a statement within the tolerance (0.5% by default), or one no newer than
 the request's, fails the covenant's dry run and is never broadcast.
 
+**4. A second oracle.** Make another oracle key and certify it. Its statements are as good
+as the first oracle's, with no change to the service: here it challenges a request the
+first oracle signed.
+
+```sh
+python3 fake_oracle.py keygen --out oracle_b.json
+python3 fake_oracle.py certify --oracle-key oracle_b.json --out cert_b.json
+
+python3 fake_oracle.py sign --price 84231.50 --out now.json
+python3 fake_oracle.py request-params now.json --cert cert.json --lbtc-amount 5000 --recipient <address> --out request2.json
+$TXM run txmanifest.json RequestMint --wallet $W --params request2.json \
+  --instance txmanifest.instance.1.json --state txmanifest.state.5.json
+
+python3 fake_oracle.py sign --key oracle_b.json --price 85500.00 --out b.json
+python3 fake_oracle.py challenge-params request2.json b.json --cert cert_b.json --out challenge_b.json
+$TXM run txmanifest.json Challenge --wallet $W --params challenge_b.json \
+  --instance txmanifest.instance.1.json --state txmanifest.state.6.json
+```
+
+### A run on Liquid testnet
+
+| Step | Transaction |
+|------|-------------|
+| `IssueUSDT` | [`e1578ccc…f2df`](https://liquid.network/testnet/tx/e1578ccc5fd520edfab33293751b7d9d908ce6524a3cb9686102b4a64e6df2df) |
+| `CreateTreasury` | [`fff533b8…16fb`](https://liquid.network/testnet/tx/fff533b895423ce1113022afa1f7592fb6c2fdc808243fd286afd39fdb0e16fb) |
+| `RequestMint` at 84231.50 | [`0986f107…8480`](https://liquid.network/testnet/tx/0986f107a58912e0b95af1b811ce8332db066d35100221fae75e508832478480) |
+| `RequestMint` with a statement dated an hour ahead | refused by the node: `non-final` |
+| `Finalize`: 4.211575 tUSDT paid, 5,000 sat burned | [`73a7b3e0…0005`](https://liquid.network/testnet/tx/73a7b3e0b7b73b6c894f0f6de11a7a39e695e01203b22800b0b3dba512010005) |
+| `RequestMint` at a stale 95000.00 | [`688a7913…0956`](https://liquid.network/testnet/tx/688a79138a45dd8fcd9546698b6cf9027bf4ba2cc01431fae69ea9a4e4fd0956) |
+| `Challenge` at 84231.50: 2,000 sat refunded, 1.9 tUSDT back to the treasury | [`048e1905…0302`](https://liquid.network/testnet/tx/048e1905264c97bcfc8323d4c19bbbf56b305bc2c71769a70856c57ed9a50302) |
+| `RequestMint` at 84231.50, signed by the first oracle | [`0aef98c6…4bd6`](https://liquid.network/testnet/tx/0aef98c62bbde15501146808b99852878723e185603e75a990d0a9b22a394bd6) |
+| `Challenge` at 85500.00, signed by a second oracle certified after deployment | [`cf642a34…4a2a`](https://liquid.network/testnet/tx/cf642a343b7ad5fc080a27cf6f2dfbdb05bf567c534b16cfd1fc0fea53fb4a2a) |
+
 ## Limitations
 
 - **A request can be challenged until it is finalized, not only during the window.** A
   program can't require that a height has *not* been reached. If the price moves past the
   tolerance after the window but before `Finalize`, an honest request can still be
   cancelled. The user loses only fees, and finalizing promptly avoids it.
-- **A leaked oracle key can date statements in the future.** Its certificate lets it sign
-  any timestamp up to `valid_until`, and a request at a timestamp no honest statement has
-  reached yet can't be challenged until one does, by which time it may be finalized.
-  Short certificates narrow this; they don't close it.
+- **A leaked oracle key can still cancel honest requests** with forged newer statements,
+  until its certificate expires. Users lose only fees. Its forged requests can always be
+  challenged, as long as an honest oracle is publishing and someone is watching.
 - **The cold key is trusted completely.** Whoever holds it can certify their own oracle.
   It is used rarely and can be a committee, but there is no check beyond its signature.
 - **One statement per request.** There is no quorum of oracles and no reward for a
@@ -219,6 +272,8 @@ It covers forged prices, a `|` hidden in a text field, a finalize before the win
 challenge within the tolerance or with an older statement, a second treasury UTXO spent
 alongside a request, and the execution budget of each path. For certificates: a statement
 outside its certificate's range, a certificate from another key, for another oracle, or
-with its range altered, and a challenge from an oracle certified after the request. The
+with its range altered, and a challenge from an oracle certified after the request. And
+for the lock time: one that lets a statement be dated further ahead, none at all, a
+height, and a lock time with every input final. The
 statements in `data/` carry the certificate `fake_oracle.py` made, so the program checks the
 script's BIP340 signer.

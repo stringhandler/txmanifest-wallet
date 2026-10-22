@@ -6,7 +6,8 @@
 //! a forged or stale statement, a challenge within tolerance, a finalize before the
 //! window, and a second treasury UTXO riding along with a request. And for the cold-key
 //! certificates: a statement outside its certificate's range, a certificate from the
-//! wrong key or for another oracle, and a challenge from an oracle certified later.
+//! wrong key or for another oracle, and a challenge from an oracle certified later. And a
+//! request whose lock time doesn't bound its statement's timestamp.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -35,6 +36,9 @@ const USD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const WINDOW_BLOCKS: u32 = 5;
 const SUPPLY: u64 = 1_000_000_000_000_000;
 const LBTC_AMOUNT: u64 = 100_000;
+const MAX_FUTURE_SECONDS: u32 = 300;
+/// The `nSequence` the wallet gives an input when the transaction has a lock time.
+const ENABLE_LOCKTIME: u32 = 0xffff_fffe;
 
 fn example_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/oracle_demo")
@@ -286,6 +290,7 @@ impl Service {
             ("USD_ASSET".into(), USD.into()),
             ("WINDOW_BLOCKS".into(), WINDOW_BLOCKS.to_string()),
             ("TOLERANCE_BPS".into(), "50".into()),
+            ("MAX_FUTURE_SECONDS".into(), MAX_FUTURE_SECONDS.to_string()),
         ]);
         let hints = HashMap::from([
             ("COLD_PUBKEY".into(), "pubkey".into()),
@@ -293,6 +298,7 @@ impl Service {
             ("USD_ASSET".into(), "liquid.asset_id".into()),
             ("WINDOW_BLOCKS".into(), "u16".into()),
             ("TOLERANCE_BPS".into(), "u64".into()),
+            ("MAX_FUTURE_SECONDS".into(), "u32".into()),
         ]);
         Self {
             program: program(),
@@ -488,12 +494,13 @@ fn tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
 // Request
 // ---------------------------------------------------------------------------
 
-/// A request transaction, its spent outputs, and the treasury leaf.
+/// A request transaction, its spent outputs, and the treasury leaf. Its lock time is the
+/// earliest the statement allows, `timestamp - MAX_FUTURE_SECONDS`, as the manifest sets.
 fn request_tx(svc: &Service, req: &Request, usd_amount: u64) -> (Transaction, Vec<TxOut>, Vec<u8>) {
     let (treasury, treasury_leaf) = svc.treasury();
     let (pending, _) = svc.pending(req);
-    let tx = tx(
-        vec![txin(1, 0xffff_ffff), txin(2, 0xffff_ffff)],
+    let mut tx = tx(
+        vec![txin(1, ENABLE_LOCKTIME), txin(2, ENABLE_LOCKTIME)],
         vec![
             txout(&pending, LBTC, req.lbtc_amount),
             txout(&pending, USD, usd_amount),
@@ -502,6 +509,7 @@ fn request_tx(svc: &Service, req: &Request, usd_amount: u64) -> (Transaction, Ve
             fee(500),
         ],
     );
+    tx.lock_time = LockTime::from_consensus(req.timestamp as u32 - MAX_FUTURE_SECONDS);
     let utxos = vec![
         txout(&treasury, USD, SUPPLY),
         txout(&wallet_script(), LBTC, 400_000),
@@ -570,11 +578,11 @@ fn request_refuses_a_separator_inside_a_text_field() {
         "84231.50",
         "okx|median|1741514400",
         "482910",
-        "9999999999",
+        "4000000000",
         "0",
     );
     let req = Request::from_statement(&st);
-    assert_eq!(req.timestamp, 9_999_999_999);
+    assert_eq!(req.timestamp, 4_000_000_000);
     let (tx, utxos, leaf) = request_tx(&svc, &req, req.usd_amount());
     assert_rejected(svc.run(
         &leaf,
@@ -589,7 +597,7 @@ fn request_refuses_a_separator_inside_a_text_field() {
         "84231.50",
         "okx,median,1741514400",
         "482910",
-        "9999999999",
+        "4000000000",
         "0",
     );
     let req = Request::from_statement(&st);
@@ -802,6 +810,38 @@ fn challenge_with_an_older_statement_is_refused() {
     assert_rejected(challenge(&svc, &req, "request"));
 }
 
+#[test]
+fn request_refuses_a_statement_dated_ahead_of_its_lock_time() {
+    // Each of these lets the transaction be mined while the statement's timestamp is more
+    // than MAX_FUTURE_SECONDS past the chain's median time, or doesn't lock at all.
+    let svc = Service::new();
+    let st = statement("request");
+    let req = Request::from_statement(&st);
+    let refused = |edit: &dyn Fn(&mut Transaction)| {
+        let (mut tx, utxos, leaf) = request_tx(&svc, &req, req.usd_amount());
+        edit(&mut tx);
+        assert_rejected(svc.run(
+            &leaf,
+            witnesses("Left(Left(()))", Some(&req), Some(&st)),
+            &tx,
+            &utxos,
+            0,
+        ));
+    };
+    let earliest = req.timestamp as u32 - MAX_FUTURE_SECONDS;
+
+    refused(&|tx| tx.lock_time = LockTime::from_consensus(earliest - 1));
+    refused(&|tx| tx.lock_time = LockTime::ZERO);
+    // A height, which the chain compares against blocks, not time.
+    refused(&|tx| tx.lock_time = LockTime::from_consensus(2_670_000));
+    // A lock time is ignored when every input is final.
+    refused(&|tx| {
+        for input in &mut tx.input {
+            input.sequence = Sequence::MAX;
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Certificates
 // ---------------------------------------------------------------------------
@@ -959,4 +999,28 @@ fn every_path_fits_its_budget() {
         0,
     )
     .unwrap();
+}
+
+#[test]
+fn the_testnet_treasury_address_is_unchanged() {
+    // The treasury from the README's testnet run. A change to oracle_mint.simf that moves
+    // its CMR moves this address, and strands that run's tUSDT.
+    let mut svc = Service::new();
+    svc.params.insert(
+        "USD_ASSET".into(),
+        "625690ab2153a80490ea5c3b1a654f929510e0863049f4f9c24da75fb35faade".into(),
+    );
+    let address = covenant::compute_covenant_address(
+        &svc.program,
+        &svc.params,
+        &svc.hints,
+        &[vec![0]],
+        ElementsNetwork::LiquidTestnet,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        address.to_string(),
+        "tex1p5nmq7g24yfsyv3u770vuuwfqxtth0jxysq5j9dr2pm3ndjrw9ldq09umnk"
+    );
 }

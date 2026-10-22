@@ -31,6 +31,10 @@
  * key, signs certificates that let an oracle key sign statements timestamped within a
  * range, and each statement comes with one. A new or rotated oracle needs a new
  * certificate, not a new program.
+ *
+ * A request's statement may not be dated more than MAX_FUTURE_SECONDS past the chain's
+ * median time, enforced through the transaction's lock time, so even a leaked oracle key
+ * can't sign a request that no honest statement is newer than.
  */
 
 // ============================================================================
@@ -200,6 +204,21 @@ fn burn_script_hash() -> u256 {
     0x189f40034be7a199f1fa9891668ee3ab6049f82d38c68be70f596eab2e1857b7
 }
 
+/// Assert that `timestamp` is less than MAX_FUTURE_SECONDS past the chain's median time.
+///
+/// A program can't read the time, but a transaction whose lock time is a time can only be
+/// mined once the chain's median time past is beyond it. Demanding a lock time of at least
+/// `timestamp - MAX_FUTURE_SECONDS` therefore bounds how far ahead of the chain a request's
+/// statement can be dated. Without it, a leaked oracle key could date a request past every
+/// honest statement, and nobody could challenge it until real time caught up.
+fn ensure_not_from_the_future(timestamp: u64) {
+    let (high, timestamp): (u32, u32) = <u64>::into(timestamp);
+    assert!(jet::is_zero_32(high));
+    let (borrow, earliest): (bool, u32) = jet::subtract_32(timestamp, param::MAX_FUTURE_SECONDS);
+    assert!(not(borrow));
+    jet::check_lock_time(earliest);
+}
+
 /// Assert that WINDOW_BLOCKS have passed since this input was confirmed.
 ///
 /// This reads the input's own nSequence, which BIP68 enforces input by input. It avoids
@@ -367,6 +386,7 @@ fn request_path(statement: Statement, recipient: u256) {
     assert!(jet::eq_256(get_input_script_hash(0), treasury));
 
     let (price, timestamp): (u64, u64) = verify_statement(statement);
+    ensure_not_from_the_future(timestamp);
     let (lbtc, lbtc_amount): (u256, u64) = get_output_explicit_asset_amount(0);
     assert!(jet::eq_256(lbtc, param::LBTC_ASSET));
     let pending: u256 = pending_script_hash((price, timestamp, lbtc_amount, recipient));
