@@ -40,6 +40,12 @@ unless it uses a Simplicity program without declaring `simplicity`.
   compiler-version requirement; a manifest is pinned when all its programs are. Wallets
   must refuse unpinned manifests and programs that don't match their hash. Tools may
   accept them for development.
+- **`lock_time` on actions**: `{"height": <expr>}` or `{"time": <expr>}` sets the
+  transaction's `nLockTime`, which the `check_lock_height` and `check_lock_time` jets read.
+  A height must be below 500,000,000 and a time (unix seconds) at least that, since
+  consensus tells them apart by size. A lock time is ignored when every input is final,
+  so each input that gives no `sequence` gets `0xfffffffe`. Without `lock_time`,
+  `nLockTime` is zero.
 
 ### Rules
 

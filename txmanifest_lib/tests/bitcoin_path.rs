@@ -86,6 +86,7 @@ fn a_scanned_utxo_becomes_a_signed_transaction() {
         fee_rate: 2.0,
         policy_asset: bitcoin_policy_asset(),
         change_assets: std::collections::HashSet::from([bitcoin_policy_asset()]),
+        lock_time: None,
     };
 
     // 3. Narrow to Bitcoin.
@@ -244,6 +245,7 @@ fn a_covenant_input_is_refused_rather_than_left_unsigned() {
         fee_rate: 1.0,
         policy_asset: bitcoin_policy_asset(),
         change_assets: std::collections::HashSet::from([bitcoin_policy_asset()]),
+        lock_time: None,
     };
 
     // It narrows and builds — a covenant output is a perfectly ordinary P2TR input at this
@@ -339,6 +341,7 @@ fn the_fee_keyword_is_estimable_on_bitcoin() {
         fee_rate: 2.0,
         policy_asset: bitcoin_policy_asset(),
         change_assets: Default::default(),
+        lock_time: None,
     };
 
     let psbt_req = psbt_builder::from_pset_request(&req, None).expect("narrows");

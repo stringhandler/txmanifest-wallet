@@ -68,6 +68,39 @@ fn encode_sequence(spec: &serde_json::Value, ctx: &ExecutionContext) -> Result<u
     }
 }
 
+/// Consensus reads an `nLockTime` below this as a block height, and from it up as unix
+/// seconds.
+const LOCKTIME_THRESHOLD: u64 = 500_000_000;
+
+/// Resolve an action's `lock_time` to a raw `nLockTime`, refusing a value that consensus
+/// would read as the other kind.
+fn encode_lock_time(spec: &crate::manifest::LockTime, ctx: &ExecutionContext) -> Result<u32> {
+    use crate::manifest::LockTime;
+    match spec {
+        LockTime::Height(v) => {
+            let height = eval::eval_amount(v, ctx).context("evaluating lock_time.height")?;
+            if height >= LOCKTIME_THRESHOLD {
+                anyhow::bail!(
+                    "lock_time.height {height} is not below {LOCKTIME_THRESHOLD}, so consensus \
+                     would read it as a time"
+                );
+            }
+            Ok(height as u32)
+        }
+        LockTime::Time(v) => {
+            let time = eval::eval_amount(v, ctx).context("evaluating lock_time.time")?;
+            if time < LOCKTIME_THRESHOLD {
+                anyhow::bail!(
+                    "lock_time.time {time} is below {LOCKTIME_THRESHOLD}, so consensus would \
+                     read it as a block height"
+                );
+            }
+            u32::try_from(time)
+                .map_err(|_| anyhow::anyhow!("lock_time.time {time} does not fit in 32 bits"))
+        }
+    }
+}
+
 /// Resolve `inp.sequence` (if present) to a raw nSequence, warning loudly if it would
 /// silently disable the relative timelock the user asked for.
 fn resolve_input_sequence(inp: &Input, ctx: &ExecutionContext) -> Result<Option<u32>> {
@@ -2092,8 +2125,24 @@ pub fn run(
             }
         }
 
+        let lock_time = match action.lock_time.as_ref() {
+            None => Ok(None),
+            Some(spec) => encode_lock_time(spec, &ctx).map(Some),
+        };
+        let lock_time_ok = match &lock_time {
+            Ok(Some(lt)) => {
+                println!("  · nLockTime = {lt}");
+                true
+            }
+            Ok(None) => true,
+            Err(e) => {
+                println!("  {} {e:#}", style("[error]").red());
+                false
+            }
+        };
+
         // ---- Build PSET ----
-        if collect_inputs_ok && collect_outputs_ok {
+        if collect_inputs_ok && collect_outputs_ok && lock_time_ok {
             // Change is permitted per ASSET: by an explicit `destination: "change"`
             // output (collected while resolving outputs, above), or by the action's
             // `allow_change` setting, which covers surpluses that cannot be predicted —
@@ -2120,6 +2169,7 @@ pub fn run(
                 fee_rate: fee_rate as f32,
                 policy_asset: actx.policy_asset(),
                 change_assets: change_assets.clone(),
+                lock_time: lock_time.ok().flatten(),
             };
 
             // Resolve the `fee` keyword: estimate the fee from the current (fee=0)
@@ -4996,6 +5046,25 @@ mod tests {
     use super::*;
     use crate::manifest::{ComputeSpec, InstanceCreate};
     use std::collections::BTreeMap;
+
+    /// `nLockTime` means a height below 500,000,000 and a time from there up, so each key
+    /// refuses a value consensus would read as the other.
+    #[test]
+    fn a_lock_time_must_be_the_kind_its_key_says() {
+        use crate::manifest::LockTime;
+        use serde_json::json;
+
+        let mut ctx = ExecutionContext::new();
+        ctx.set_param("T", "1800000000");
+        let time = |v| encode_lock_time(&LockTime::Time(v), &ctx);
+        let height = |v| encode_lock_time(&LockTime::Height(v), &ctx);
+
+        assert_eq!(time(json!("params.T - 300")).unwrap(), 1_799_999_700);
+        assert_eq!(height(json!(2_670_000)).unwrap(), 2_670_000);
+        assert!(height(json!("params.T")).is_err());
+        assert!(time(json!(2_670_000)).is_err());
+        assert!(time(json!(5_000_000_000u64)).is_err());
+    }
 
     /// `confidential: false` must beat a confidential address's own blinding key.
     ///
