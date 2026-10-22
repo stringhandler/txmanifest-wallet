@@ -36,7 +36,7 @@ format, signed with secp256k1 ECDSA over the sha256 of a canonical string:
 
 The statements here are fake. [`fake_oracle.py`](fake_oracle.py) signs them with a local
 test key, [`data/example_oracle_key.json`](data/example_oracle_key.json), which is public: anyone can sign
-"oracle" statements with it. Use it on testnet only.
+"oracle" statements with it. Use it on testnet only. The same goes for the cold key below.
 
 The covenant verifies the string itself. It cannot split a string, so the witness carries
 the variable fields already separated (price digits, sources, method, timestamp, nonce),
@@ -48,6 +48,42 @@ move a field boundary to make some other number read as the timestamp. The ECDSA
 [simplicityhl-std](https://github.com/BlockstreamResearch/simplicityhl-std) that is not
 yet upstream. It is copied into the program because the wallet compiles each program from
 a single file.
+
+## Which oracle keys count
+
+The service doesn't fix an oracle key. It fixes a **cold key**, `COLD_PUBKEY`, which
+certifies oracle keys: a BIP340 signature saying "this oracle key may sign statements
+timestamped from `valid_from` to `valid_until`". Each statement is presented with the
+certificate for the key that signed it, and the covenant checks both signatures and that
+the statement's timestamp is in range. Request and challenge statements can come from
+different certified keys.
+
+```json
+{
+  "oracle_pubkey": "02917e9826b0e7a61f695a5bb1a37714d1d742da025f4127c48892f3e4dbce8ba0",
+  "valid_from": 1741500000,
+  "valid_until": 1744092000,
+  "cold_pubkey": "b895fcd559365049a2602890e406a3114ffe7b482beddc09686ecd2586cfbcd3",
+  "signature": "…",
+  "scheme": "bip340",
+  "tag": "oracle-demo/oracle-cert/v1"
+}
+```
+
+The cold key signs `tagged_hash("oracle-demo/oracle-cert/v1", pubkey ‖ valid_from ‖
+valid_until)`, the key in its 33-byte compressed form and the times as 8-byte big-endian
+integers. The tag keeps any other signature by the cold key from passing for a
+certificate.
+
+- **A new or rotated oracle needs a new certificate, not a new deployment.** The oracle
+  takes no part: the cold key certifies whatever key the oracle already publishes.
+- **The cold key can be a committee.** A MuSig2 or FROST aggregate key signs like any
+  other BIP340 key, so `M`-of-`N` approval needs no change to the program.
+- **Revocation is expiry.** Nothing on chain can say a certificate was withdrawn, so keep
+  certificates short-lived, with the next one issued before the last expires.
+- **The range is checked against the statement's timestamp, not the chain's time**, which
+  a program can't read. An expired certificate still covers its own old statements, which
+  is harmless: they are stale, so any current statement can challenge them.
 
 ## How it works
 
@@ -61,9 +97,9 @@ by a tapdata leaf beside the program leaf:
 
 | Action | Spends | Creates | The covenant checks |
 |--------|--------|---------|---------------------|
-| `RequestMint` | treasury (input 0), wallet L-BTC | pending L-BTC, pending tUSDT, treasury change | the statement's signature; that the tUSDT is `L-BTC × price` and both outputs pay the request's pending address |
+| `RequestMint` | treasury (input 0), wallet L-BTC | pending L-BTC, pending tUSDT, treasury change | the statement and its certificate; that the tUSDT is `L-BTC × price` and both outputs pay the request's pending address |
 | `Finalize` | pending L-BTC (input 0), pending tUSDT (input 1) | tUSDT to the recipient, L-BTC burned | that input 0 is at least `WINDOW_BLOCKS` old, through its own `nSequence` |
-| `Challenge` | pending L-BTC (input 0), pending tUSDT (input 1) | L-BTC refund, tUSDT to the treasury | a newer statement, whose price differs from the request's by more than `TOLERANCE_BPS` |
+| `Challenge` | pending L-BTC (input 0), pending tUSDT (input 1) | L-BTC refund, tUSDT to the treasury | a newer certified statement, whose price differs from the request's by more than `TOLERANCE_BPS` |
 
 The tUSDT input of a pending pair only checks that it sits beside its L-BTC at input 0,
 which checks the whole transaction. That shortcut is refused at the treasury address,
@@ -84,8 +120,8 @@ chosen its input.
 | [`txmanifest.json`](txmanifest.json) | The mint service: `CreateTreasury`, `RequestMint`, `Finalize`, `Challenge`. |
 | [`oracle_mint.simf`](oracle_mint.simf) | The covenant. |
 | [`issue_usdt/txmanifest.json`](issue_usdt/txmanifest.json) | Issues the tUSDT supply: `IssueUSDT`. |
-| [`fake_oracle.py`](fake_oracle.py) | Signs statements, verifies them, and turns them into `--params` files. Needs `pip install ecdsa`. |
-| [`data/`](data) | The test oracle key and the signed statements the tests use. |
+| [`fake_oracle.py`](fake_oracle.py) | Signs statements, certifies oracle keys with the cold key, verifies both, and turns them into `--params` files. Needs `pip install ecdsa`. |
+| [`data/`](data) | The test oracle and cold keys, the oracle's certificate, and the signed statements the tests use. |
 
 ## Running it on Liquid testnet
 
@@ -99,15 +135,16 @@ TXM=tx-manifest-wallet
 cd examples/oracle_demo
 ```
 
-**1. Issue tUSDT and start the service.** `IssueUSDT` writes
+**1. Certify the oracle, issue tUSDT and start the service.** `certify` signs a 30-day
+certificate for the oracle key with the cold key. `IssueUSDT` writes
 `issue_usdt/txmanifest.instance.1.json`; its `USD_ASSET` is the new asset id.
 `CreateTreasury` asks for it, for the amount to lock (`SUPPLY`; lock all of it, by default
-100000000000000), and for the oracle key, which `fake_oracle.py keygen` printed when the key
-was made. For the committed key, the prefix is `2` and the x-coordinate is
-`917e9826b0e7a61f695a5bb1a37714d1d742da025f4127c48892f3e4dbce8ba0`. The window and
-tolerance have defaults.
+100000000000000), and for `COLD_PUBKEY`, which `fake_oracle.py cold-keygen` printed when
+the key was made: `b895fcd559365049a2602890e406a3114ffe7b482beddc09686ecd2586cfbcd3` for
+the committed one. The window and tolerance have defaults.
 
 ```sh
+python3 fake_oracle.py certify --valid-from $(( $(date +%s) - 7200 )) --out cert.json
 $TXM run issue_usdt/txmanifest.json IssueUSDT --wallet $W
 $TXM sync --wallet $W
 $TXM run txmanifest.json CreateTreasury --wallet $W
@@ -122,7 +159,7 @@ from `$TXM info --wallet $W`.
 
 ```sh
 python3 fake_oracle.py sign --price 84231.50 --out now.json
-python3 fake_oracle.py request-params now.json --lbtc-amount 5000 --recipient <address> --out request.json
+python3 fake_oracle.py request-params now.json --cert cert.json --lbtc-amount 5000 --recipient <address> --out request.json
 
 $TXM run txmanifest.json RequestMint --wallet $W --params request.json \
   --instance txmanifest.instance.1.json --state txmanifest.state.1.json
@@ -138,12 +175,12 @@ wallet can send it.
 
 ```sh
 python3 fake_oracle.py sign --price 95000.00 --timestamp $(( $(date +%s) - 3600 )) --out stale.json
-python3 fake_oracle.py request-params stale.json --lbtc-amount 5000 --recipient <address> --out stale-request.json
+python3 fake_oracle.py request-params stale.json --cert cert.json --lbtc-amount 5000 --recipient <address> --out stale-request.json
 $TXM run txmanifest.json RequestMint --wallet $W --params stale-request.json \
   --instance txmanifest.instance.1.json --state txmanifest.state.3.json
 
 python3 fake_oracle.py sign --price 84231.50 --out now.json
-python3 fake_oracle.py challenge-params stale-request.json now.json --out challenge.json
+python3 fake_oracle.py challenge-params stale-request.json now.json --cert cert.json --out challenge.json
 $TXM run txmanifest.json Challenge --wallet $W --params challenge.json \
   --instance txmanifest.instance.1.json --state txmanifest.state.4.json
 ```
@@ -151,25 +188,20 @@ $TXM run txmanifest.json Challenge --wallet $W --params challenge.json \
 A challenge with a statement within the tolerance (0.5% by default), or one no newer than
 the request's, fails the covenant's dry run and is never broadcast.
 
-### A run on Liquid testnet
-
-| Step | Transaction |
-|------|-------------|
-| `IssueUSDT` | [`67ed381d…a72c`](https://liquid.network/testnet/tx/67ed381d6ff6566b73d209141a68c586f56e2b8942106903a8736c9ec251a72c) |
-| `CreateTreasury` | [`6043ee78…c1d1`](https://liquid.network/testnet/tx/6043ee78ab30fe90957f5a5d8112211a606f8d06e74c6b08477605e5b29ac1d1) |
-| `RequestMint` at 84231.50 | [`4b3d45d9…24b7`](https://liquid.network/testnet/tx/4b3d45d955b3dd3174a305f6e178b9bd10342ba1a030720fff0c3248111824b7) |
-| `Finalize`: 4.211575 tUSDT paid, 5,000 sat burned | [`69c2c404…0786`](https://liquid.network/testnet/tx/69c2c404d0c1a0e11d752d01154d1c6fdc6900cdc77ad59e0d76542316cc0786) |
-| `RequestMint` at a stale 95000.00 | [`513edff5…f74b`](https://liquid.network/testnet/tx/513edff5ac5d07a42dc9e84015e5b7a33a8dbab0f602ad72072f4a2d5cfef74b) |
-| `Challenge` at 84231.50: 5,000 sat refunded, 4.75 tUSDT back to the treasury | [`f6eaad84…bcfa`](https://liquid.network/testnet/tx/f6eaad84c2a4e71f871ec50fc07245bcb9a18ef5352e45aa445cba51cfb7bcfa) |
-
 ## Limitations
 
 - **A request can be challenged until it is finalized, not only during the window.** A
   program can't require that a height has *not* been reached. If the price moves past the
   tolerance after the window but before `Finalize`, an honest request can still be
   cancelled. The user loses only fees, and finalizing promptly avoids it.
-- **One oracle, fixed at deployment.** The key is a compile param. There is no quorum of
-  statements, no committee-attested key, and no reward for a challenger.
+- **A leaked oracle key can date statements in the future.** Its certificate lets it sign
+  any timestamp up to `valid_until`, and a request at a timestamp no honest statement has
+  reached yet can't be challenged until one does, by which time it may be finalized.
+  Short certificates narrow this; they don't close it.
+- **The cold key is trusted completely.** Whoever holds it can certify their own oracle.
+  It is used rarely and can be a committee, but there is no check beyond its signature.
+- **One statement per request.** There is no quorum of oracles and no reward for a
+  challenger.
 - **Requests run one at a time per state file.** When a state file holds several pending
   requests, the wallet takes the first one it finds; pass `--input` to choose another.
 - **Only `BTCUSD` with two decimals.** The program fixes `v1|PRICE|BTCUSD|…|USD|2|`, and
@@ -185,4 +217,8 @@ the request's, fails the covenant's dry run and is never broadcast.
 Simplicity interpreter against transactions it builds, with the statements in `data/`.
 It covers forged prices, a `|` hidden in a text field, a finalize before the window, a
 challenge within the tolerance or with an older statement, a second treasury UTXO spent
-alongside a request, and the execution budget of each path.
+alongside a request, and the execution budget of each path. For certificates: a statement
+outside its certificate's range, a certificate from another key, for another oracle, or
+with its range altered, and a challenge from an oracle certified after the request. The
+statements in `data/` carry the certificate `fake_oracle.py` made, so the program checks the
+script's BIP340 signer.

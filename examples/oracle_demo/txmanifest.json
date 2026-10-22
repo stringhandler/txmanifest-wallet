@@ -17,10 +17,9 @@
       "script": {
         "type": "simplicity",
         "source": "./oracle_mint.simf",
-        "source_hash": "sha256:60835c51a0818685319ad98e58969f04140e1926ba8624e1e02fcf2159c8d3ef",
+        "source_hash": "sha256:5604ae17d418a3c8fb87de90df1ceb0e077febe9ae69d4a17a110f05d65b9377",
         "compile_params": {
-          "ORACLE_PUBKEY_PREFIX": "ORACLE_PUBKEY_PREFIX",
-          "ORACLE_PUBKEY_X": "ORACLE_PUBKEY_X",
+          "COLD_PUBKEY": "COLD_PUBKEY",
           "LBTC_ASSET": "LBTC_ASSET",
           "USD_ASSET": "USD_ASSET",
           "WINDOW_BLOCKS": "WINDOW_BLOCKS",
@@ -40,15 +39,10 @@
     "pending_mint": {
       "description": "One open mint request: the L-BTC to burn and the tUSDT reserved for it, two UTXOs at one address. The tapdata leaf commits to the request, 0x01 || price || timestamp || L-BTC amount || recipient, so every request has its own address.",
       "params": {
-        "ORACLE_PUBKEY_PREFIX": {
-          "type": "u8",
-          "default": "instance.ORACLE_PUBKEY_PREFIX",
-          "description": "The service's oracle key prefix."
-        },
-        "ORACLE_PUBKEY_X": {
-          "type": "bytes32",
-          "default": "instance.ORACLE_PUBKEY_X",
-          "description": "The service's oracle key x-coordinate."
+        "COLD_PUBKEY": {
+          "type": "pubkey",
+          "default": "instance.COLD_PUBKEY",
+          "description": "The service's cold key, which certifies oracle keys."
         },
         "LBTC_ASSET": {
           "type": "liquid.asset_id",
@@ -90,7 +84,7 @@
       "script": {
         "type": "simplicity",
         "source": "./oracle_mint.simf",
-        "source_hash": "sha256:60835c51a0818685319ad98e58969f04140e1926ba8624e1e02fcf2159c8d3ef",
+        "source_hash": "sha256:5604ae17d418a3c8fb87de90df1ceb0e077febe9ae69d4a17a110f05d65b9377",
         "extra_leaves": [
           {
             "type": "tapdata",
@@ -123,13 +117,10 @@
   },
   "contract_templates": {
     "oracle_mint": {
-      "description": "One mint service: a treasury of tUSDT, the oracle key it trusts, and the challenge window's length and tolerance. All six fields are compile params of oracle_mint.simf, so they fix every address the service uses.",
+      "description": "One mint service: a treasury of tUSDT, the cold key that certifies oracle keys, and the challenge window's length and tolerance. All five fields are compile params of oracle_mint.simf, so they fix every address the service uses. The oracle keys are not among them: a new or rotated oracle needs only a new certificate.",
       "fields": {
-        "ORACLE_PUBKEY_PREFIX": {
-          "type": "u8"
-        },
-        "ORACLE_PUBKEY_X": {
-          "type": "bytes32"
+        "COLD_PUBKEY": {
+          "type": "pubkey"
         },
         "LBTC_ASSET": {
           "type": "liquid.asset_id"
@@ -157,13 +148,9 @@
               "type": "u64",
               "description": "tUSDT base units to lock in the treasury (8 decimal places)."
             },
-            "ORACLE_PUBKEY_PREFIX": {
-              "type": "u8",
-              "description": "First byte of the oracle's compressed public key: 2 or 3. fake_oracle.py keygen prints it."
-            },
-            "ORACLE_PUBKEY_X": {
-              "type": "bytes32",
-              "description": "The rest of the oracle's compressed public key: its 32-byte x-coordinate."
+            "COLD_PUBKEY": {
+              "type": "pubkey",
+              "description": "x-only BIP340 key that signs oracle certificates. fake_oracle.py cold-keygen prints it. In practice, a committee's aggregate key (MuSig2 or FROST)."
             },
             "LBTC_ASSET": {
               "type": "liquid.asset_id",
@@ -246,8 +233,7 @@
           ],
           "create_instance": {
             "fields": {
-              "ORACLE_PUBKEY_PREFIX": "$params.ORACLE_PUBKEY_PREFIX",
-              "ORACLE_PUBKEY_X": "$params.ORACLE_PUBKEY_X",
+              "COLD_PUBKEY": "$params.COLD_PUBKEY",
               "LBTC_ASSET": "$params.LBTC_ASSET",
               "USD_ASSET": "$params.USD_ASSET",
               "WINDOW_BLOCKS": "$params.WINDOW_BLOCKS",
@@ -256,7 +242,7 @@
           }
         },
         "RequestMint": {
-          "$comment": "Outputs 0-2 are the ones the treasury checks, in this order. Generate the params with fake_oracle.py request-params.",
+          "$comment": "Outputs 0-2 are the ones the treasury checks, in this order. Generate the params with fake_oracle.py request-params, which takes the statement and the certificate for the key that signed it.",
           "description": "Step 1 of a mint: present a signed price statement, lock the L-BTC to burn and reserve the tUSDT it buys at that price. Opens the challenge window.",
           "intent": "request {params.USD_AMOUNT} tUSDT for {params.REQUEST_LBTC_AMOUNT} L-BTC at {params.REQUEST_PRICE} cents per BTC",
           "params": {
@@ -287,6 +273,22 @@
             "STATEMENT_SIG": {
               "type": "string",
               "description": "The oracle's signature, as (r, s)."
+            },
+            "CERT_ORACLE_KEY": {
+              "type": "string",
+              "description": "The key that signed the statement, from its certificate, as (prefix, x-coordinate)."
+            },
+            "CERT_VALID_FROM": {
+              "type": "u64",
+              "description": "The certificate's first valid statement timestamp."
+            },
+            "CERT_VALID_UNTIL": {
+              "type": "u64",
+              "description": "The certificate's last valid statement timestamp."
+            },
+            "CERT_SIG": {
+              "type": "bytes",
+              "description": "The cold key's 64-byte BIP340 signature on the certificate, 0x-prefixed."
             },
             "REQUEST_PRICE": {
               "type": "u64",
@@ -373,6 +375,26 @@
                   "type": "simplicityhl",
                   "simplicity_type": "(u256, u256)",
                   "value": "params.STATEMENT_SIG"
+                },
+                "CERT_ORACLE_KEY": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "(u8, u256)",
+                  "value": "params.CERT_ORACLE_KEY"
+                },
+                "CERT_VALID_FROM": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u64",
+                  "value": "params.CERT_VALID_FROM"
+                },
+                "CERT_VALID_UNTIL": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u64",
+                  "value": "params.CERT_VALID_UNTIL"
+                },
+                "CERT_SIG": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "[u8; 64]",
+                  "value": "params.CERT_SIG"
                 },
                 "BUDGET_PAD": {
                   "type": "simplicityhl",
@@ -560,6 +582,10 @@
                 "STATEMENT_TIMESTAMP": "unused",
                 "STATEMENT_NONCE": "unused",
                 "STATEMENT_SIG": "unused",
+                "CERT_ORACLE_KEY": "unused",
+                "CERT_VALID_FROM": "unused",
+                "CERT_VALID_UNTIL": "unused",
+                "CERT_SIG": "unused",
                 "BUDGET_PAD": "unused"
               },
               "ui": {
@@ -598,6 +624,10 @@
                 "STATEMENT_TIMESTAMP": "unused",
                 "STATEMENT_NONCE": "unused",
                 "STATEMENT_SIG": "unused",
+                "CERT_ORACLE_KEY": "unused",
+                "CERT_VALID_FROM": "unused",
+                "CERT_VALID_UNTIL": "unused",
+                "CERT_SIG": "unused",
                 "BUDGET_PAD": "unused"
               },
               "ui": {
@@ -656,7 +686,7 @@
           ]
         },
         "Challenge": {
-          "$comment": "Generate the params with fake_oracle.py challenge-params. Anyone can run it.",
+          "$comment": "Generate the params with fake_oracle.py challenge-params. Anyone can run it, with a statement from any certified oracle key.",
           "description": "Cancel a request with a newer statement whose price differs from the request's by more than the tolerance. Refunds the L-BTC to the recipient and returns the tUSDT to the treasury.",
           "intent": "challenge a request at {params.REQUEST_PRICE} cents per BTC: refund {params.REQUEST_LBTC_AMOUNT} L-BTC to {params.REQUEST_RECIPIENT}",
           "params": {
@@ -687,6 +717,22 @@
             "STATEMENT_SIG": {
               "type": "string",
               "description": "The oracle's signature on the newer statement, as (r, s)."
+            },
+            "CERT_ORACLE_KEY": {
+              "type": "string",
+              "description": "The key that signed the newer statement, from its certificate, as (prefix, x-coordinate)."
+            },
+            "CERT_VALID_FROM": {
+              "type": "u64",
+              "description": "The certificate's first valid statement timestamp."
+            },
+            "CERT_VALID_UNTIL": {
+              "type": "u64",
+              "description": "The certificate's last valid statement timestamp."
+            },
+            "CERT_SIG": {
+              "type": "bytes",
+              "description": "The cold key's 64-byte BIP340 signature on the certificate, 0x-prefixed."
             },
             "REQUEST_PRICE": {
               "type": "u64",
@@ -792,6 +838,26 @@
                   "simplicity_type": "(u256, u256)",
                   "value": "params.STATEMENT_SIG"
                 },
+                "CERT_ORACLE_KEY": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "(u8, u256)",
+                  "value": "params.CERT_ORACLE_KEY"
+                },
+                "CERT_VALID_FROM": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u64",
+                  "value": "params.CERT_VALID_FROM"
+                },
+                "CERT_VALID_UNTIL": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u64",
+                  "value": "params.CERT_VALID_UNTIL"
+                },
+                "CERT_SIG": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "[u8; 64]",
+                  "value": "params.CERT_SIG"
+                },
                 "BUDGET_PAD": {
                   "type": "simplicityhl",
                   "simplicity_type": "List<u256, 16>",
@@ -835,6 +901,10 @@
                 "STATEMENT_TIMESTAMP": "unused",
                 "STATEMENT_NONCE": "unused",
                 "STATEMENT_SIG": "unused",
+                "CERT_ORACLE_KEY": "unused",
+                "CERT_VALID_FROM": "unused",
+                "CERT_VALID_UNTIL": "unused",
+                "CERT_SIG": "unused",
                 "BUDGET_PAD": "unused"
               },
               "ui": {

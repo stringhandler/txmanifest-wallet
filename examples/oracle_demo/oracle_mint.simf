@@ -26,6 +26,11 @@
  * The witness carries the string already split into its variable fields, and the program
  * hashes it back together. Number fields must be all digits and text fields must contain
  * no '|', so a signed string can only be read one way.
+ *
+ * The oracle's key is not fixed here. COLD_PUBKEY, which can be a committee's aggregate
+ * key, signs certificates that let an oracle key sign statements timestamped within a
+ * range, and each statement comes with one. A new or rotated oracle needs a new
+ * certificate, not a new program.
  */
 
 // ============================================================================
@@ -254,8 +259,14 @@ fn pending_script_hash(request: Request) -> u256 {
 // Oracle statements
 // ============================================================================
 
+/// COLD_PUBKEY's word that an oracle key may sign statements timestamped from
+/// `valid_from` to `valid_until`, inclusive: the key as its compressed prefix byte and
+/// x-coordinate, the range, and the BIP340 signature.
+type Certificate = ((u8, u256), u64, u64, Signature);
+
 /// A canonical string's variable fields: the price's integer digits, its two fraction
-/// digits, sources, method, timestamp digits and nonce. Then the signature `(r, s)`.
+/// digits, sources, method, timestamp digits and nonce. Then the oracle's signature
+/// `(r, s)`, and the certificate for its key.
 type Statement = (
     List<u8, 16>,
     (u8, u8),
@@ -263,13 +274,32 @@ type Statement = (
     List<u8, 16>,
     List<u8, 16>,
     List<u8, 32>,
-    (Scalar, Scalar)
+    (Scalar, Scalar),
+    Certificate
 );
 
-fn oracle_pubkey() -> Point {
-    let prefix: u8 = param::ORACLE_PUBKEY_PREFIX;
+/// Check COLD_PUBKEY signed `cert`, and return the oracle key and the range it covers.
+///
+/// The signed message is `tagged_hash("oracle-demo/oracle-cert/v1", key || from || until)`
+/// with the key in its 33-byte compressed form, so no other signature by the cold key can
+/// pass for a certificate.
+fn verify_certificate(cert: Certificate) -> (Point, u64, u64) {
+    let (key, valid_from, valid_until, sig): Certificate = cert;
+    let (prefix, x): (u8, u256) = key;
     assert!(or(jet::eq_8(prefix, 2), jet::eq_8(prefix, 3)));
-    (<bool>::into(jet::eq_8(prefix, 3)), param::ORACLE_PUBKEY_X)
+
+    // sha256("oracle-demo/oracle-cert/v1")
+    let tag: u256 = 0x026a11d3eb897194ef8efa87e6d28690e25bee5a89ee37142b5ba3816dcc4b89;
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, tag);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, tag);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, prefix);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, x);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, valid_from);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, valid_until);
+    jet::bip_0340_verify((param::COLD_PUBKEY, jet::sha_256_ctx_8_finalize(ctx)), sig);
+
+    ((<bool>::into(jet::eq_8(prefix, 3)), x), valid_from, valid_until)
 }
 
 /// Hash one decimal digit and fold it into the number read so far.
@@ -292,10 +322,11 @@ fn add_separator(ctx: Ctx8) -> Ctx8 {
     jet::sha_256_ctx_8_add_1(ctx, 124)
 }
 
-/// Rebuild a statement's canonical string, check the oracle signed it, and return its
-/// price in US cents and its timestamp.
+/// Rebuild a statement's canonical string, check a certified oracle signed it within its
+/// certificate's range, and return its price in US cents and its timestamp.
 fn verify_statement(statement: Statement) -> (u64, u64) {
-    let (price_int, price_frac, sources, method, timestamp, nonce, sig): Statement = statement;
+    let (price_int, price_frac, sources, method, timestamp, nonce, sig, cert): Statement =
+        statement;
     let ctx: Ctx8 = jet::sha_256_ctx_8_init();
     // "v1|PRICE|BTCUSD|"
     let ctx: Ctx8 = jet::sha_256_ctx_8_add_16(ctx, 0x76317c50524943457c4254435553447c);
@@ -314,7 +345,11 @@ fn verify_statement(statement: Statement) -> (u64, u64) {
     let (ctx, timestamp): (Ctx8, u64) = fold::<digit_step, 16>(timestamp, (ctx, 0));
     let ctx: Ctx8 = add_separator(ctx);
     let ctx: Ctx8 = fold::<text_step, 32>(nonce, ctx);
-    ecdsa_verify(oracle_pubkey(), jet::sha_256_ctx_8_finalize(ctx), sig);
+
+    let (oracle_key, valid_from, valid_until): (Point, u64, u64) = verify_certificate(cert);
+    assert!(jet::le_64(valid_from, timestamp));
+    assert!(jet::le_64(timestamp, valid_until));
+    ecdsa_verify(oracle_key, jet::sha_256_ctx_8_finalize(ctx), sig);
     (price, timestamp)
 }
 
@@ -432,7 +467,13 @@ fn main() {
         witness::STATEMENT_METHOD,
         witness::STATEMENT_TIMESTAMP,
         witness::STATEMENT_NONCE,
-        witness::STATEMENT_SIG
+        witness::STATEMENT_SIG,
+        (
+            witness::CERT_ORACLE_KEY,
+            witness::CERT_VALID_FROM,
+            witness::CERT_VALID_UNTIL,
+            witness::CERT_SIG
+        )
     );
 
     match witness::PATH {

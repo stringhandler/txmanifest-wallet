@@ -1,0 +1,9 @@
+{
+  "oracle_pubkey": "02917e9826b0e7a61f695a5bb1a37714d1d742da025f4127c48892f3e4dbce8ba0",
+  "valid_from": 1741500000,
+  "valid_until": 1744092000,
+  "cold_pubkey": "b895fcd559365049a2602890e406a3114ffe7b482beddc09686ecd2586cfbcd3",
+  "signature": "80a1dc208359b19ae77531b66e119114fee0f371ae4dbeea4afeb56515228035424a7ad4893d90c1b440f289e1ec4699b6f775b2815f86594a92d63bfa715b7e",
+  "scheme": "bip340",
+  "tag": "oracle-demo/oracle-cert/v1"
+}

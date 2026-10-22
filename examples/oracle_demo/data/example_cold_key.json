@@ -1,0 +1,5 @@
+{
+  "note": "PUBLIC TEST KEY: the oracle_demo example's cold key, which certifies oracle keys. Anyone can sign certificates with it. Testnet only: never use it for anything of value.",
+  "secret": "d7fd3aa5d52bb980d68d39644838c33328945f7709e6808da661f1a928aec33b",
+  "pubkey": "b895fcd559365049a2602890e406a3114ffe7b482beddc09686ecd2586cfbcd3"
+}
