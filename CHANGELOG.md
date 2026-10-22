@@ -14,7 +14,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 ### Added
 
 - Release binaries for macOS (Apple Silicon).
-- Supports manifest format [`0.3.1`](docs/format-changelog.md), which adds program pinning. `0.3.0` manifests still load.
+- Supports manifest format [`0.3.1`](docs/format-changelog.md), which adds program pinning and an action-level `lock_time`. `0.3.0` manifests still load.
 - `pin` command: writes every program's current hash into a manifest without reformatting it; `pin --check` fails if any is missing or stale.
 - `validate --strict`: unpinned programs are errors rather than warnings.
 - `run --debug`: development mode. For now the same as `--allow-unpinned`; it may enable more development-only behaviour later.
@@ -23,6 +23,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 - `validate` errors when a manifest uses a Simplicity program in a `tapleaf` or `simf_fn` compute, or a `programs` entry, without declaring `"requires": ["simplicity"]`. Previously only covenant `utxo_types` triggered this. Add `"simplicity"` to `requires` if `validate` now reports it.
 - `validate` also checks each program file: that it exists, matches its hash, meets its compiler requirement, and declares the witnesses the manifest supplies.
+- On Liquid, `run` refuses to finalize a Simplicity input whose program may cost more than its witness's budget, and says how many bytes short it is. Previously the transaction was built (or exported with `--export-pset`) and the node rejected it with `Program's execution cost could exceed budget`.
 
 ## [0.3.0] - 2026-10-06
 

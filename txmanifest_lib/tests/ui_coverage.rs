@@ -33,17 +33,23 @@ fn examples_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples")
 }
 
-/// `(example_name, parsed manifest)` for every example, sorted by name.
+/// `(example_name, parsed manifest)` for every example, sorted by name. A manifest one
+/// level down is named by its path, e.g. `oracle_demo/issue_usdt`.
 fn examples() -> Vec<(String, Manifest)> {
-    let mut found: Vec<(String, Manifest)> = std::fs::read_dir(examples_dir())
-        .expect("examples/ should exist")
-        .filter_map(|entry| {
-            let dir = entry.ok()?.path();
+    let root = examples_dir();
+    let mut found: Vec<(String, Manifest)> = subdirs(&root)
+        .into_iter()
+        .flat_map(|dir| {
+            let mut dirs = subdirs(&dir);
+            dirs.push(dir);
+            dirs
+        })
+        .filter_map(|dir| {
             let path = dir.join("txmanifest.json");
             if !path.is_file() {
                 return None;
             }
-            let name = dir.file_name()?.to_string_lossy().to_string();
+            let name = dir.strip_prefix(&root).ok()?.to_string_lossy().to_string();
             let raw = std::fs::read_to_string(&path).ok()?;
             let manifest = Manifest::from_json_str(&raw)
                 .unwrap_or_else(|e| panic!("{name}/txmanifest.json should parse: {e}"));
@@ -52,6 +58,16 @@ fn examples() -> Vec<(String, Manifest)> {
         .collect();
     found.sort_by(|a, b| a.0.cmp(&b.0));
     found
+}
+
+fn subdirs(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .expect("examples/ should be readable")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            path.is_dir().then_some(path)
+        })
+        .collect()
 }
 
 /// Every action in a manifest, standalone or template method, keyed by a dot-path.

@@ -1,0 +1,68 @@
+{
+  "$schema": "../../../schema/txmanifest.schema.json",
+  "$comment": "Separate from the mint service because the service's addresses depend on the asset id, and the id only exists once this transaction has picked the outpoint it is derived from: the engine fixes compile params before it resolves inputs, so one action cannot issue an asset and pay it to an address derived from it.",
+  "manifest_version": "0.3.1",
+  "protocol": "oracle-demo-issue-tusdt",
+  "description": "Issue tUSDT, the testnet stablecoin the oracle_demo mint service sells: a fixed supply with no reissuance token, paid to your wallet. Lock it into a treasury with ../txmanifest.json CreateTreasury.",
+  "chain": "liquid",
+  "contract_templates": {
+    "tusdt": {
+      "description": "One tUSDT asset. The instance file records its id, which CreateTreasury takes as USD_ASSET.",
+      "fields": {
+        "USD_ASSET": { "type": "liquid.asset_id" },
+        "SUPPLY": { "type": "u64" }
+      },
+      "actions": {
+        "IssueUSDT": {
+          "description": "Issue the whole tUSDT supply to your wallet and write the instance file recording its asset id.",
+          "intent": "issue {params.SUPPLY} base units of a new tUSDT asset",
+          "params": {
+            "SUPPLY": {
+              "type": "u64",
+              "default": "100000000000000",
+              "description": "tUSDT to issue, in base units. 8 decimal places, like L-BTC, so the default is 1,000,000 tUSDT."
+            }
+          },
+          "inputs": [
+            {
+              "id": "issuer_in",
+              "description": "Wallet L-BTC UTXO whose outpoint defines the asset id. It also pays the fee.",
+              "utxo_source": "wallet",
+              "asset": "lbtc",
+              "issuance": {
+                "kind": "new",
+                "asset_amount_sat": "params.SUPPLY",
+                "inflation_amount_sat": 0
+              },
+              "ui": { "label": "input that defines the tUSDT asset", "role": "issuance" }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "usd_out",
+              "description": "The tUSDT supply, to your wallet.",
+              "destination": "wallet",
+              "asset": "inputs.issuer_in.issued_asset",
+              "amount_sat": "params.SUPPLY",
+              "ui": { "label": "the new tUSDT", "role": "issuance" }
+            },
+            {
+              "id": "lbtc_change",
+              "description": "L-BTC change from the issuing input.",
+              "destination": "change",
+              "asset": "lbtc",
+              "optional": true,
+              "ui": { "label": "change returned to you", "role": "change" }
+            }
+          ],
+          "create_instance": {
+            "fields": {
+              "USD_ASSET": "$inputs.issuer_in.issued_asset",
+              "SUPPLY": "$params.SUPPLY"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "note": "PUBLIC TEST KEY for the oracle_demo example's fake oracle. Anyone can sign statements with it. Testnet only: never use it for anything of value.",
+  "secret": "6b9370fd63ad6037c3a85ddb22bcd0d871eff4a4a27496e453f606c48cffe089",
+  "pubkey": "02917e9826b0e7a61f695a5bb1a37714d1d742da025f4127c48892f3e4dbce8ba0"
+}

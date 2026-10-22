@@ -1,0 +1,7 @@
+{
+  "domain": "BTCUSD",
+  "canonical": "v1|PRICE|BTCUSD|84231.50|USD|2|binance,bitstamp,coinbase,kraken,okx|median|1741514400|482910",
+  "signature": "MEQCICzgChRNZZFqQ4VF1/TluMyqneOcwBfPnSviptH2X9QgAiA/GR4IyZIIALG76QjUwiqcdUKfVm69Y0+bqvzhiWyNqw==",
+  "pubkey": "02917e9826b0e7a61f695a5bb1a37714d1d742da025f4127c48892f3e4dbce8ba0",
+  "signing_scheme": "secp256k1_ecdsa"
+}

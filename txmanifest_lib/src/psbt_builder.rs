@@ -729,6 +729,7 @@ mod tests {
             fee_rate: 2.0,
             policy_asset: policy(),
             change_assets: std::collections::HashSet::from([policy()]),
+            lock_time: None,
         }
     }
 
@@ -760,6 +761,24 @@ mod tests {
         );
         assert_eq!(psbt.fee_rate, 2.0);
         assert_eq!(psbt.change_script, Some(p2tr(7)));
+    }
+
+    /// A lock time crosses to Bitcoin, and makes an input that asked for no sequence
+    /// non-final there too.
+    #[test]
+    fn narrowing_carries_the_lock_time() {
+        let mut pset = covenant_pset_request(policy());
+        pset.lock_time = Some(900_000);
+        let psbt = from_pset_request(&pset, Some(p2tr(7))).expect("narrows");
+        assert_eq!(psbt.lock_time, Some(900_000));
+        assert_eq!(psbt.inputs[0].sequence().to_consensus_u32(), 144);
+
+        let crate::pset_builder::PsetInput::Covenant { sequence, .. } = &mut pset.inputs[0] else {
+            panic!("the request has one covenant input");
+        };
+        *sequence = None;
+        let psbt = from_pset_request(&pset, Some(p2tr(7))).expect("narrows");
+        assert_eq!(psbt.inputs[0].sequence().to_consensus_u32(), 0xffff_fffe);
     }
 
     /// Change is emitted only where the action declared it, matching the Elements rule
@@ -1159,7 +1178,7 @@ pub fn from_pset_request(
                         value: Amount::from_sat(utxo.unblinded.value),
                         script_pubkey: convert_script(&utxo.script_pubkey),
                     },
-                    sequence: *sequence,
+                    sequence: pset.input_sequence(*sequence),
                 });
             }
             EIn::Covenant {
@@ -1186,7 +1205,7 @@ pub fn from_pset_request(
                     outpoint: convert_outpoint(*outpoint),
                     script_pubkey: convert_script(script_pubkey),
                     amount: *amount,
-                    sequence: *sequence,
+                    sequence: pset.input_sequence(*sequence),
                 });
             }
         }
@@ -1225,9 +1244,7 @@ pub fn from_pset_request(
         // A change output is emitted only where the action declared one, which on Bitcoin
         // means the policy asset appeared in `change_assets`.
         change_script: change_script.filter(|_| pset.change_assets.contains(&policy)),
-        // The Elements request has no transaction-level locktime; absolute timelocks reach
-        // a covenant through its own `check_lock_height` rather than through the builder.
-        lock_time: None,
+        lock_time: pset.lock_time,
     })
 }
 

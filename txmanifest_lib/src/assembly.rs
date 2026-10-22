@@ -632,6 +632,7 @@ mod tests {
             fee_rate: 1.0,
             policy_asset: bitcoin_policy_asset(),
             change_assets: Default::default(),
+            lock_time: None,
         };
         let narrowed = crate::psbt_builder::from_pset_request(&req, None).expect("narrows");
         let crate::psbt_builder::PsbtInput::Wallet {
@@ -668,6 +669,7 @@ mod tests {
             fee_rate: 1.0,
             policy_asset: c.policy_asset(),
             change_assets: Default::default(),
+            lock_time: None,
         };
         assert!(crate::psbt_builder::from_pset_request(&req, None).is_ok());
 
