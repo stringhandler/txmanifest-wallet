@@ -51,6 +51,17 @@
             "null"
           ]
         },
+        "lock_time": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LockTime"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The transaction's `nLockTime`: the earliest block height, or time, at which it can be mined. This is what the `check_lock_height` / `check_lock_time` Simplicity jets read. See [`LockTime`].\n\nOmitted → zero, no absolute timelock."
+        },
         "on_post_broadcast": {
           "anyOf": [
             {
@@ -374,6 +385,41 @@
         "fields"
       ],
       "type": "object"
+    },
+    "LockTime": {
+      "description": "An action's absolute timelock, `{\"height\": <expr>}` or `{\"time\": <expr>}`.\n\nBoth set the same `nLockTime` field, which consensus reads as a height below 500,000,000 and as unix seconds from there up, so the two are separate keys rather than one number whose meaning depends on its size. A lock time is ignored when every input is final, so the engine gives each input that sets no `sequence` of its own `0xfffffffe`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The transaction can be mined in a block at least this high. Below 500,000,000.",
+          "properties": {
+            "$comment": {
+              "description": "Documentation only; ignored by the engine.",
+              "type": "string"
+            },
+            "height": true
+          },
+          "required": [
+            "height"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The transaction can be mined once the chain's median time past is beyond this unix time, in seconds. At least 500,000,000. On a chain with one-minute blocks, median time past runs about six minutes behind the clock.",
+          "properties": {
+            "$comment": {
+              "description": "Documentation only; ignored by the engine.",
+              "type": "string"
+            },
+            "time": true
+          },
+          "required": [
+            "time"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "Output": {
       "additionalProperties": false,

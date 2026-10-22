@@ -8,8 +8,9 @@ use lwk_wollet::{
         hashes::{sha256, Hash as _},
         pset::{Input, Output, PartiallySignedTransaction},
         secp256k1_zkp::{RangeProof, SecretKey, SurjectionProof, Tweak},
-        AssetId, BlindAssetProofs, BlindValueProofs, ContractHash, OutPoint, RangeProofMessage,
-        Script, Sequence, SurjectionInput, TxOut, TxOutSecrets, TxOutWitness, Txid,
+        AssetId, BlindAssetProofs, BlindValueProofs, ContractHash, LockTime, OutPoint,
+        RangeProofMessage, Script, Sequence, SurjectionInput, TxOut, TxOutSecrets, TxOutWitness,
+        Txid,
     },
     ElementsNetwork, WalletTxOut, Wollet, EC,
 };
@@ -106,6 +107,23 @@ pub struct BuildPsetRequest {
     /// declared change output is an error rather than a silently-invented output: the
     /// alternative is a transaction that moves value the manifest never mentioned.
     pub change_assets: std::collections::HashSet<AssetId>,
+    /// Transaction-level `nLockTime`. `None` leaves it at zero (no absolute timelock).
+    pub lock_time: Option<u32>,
+}
+
+/// `nSequence` for an input that enables a lock time without a relative one.
+const SEQUENCE_ENABLE_LOCKTIME: u32 = 0xffff_fffe;
+
+impl BuildPsetRequest {
+    /// The `nSequence` an input gets, given the one it asked for.
+    ///
+    /// A lock time is ignored when every input is at the maximum sequence, so an input
+    /// that asks for none gets [`SEQUENCE_ENABLE_LOCKTIME`] whenever the transaction
+    /// has a lock time. Shared with the Bitcoin builder through `from_pset_request`, so
+    /// both chains apply the same rule.
+    pub fn input_sequence(&self, requested: Option<u32>) -> Option<u32> {
+        requested.or(self.lock_time.map(|_| SEQUENCE_ENABLE_LOCKTIME))
+    }
 }
 
 pub struct IssuanceResult {
@@ -534,6 +552,7 @@ fn build_inner(
     Vec<IssuanceResult>,
 )> {
     let mut pset = PartiallySignedTransaction::new_v2();
+    pset.global.tx_data.fallback_locktime = req.lock_time.map(LockTime::from_consensus);
     let mut inp_txout_sec: HashMap<usize, TxOutSecrets> = HashMap::new();
     let mut issuances: Vec<IssuanceResult> = Vec::new();
     let mut total_lbtc_in: u64 = 0;
@@ -552,7 +571,7 @@ fn build_inner(
                 sequence,
             } => {
                 let idx = add_wallet_input(&mut pset, &mut inp_txout_sec, wollet, secp, rng, utxo)?;
-                apply_sequence(&mut pset, idx, *sequence);
+                apply_sequence(&mut pset, idx, req.input_sequence(*sequence));
                 if let Some(iso) = issuance {
                     apply_new_issuance(&mut pset, idx, iso)?;
                     let (asset_id, token_id) = pset.inputs()[idx].issuance_ids();
@@ -600,7 +619,7 @@ fn build_inner(
                     *amount,
                     *blinding,
                 )?;
-                apply_sequence(&mut pset, idx, *sequence);
+                apply_sequence(&mut pset, idx, req.input_sequence(*sequence));
                 if let Some(iso) = issuance {
                     // A covenant input may carry either a NEW issuance (e.g. an issuance-factory
                     // covenant minting a fresh NFT from its own outpoint) or a reissuance.
@@ -1747,6 +1766,7 @@ mod change_tests {
             fee_rate: 0.1,
             policy_asset: policy,
             change_assets: change_assets.iter().copied().collect(),
+            lock_time: None,
         }
     }
 
@@ -1885,5 +1905,87 @@ mod lbtc_balance_tests {
         let (_, fee) = resolve_lbtc_balance(1_000, 10_000, 0, false, true, false)
             .expect("a draft with outputs above inputs must not underflow");
         assert_eq!(fee, 0);
+    }
+}
+
+#[cfg(test)]
+mod lock_time_tests {
+    use super::*;
+
+    const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
+                            abandon abandon abandon about";
+
+    fn wollet() -> Wollet {
+        let w = crate::wallet::WalletFile {
+            network: "testnet".to_string(),
+            mnemonic: MNEMONIC.to_string(),
+        };
+        Wollet::new(
+            ElementsNetwork::LiquidTestnet,
+            lwk_wollet::NoPersist::new(),
+            crate::wallet::descriptor(&w).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Spend one explicit covenant UTXO to one explicit output, change to the wallet.
+    fn request(lock_time: Option<u32>, sequence: Option<u32>) -> BuildPsetRequest {
+        let policy = ElementsNetwork::LiquidTestnet.policy_asset();
+        let p2tr = Script::from([&[0x51, 0x20][..], &[7; 32]].concat());
+        BuildPsetRequest {
+            inputs: vec![PsetInput::Covenant {
+                input_id: "cov".to_string(),
+                outpoint: OutPoint::new(Txid::from_byte_array([3; 32]), 0),
+                script_pubkey: p2tr.clone(),
+                asset: policy,
+                amount: 100_000,
+                issuance: None,
+                sequence,
+                blinding: None,
+            }],
+            outputs: vec![PsetOutputSpec {
+                script_pubkey: p2tr,
+                amount: 90_000,
+                asset: policy,
+                blinding_key: None,
+                blinding: None,
+            }],
+            fee_rate: 0.1,
+            policy_asset: policy,
+            change_assets: std::collections::HashSet::from([policy]),
+            lock_time,
+        }
+    }
+
+    fn build(req: &BuildPsetRequest) -> lwk_wollet::elements::Transaction {
+        build_pset(&wollet(), ElementsNetwork::LiquidTestnet, req)
+            .expect("builds")
+            .pset
+            .extract_tx()
+            .expect("extracts")
+    }
+
+    #[test]
+    fn a_lock_time_reaches_the_transaction_and_makes_its_inputs_non_final() {
+        let tx = build(&request(Some(1_800_000_000), None));
+        assert_eq!(tx.lock_time.to_consensus_u32(), 1_800_000_000);
+        // At the maximum sequence the lock time would be ignored.
+        assert_eq!(
+            tx.input[0].sequence.to_consensus_u32(),
+            SEQUENCE_ENABLE_LOCKTIME
+        );
+    }
+
+    #[test]
+    fn an_input_keeps_the_sequence_it_asked_for() {
+        let tx = build(&request(Some(1_800_000_000), Some(5)));
+        assert_eq!(tx.input[0].sequence.to_consensus_u32(), 5);
+    }
+
+    #[test]
+    fn without_a_lock_time_nothing_changes() {
+        let tx = build(&request(None, None));
+        assert_eq!(tx.lock_time.to_consensus_u32(), 0);
+        assert_eq!(tx.input[0].sequence, Sequence::MAX);
     }
 }
