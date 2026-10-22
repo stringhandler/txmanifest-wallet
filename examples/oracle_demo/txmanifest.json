@@ -1,0 +1,898 @@
+{
+  "$schema": "../../schema/txmanifest.schema.json",
+  "$comment": "A demonstration of an oracle challenge window: using an oracle's price as the current price, which a Simplicity program can't check for itself. Statements use Mycelia Signal's canonical format and ECDSA signing scheme, signed here by a local test key (fake_oracle.py). The tUSDT asset is issued by the separate manifest in issue_usdt/.",
+  "manifest_version": "0.3.1",
+  "protocol": "oracle-demo-mint",
+  "description": "Burn L-BTC for tUSDT at the current BTC/USD price. Simplicity cannot tell whether an oracle statement is current, so a mint takes two steps. A request presents a signed price statement and reserves the tUSDT it is worth. Anyone with a newer statement whose price differs by more than a tolerance can then challenge it, refunding the L-BTC. If no one does within the window, anyone can finalize it: the tUSDT goes to the requester and the L-BTC is burned. One instance per service; requests are tracked in its state file.",
+  "chain": "liquid",
+  "requires": [
+    "simplicity"
+  ],
+  "simplicity_hl": {
+    "version": "0.7.1"
+  },
+  "utxo_types": {
+    "treasury": {
+      "description": "The tUSDT supply, waiting to be sold. Its tapdata leaf is the single byte 0x00.",
+      "script": {
+        "type": "simplicity",
+        "source": "./oracle_mint.simf",
+        "source_hash": "sha256:60835c51a0818685319ad98e58969f04140e1926ba8624e1e02fcf2159c8d3ef",
+        "compile_params": {
+          "ORACLE_PUBKEY_PREFIX": "ORACLE_PUBKEY_PREFIX",
+          "ORACLE_PUBKEY_X": "ORACLE_PUBKEY_X",
+          "LBTC_ASSET": "LBTC_ASSET",
+          "USD_ASSET": "USD_ASSET",
+          "WINDOW_BLOCKS": "WINDOW_BLOCKS",
+          "TOLERANCE_BPS": "TOLERANCE_BPS"
+        },
+        "extra_leaves": [
+          {
+            "type": "tapdata",
+            "payload": [
+              "0x00"
+            ]
+          }
+        ]
+      },
+      "asset": "USD_ASSET"
+    },
+    "pending_mint": {
+      "description": "One open mint request: the L-BTC to burn and the tUSDT reserved for it, two UTXOs at one address. The tapdata leaf commits to the request, 0x01 || price || timestamp || L-BTC amount || recipient, so every request has its own address.",
+      "params": {
+        "ORACLE_PUBKEY_PREFIX": {
+          "type": "u8",
+          "default": "instance.ORACLE_PUBKEY_PREFIX",
+          "description": "The service's oracle key prefix."
+        },
+        "ORACLE_PUBKEY_X": {
+          "type": "bytes32",
+          "default": "instance.ORACLE_PUBKEY_X",
+          "description": "The service's oracle key x-coordinate."
+        },
+        "LBTC_ASSET": {
+          "type": "liquid.asset_id",
+          "default": "instance.LBTC_ASSET",
+          "description": "The asset requests burn."
+        },
+        "USD_ASSET": {
+          "type": "liquid.asset_id",
+          "default": "instance.USD_ASSET",
+          "description": "The tUSDT asset id."
+        },
+        "WINDOW_BLOCKS": {
+          "type": "u16",
+          "default": "instance.WINDOW_BLOCKS",
+          "description": "The challenge window, in blocks."
+        },
+        "TOLERANCE_BPS": {
+          "type": "u64",
+          "default": "instance.TOLERANCE_BPS",
+          "description": "The challenge tolerance, in basis points."
+        },
+        "REQUEST_PRICE": {
+          "type": "u64",
+          "description": "The request's price, in US cents per BTC."
+        },
+        "REQUEST_TIMESTAMP": {
+          "type": "u64",
+          "description": "The request statement's unix timestamp."
+        },
+        "REQUEST_LBTC_AMOUNT": {
+          "type": "u64",
+          "description": "The L-BTC to burn, in satoshis."
+        },
+        "RECIPIENT_SPK_HASH": {
+          "type": "bytes32",
+          "description": "sha256 of the scriptPubKey that receives the tUSDT, or the refund."
+        }
+      },
+      "script": {
+        "type": "simplicity",
+        "source": "./oracle_mint.simf",
+        "source_hash": "sha256:60835c51a0818685319ad98e58969f04140e1926ba8624e1e02fcf2159c8d3ef",
+        "extra_leaves": [
+          {
+            "type": "tapdata",
+            "payload": [
+              "0x01",
+              {
+                "value": "params.REQUEST_PRICE",
+                "type": "u64",
+                "endian": "be"
+              },
+              {
+                "value": "params.REQUEST_TIMESTAMP",
+                "type": "u64",
+                "endian": "be"
+              },
+              {
+                "value": "params.REQUEST_LBTC_AMOUNT",
+                "type": "u64",
+                "endian": "be"
+              },
+              {
+                "value": "params.RECIPIENT_SPK_HASH",
+                "type": "bytes32"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "contract_templates": {
+    "oracle_mint": {
+      "description": "One mint service: a treasury of tUSDT, the oracle key it trusts, and the challenge window's length and tolerance. All six fields are compile params of oracle_mint.simf, so they fix every address the service uses.",
+      "fields": {
+        "ORACLE_PUBKEY_PREFIX": {
+          "type": "u8"
+        },
+        "ORACLE_PUBKEY_X": {
+          "type": "bytes32"
+        },
+        "LBTC_ASSET": {
+          "type": "liquid.asset_id"
+        },
+        "USD_ASSET": {
+          "type": "liquid.asset_id"
+        },
+        "WINDOW_BLOCKS": {
+          "type": "u16"
+        },
+        "TOLERANCE_BPS": {
+          "type": "u64"
+        }
+      },
+      "actions": {
+        "CreateTreasury": {
+          "description": "Start the service: lock tUSDT into the treasury and write the instance file. Issue the tUSDT first with issue_usdt/txmanifest.json.",
+          "intent": "lock {params.SUPPLY} of {params.USD_ASSET:symbol} into a mint service treasury",
+          "params": {
+            "USD_ASSET": {
+              "type": "liquid.asset_id",
+              "description": "The tUSDT asset id, from the instance file issue_usdt wrote."
+            },
+            "SUPPLY": {
+              "type": "u64",
+              "description": "tUSDT base units to lock in the treasury (8 decimal places)."
+            },
+            "ORACLE_PUBKEY_PREFIX": {
+              "type": "u8",
+              "description": "First byte of the oracle's compressed public key: 2 or 3. fake_oracle.py keygen prints it."
+            },
+            "ORACLE_PUBKEY_X": {
+              "type": "bytes32",
+              "description": "The rest of the oracle's compressed public key: its 32-byte x-coordinate."
+            },
+            "LBTC_ASSET": {
+              "type": "liquid.asset_id",
+              "default": "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49",
+              "description": "The asset requests burn. The default is Liquid testnet L-BTC."
+            },
+            "WINDOW_BLOCKS": {
+              "type": "u16",
+              "default": "5",
+              "description": "Blocks a request must wait before it can be finalized. Liquid makes a block a minute, so 5 is about 5 minutes."
+            },
+            "TOLERANCE_BPS": {
+              "type": "u64",
+              "default": "50",
+              "description": "How far a newer statement's price may differ from a request's, in basis points of the request's price, before it can cancel the request. 50 is 0.5%."
+            }
+          },
+          "inputs": [
+            {
+              "id": "usd_in",
+              "description": "Wallet UTXO holding the tUSDT.",
+              "utxo_source": "wallet",
+              "asset": "params.USD_ASSET",
+              "amount_sat": {
+                "min_amount": "params.SUPPLY"
+              },
+              "ui": {
+                "label": "the tUSDT to sell",
+                "role": "payment"
+              }
+            },
+            {
+              "id": "fee_input",
+              "description": "Wallet L-BTC UTXO covering the network fee.",
+              "utxo_source": "wallet",
+              "asset": "lbtc",
+              "optional": true,
+              "ui": {
+                "label": "input used for paying fees",
+                "role": "fee"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "treasury_out",
+              "description": "The treasury.",
+              "destination": {
+                "utxo_type": "treasury"
+              },
+              "asset": "params.USD_ASSET",
+              "amount_sat": "params.SUPPLY",
+              "ui": {
+                "label": "tUSDT locked in the treasury",
+                "role": "covenant"
+              }
+            },
+            {
+              "id": "usd_change",
+              "description": "tUSDT change back to your wallet.",
+              "destination": "change",
+              "asset": "params.USD_ASSET",
+              "optional": true,
+              "ui": {
+                "label": "tUSDT returned to you",
+                "role": "change"
+              }
+            },
+            {
+              "id": "fee_change",
+              "description": "L-BTC change from the fee input.",
+              "destination": "change",
+              "asset": "lbtc",
+              "optional": true,
+              "ui": {
+                "label": "fee change returned to you",
+                "role": "change"
+              }
+            }
+          ],
+          "create_instance": {
+            "fields": {
+              "ORACLE_PUBKEY_PREFIX": "$params.ORACLE_PUBKEY_PREFIX",
+              "ORACLE_PUBKEY_X": "$params.ORACLE_PUBKEY_X",
+              "LBTC_ASSET": "$params.LBTC_ASSET",
+              "USD_ASSET": "$params.USD_ASSET",
+              "WINDOW_BLOCKS": "$params.WINDOW_BLOCKS",
+              "TOLERANCE_BPS": "$params.TOLERANCE_BPS"
+            }
+          }
+        },
+        "RequestMint": {
+          "$comment": "Outputs 0-2 are the ones the treasury checks, in this order. Generate the params with fake_oracle.py request-params.",
+          "description": "Step 1 of a mint: present a signed price statement, lock the L-BTC to burn and reserve the tUSDT it buys at that price. Opens the challenge window.",
+          "intent": "request {params.USD_AMOUNT} tUSDT for {params.REQUEST_LBTC_AMOUNT} L-BTC at {params.REQUEST_PRICE} cents per BTC",
+          "params": {
+            "STATEMENT_PRICE_INT": {
+              "type": "string",
+              "description": "The statement's price, integer digits, as a SimplicityHL list of bytes."
+            },
+            "STATEMENT_PRICE_FRAC": {
+              "type": "string",
+              "description": "The statement's price, the two fraction digits, as a pair of bytes."
+            },
+            "STATEMENT_SOURCES": {
+              "type": "string",
+              "description": "The statement's sources field, as a list of bytes."
+            },
+            "STATEMENT_METHOD": {
+              "type": "string",
+              "description": "The statement's method field, as a list of bytes."
+            },
+            "STATEMENT_TIMESTAMP": {
+              "type": "string",
+              "description": "The statement's timestamp digits, as a list of bytes."
+            },
+            "STATEMENT_NONCE": {
+              "type": "string",
+              "description": "The statement's nonce field, as a list of bytes."
+            },
+            "STATEMENT_SIG": {
+              "type": "string",
+              "description": "The oracle's signature, as (r, s)."
+            },
+            "REQUEST_PRICE": {
+              "type": "u64",
+              "description": "The statement's price in US cents. Must match the statement."
+            },
+            "REQUEST_TIMESTAMP": {
+              "type": "u64",
+              "description": "The statement's timestamp. Must match the statement."
+            },
+            "REQUEST_LBTC_AMOUNT": {
+              "type": "u64",
+              "description": "L-BTC to burn, in satoshis."
+            },
+            "REQUEST_RECIPIENT": {
+              "type": "string",
+              "description": "Address that receives the tUSDT, or the refund if the request is challenged."
+            },
+            "RECIPIENT_SPK_HASH": {
+              "type": "bytes32",
+              "compute": {
+                "type": "script_hash",
+                "address": "params.REQUEST_RECIPIENT"
+              }
+            },
+            "USD_AMOUNT": {
+              "type": "u64",
+              "compute": "params.REQUEST_LBTC_AMOUNT * params.REQUEST_PRICE / 100"
+            }
+          },
+          "inputs": [
+            {
+              "id": "treasury_in",
+              "description": "The treasury, input 0. It checks the statement and the three outputs after it.",
+              "utxo_source": {
+                "utxo_type": "treasury"
+              },
+              "asset": "instance.USD_ASSET",
+              "witnesses": {
+                "PATH": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "Either<Either<(), ()>, Either<(), ()>>",
+                  "value": "Left(Left(()))",
+                  "description": "The request path."
+                },
+                "REQUEST_PRICE": "unused",
+                "REQUEST_TIMESTAMP": "unused",
+                "REQUEST_LBTC_AMOUNT": "unused",
+                "REQUEST_RECIPIENT": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RECIPIENT_SPK_HASH"
+                },
+                "STATEMENT_PRICE_INT": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "List<u8, 16>",
+                  "value": "params.STATEMENT_PRICE_INT"
+                },
+                "STATEMENT_PRICE_FRAC": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "(u8, u8)",
+                  "value": "params.STATEMENT_PRICE_FRAC"
+                },
+                "STATEMENT_SOURCES": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "List<u8, 128>",
+                  "value": "params.STATEMENT_SOURCES"
+                },
+                "STATEMENT_METHOD": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "List<u8, 16>",
+                  "value": "params.STATEMENT_METHOD"
+                },
+                "STATEMENT_TIMESTAMP": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "List<u8, 16>",
+                  "value": "params.STATEMENT_TIMESTAMP"
+                },
+                "STATEMENT_NONCE": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "List<u8, 32>",
+                  "value": "params.STATEMENT_NONCE"
+                },
+                "STATEMENT_SIG": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "(u256, u256)",
+                  "value": "params.STATEMENT_SIG"
+                },
+                "BUDGET_PAD": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "List<u256, 16>",
+                  "value": "list![0, 0, 0, 0, 0, 0, 0, 0]",
+                  "description": "Zero words that buy execution budget for checking the statement. If a broadcast fails with \"Program's execution cost could exceed budget\", add more."
+                }
+              },
+              "ui": {
+                "label": "the tUSDT treasury",
+                "role": "covenant"
+              }
+            },
+            {
+              "id": "lbtc_in",
+              "description": "Wallet L-BTC to burn.",
+              "utxo_source": "wallet",
+              "asset": "lbtc",
+              "amount_sat": {
+                "min_amount": "params.REQUEST_LBTC_AMOUNT"
+              },
+              "ui": {
+                "label": "the L-BTC you are burning",
+                "role": "payment"
+              }
+            },
+            {
+              "id": "fee_input",
+              "description": "Wallet L-BTC UTXO covering the network fee.",
+              "utxo_source": "wallet",
+              "asset": "lbtc",
+              "optional": true,
+              "ui": {
+                "label": "input used for paying fees",
+                "role": "fee"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "pending_lbtc_out",
+              "description": "Output 0: the L-BTC, held at the request's pending address until the request is finalized or challenged.",
+              "destination": {
+                "utxo_type": "pending_mint",
+                "args": {
+                  "REQUEST_PRICE": "params.REQUEST_PRICE",
+                  "REQUEST_TIMESTAMP": "params.REQUEST_TIMESTAMP",
+                  "REQUEST_LBTC_AMOUNT": "params.REQUEST_LBTC_AMOUNT",
+                  "RECIPIENT_SPK_HASH": "params.RECIPIENT_SPK_HASH"
+                }
+              },
+              "asset": "lbtc",
+              "amount_sat": "params.REQUEST_LBTC_AMOUNT",
+              "ui": {
+                "label": "L-BTC held until the request settles",
+                "role": "covenant"
+              }
+            },
+            {
+              "id": "pending_usd_out",
+              "description": "Output 1: the tUSDT reserved for this request, at the same address.",
+              "destination": {
+                "utxo_type": "pending_mint",
+                "args": {
+                  "REQUEST_PRICE": "params.REQUEST_PRICE",
+                  "REQUEST_TIMESTAMP": "params.REQUEST_TIMESTAMP",
+                  "REQUEST_LBTC_AMOUNT": "params.REQUEST_LBTC_AMOUNT",
+                  "RECIPIENT_SPK_HASH": "params.RECIPIENT_SPK_HASH"
+                }
+              },
+              "asset": "instance.USD_ASSET",
+              "amount_sat": "params.USD_AMOUNT",
+              "ui": {
+                "label": "tUSDT reserved for the request",
+                "role": "covenant"
+              }
+            },
+            {
+              "id": "treasury_change_out",
+              "description": "Output 2: the rest of the treasury.",
+              "destination": {
+                "utxo_type": "treasury"
+              },
+              "asset": "instance.USD_ASSET",
+              "amount_sat": "treasury_in.amount_sat - params.USD_AMOUNT",
+              "ui": {
+                "label": "tUSDT left in the treasury",
+                "role": "covenant"
+              }
+            },
+            {
+              "id": "lbtc_change",
+              "description": "L-BTC change from the burn and fee inputs.",
+              "destination": "change",
+              "asset": "lbtc",
+              "optional": true,
+              "ui": {
+                "label": "L-BTC change returned to you",
+                "role": "change"
+              }
+            }
+          ]
+        },
+        "Finalize": {
+          "$comment": "Use the request's params file. Anyone can run it: the covenant fixes where both outputs go.",
+          "description": "Step 2 of a mint, once the window has passed: pay the reserved tUSDT to the recipient and burn the L-BTC.",
+          "intent": "finalize a request: pay {params.USD_AMOUNT} tUSDT to {params.REQUEST_RECIPIENT} and burn {params.REQUEST_LBTC_AMOUNT} L-BTC",
+          "params": {
+            "REQUEST_PRICE": {
+              "type": "u64",
+              "description": "The request's price in US cents."
+            },
+            "REQUEST_TIMESTAMP": {
+              "type": "u64",
+              "description": "The request statement's timestamp."
+            },
+            "REQUEST_LBTC_AMOUNT": {
+              "type": "u64",
+              "description": "The request's L-BTC, in satoshis."
+            },
+            "REQUEST_RECIPIENT": {
+              "type": "string",
+              "description": "The request's recipient address."
+            },
+            "RECIPIENT_SPK_HASH": {
+              "type": "bytes32",
+              "compute": {
+                "type": "script_hash",
+                "address": "params.REQUEST_RECIPIENT"
+              }
+            },
+            "USD_AMOUNT": {
+              "type": "u64",
+              "compute": "params.REQUEST_LBTC_AMOUNT * params.REQUEST_PRICE / 100"
+            }
+          },
+          "inputs": [
+            {
+              "id": "pending_lbtc_in",
+              "description": "The request's L-BTC, input 0. Its relative timelock is the challenge window, and it checks the whole transaction.",
+              "utxo_source": {
+                "utxo_type": "pending_mint",
+                "args": {
+                  "REQUEST_PRICE": "params.REQUEST_PRICE",
+                  "REQUEST_TIMESTAMP": "params.REQUEST_TIMESTAMP",
+                  "REQUEST_LBTC_AMOUNT": "params.REQUEST_LBTC_AMOUNT",
+                  "RECIPIENT_SPK_HASH": "params.RECIPIENT_SPK_HASH"
+                }
+              },
+              "asset": "lbtc",
+              "sequence": {
+                "relative_blocks": "instance.WINDOW_BLOCKS"
+              },
+              "witnesses": {
+                "PATH": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "Either<Either<(), ()>, Either<(), ()>>",
+                  "value": "Left(Right(()))",
+                  "description": "The finalize path."
+                },
+                "REQUEST_PRICE": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u64",
+                  "value": "params.REQUEST_PRICE"
+                },
+                "REQUEST_TIMESTAMP": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u64",
+                  "value": "params.REQUEST_TIMESTAMP"
+                },
+                "REQUEST_LBTC_AMOUNT": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u64",
+                  "value": "params.REQUEST_LBTC_AMOUNT"
+                },
+                "REQUEST_RECIPIENT": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RECIPIENT_SPK_HASH"
+                },
+                "STATEMENT_PRICE_INT": "unused",
+                "STATEMENT_PRICE_FRAC": "unused",
+                "STATEMENT_SOURCES": "unused",
+                "STATEMENT_METHOD": "unused",
+                "STATEMENT_TIMESTAMP": "unused",
+                "STATEMENT_NONCE": "unused",
+                "STATEMENT_SIG": "unused",
+                "BUDGET_PAD": "unused"
+              },
+              "ui": {
+                "label": "the request's L-BTC",
+                "role": "covenant"
+              }
+            },
+            {
+              "id": "pending_usd_in",
+              "description": "The request's reserved tUSDT, input 1.",
+              "utxo_source": {
+                "utxo_type": "pending_mint",
+                "args": {
+                  "REQUEST_PRICE": "params.REQUEST_PRICE",
+                  "REQUEST_TIMESTAMP": "params.REQUEST_TIMESTAMP",
+                  "REQUEST_LBTC_AMOUNT": "params.REQUEST_LBTC_AMOUNT",
+                  "RECIPIENT_SPK_HASH": "params.RECIPIENT_SPK_HASH"
+                }
+              },
+              "asset": "instance.USD_ASSET",
+              "witnesses": {
+                "PATH": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "Either<Either<(), ()>, Either<(), ()>>",
+                  "value": "Right(Right(()))",
+                  "description": "The sibling path."
+                },
+                "REQUEST_PRICE": "unused",
+                "REQUEST_TIMESTAMP": "unused",
+                "REQUEST_LBTC_AMOUNT": "unused",
+                "REQUEST_RECIPIENT": "unused",
+                "STATEMENT_PRICE_INT": "unused",
+                "STATEMENT_PRICE_FRAC": "unused",
+                "STATEMENT_SOURCES": "unused",
+                "STATEMENT_METHOD": "unused",
+                "STATEMENT_TIMESTAMP": "unused",
+                "STATEMENT_NONCE": "unused",
+                "STATEMENT_SIG": "unused",
+                "BUDGET_PAD": "unused"
+              },
+              "ui": {
+                "label": "the request's reserved tUSDT",
+                "role": "covenant"
+              }
+            },
+            {
+              "id": "fee_input",
+              "description": "Wallet L-BTC UTXO covering the network fee.",
+              "utxo_source": "wallet",
+              "asset": "lbtc",
+              "ui": {
+                "label": "input used for paying fees",
+                "role": "fee"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "usd_out",
+              "description": "Output 0: the tUSDT, to the recipient. Explicit, because the covenant reads its amount.",
+              "destination": "params.REQUEST_RECIPIENT",
+              "asset": "instance.USD_ASSET",
+              "amount_sat": "params.USD_AMOUNT",
+              "confidential": false,
+              "ui": {
+                "label": "tUSDT paid to the recipient",
+                "role": "settlement"
+              }
+            },
+            {
+              "id": "lbtc_burn",
+              "description": "Output 1: the L-BTC, burned.",
+              "destination": {
+                "type": "burn"
+              },
+              "asset": "lbtc",
+              "amount_sat": "params.REQUEST_LBTC_AMOUNT",
+              "ui": {
+                "label": "L-BTC burned",
+                "role": "burn"
+              }
+            },
+            {
+              "id": "fee_change",
+              "description": "L-BTC change from the fee input.",
+              "destination": "change",
+              "asset": "lbtc",
+              "optional": true,
+              "ui": {
+                "label": "fee change returned to you",
+                "role": "change"
+              }
+            }
+          ]
+        },
+        "Challenge": {
+          "$comment": "Generate the params with fake_oracle.py challenge-params. Anyone can run it.",
+          "description": "Cancel a request with a newer statement whose price differs from the request's by more than the tolerance. Refunds the L-BTC to the recipient and returns the tUSDT to the treasury.",
+          "intent": "challenge a request at {params.REQUEST_PRICE} cents per BTC: refund {params.REQUEST_LBTC_AMOUNT} L-BTC to {params.REQUEST_RECIPIENT}",
+          "params": {
+            "STATEMENT_PRICE_INT": {
+              "type": "string",
+              "description": "The newer statement's price, integer digits, as a SimplicityHL list of bytes."
+            },
+            "STATEMENT_PRICE_FRAC": {
+              "type": "string",
+              "description": "The newer statement's price, the two fraction digits, as a pair of bytes."
+            },
+            "STATEMENT_SOURCES": {
+              "type": "string",
+              "description": "The newer statement's sources field, as a list of bytes."
+            },
+            "STATEMENT_METHOD": {
+              "type": "string",
+              "description": "The newer statement's method field, as a list of bytes."
+            },
+            "STATEMENT_TIMESTAMP": {
+              "type": "string",
+              "description": "The newer statement's timestamp digits, as a list of bytes."
+            },
+            "STATEMENT_NONCE": {
+              "type": "string",
+              "description": "The newer statement's nonce field, as a list of bytes."
+            },
+            "STATEMENT_SIG": {
+              "type": "string",
+              "description": "The oracle's signature on the newer statement, as (r, s)."
+            },
+            "REQUEST_PRICE": {
+              "type": "u64",
+              "description": "The request's price in US cents."
+            },
+            "REQUEST_TIMESTAMP": {
+              "type": "u64",
+              "description": "The request statement's timestamp."
+            },
+            "REQUEST_LBTC_AMOUNT": {
+              "type": "u64",
+              "description": "The request's L-BTC, in satoshis."
+            },
+            "REQUEST_RECIPIENT": {
+              "type": "string",
+              "description": "The request's recipient address."
+            },
+            "RECIPIENT_SPK_HASH": {
+              "type": "bytes32",
+              "compute": {
+                "type": "script_hash",
+                "address": "params.REQUEST_RECIPIENT"
+              }
+            },
+            "USD_AMOUNT": {
+              "type": "u64",
+              "compute": "params.REQUEST_LBTC_AMOUNT * params.REQUEST_PRICE / 100"
+            }
+          },
+          "inputs": [
+            {
+              "id": "pending_lbtc_in",
+              "description": "The request's L-BTC, input 0. It checks the newer statement and the whole transaction.",
+              "utxo_source": {
+                "utxo_type": "pending_mint",
+                "args": {
+                  "REQUEST_PRICE": "params.REQUEST_PRICE",
+                  "REQUEST_TIMESTAMP": "params.REQUEST_TIMESTAMP",
+                  "REQUEST_LBTC_AMOUNT": "params.REQUEST_LBTC_AMOUNT",
+                  "RECIPIENT_SPK_HASH": "params.RECIPIENT_SPK_HASH"
+                }
+              },
+              "asset": "lbtc",
+              "witnesses": {
+                "PATH": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "Either<Either<(), ()>, Either<(), ()>>",
+                  "value": "Right(Left(()))",
+                  "description": "The challenge path."
+                },
+                "REQUEST_PRICE": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u64",
+                  "value": "params.REQUEST_PRICE"
+                },
+                "REQUEST_TIMESTAMP": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u64",
+                  "value": "params.REQUEST_TIMESTAMP"
+                },
+                "REQUEST_LBTC_AMOUNT": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u64",
+                  "value": "params.REQUEST_LBTC_AMOUNT"
+                },
+                "REQUEST_RECIPIENT": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "u256",
+                  "value": "params.RECIPIENT_SPK_HASH"
+                },
+                "STATEMENT_PRICE_INT": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "List<u8, 16>",
+                  "value": "params.STATEMENT_PRICE_INT"
+                },
+                "STATEMENT_PRICE_FRAC": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "(u8, u8)",
+                  "value": "params.STATEMENT_PRICE_FRAC"
+                },
+                "STATEMENT_SOURCES": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "List<u8, 128>",
+                  "value": "params.STATEMENT_SOURCES"
+                },
+                "STATEMENT_METHOD": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "List<u8, 16>",
+                  "value": "params.STATEMENT_METHOD"
+                },
+                "STATEMENT_TIMESTAMP": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "List<u8, 16>",
+                  "value": "params.STATEMENT_TIMESTAMP"
+                },
+                "STATEMENT_NONCE": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "List<u8, 32>",
+                  "value": "params.STATEMENT_NONCE"
+                },
+                "STATEMENT_SIG": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "(u256, u256)",
+                  "value": "params.STATEMENT_SIG"
+                },
+                "BUDGET_PAD": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "List<u256, 16>",
+                  "value": "list![0, 0, 0, 0, 0, 0, 0, 0]",
+                  "description": "Zero words that buy execution budget for checking the statement. If a broadcast fails with \"Program's execution cost could exceed budget\", add more."
+                }
+              },
+              "ui": {
+                "label": "the request's L-BTC",
+                "role": "covenant"
+              }
+            },
+            {
+              "id": "pending_usd_in",
+              "description": "The request's reserved tUSDT, input 1.",
+              "utxo_source": {
+                "utxo_type": "pending_mint",
+                "args": {
+                  "REQUEST_PRICE": "params.REQUEST_PRICE",
+                  "REQUEST_TIMESTAMP": "params.REQUEST_TIMESTAMP",
+                  "REQUEST_LBTC_AMOUNT": "params.REQUEST_LBTC_AMOUNT",
+                  "RECIPIENT_SPK_HASH": "params.RECIPIENT_SPK_HASH"
+                }
+              },
+              "asset": "instance.USD_ASSET",
+              "witnesses": {
+                "PATH": {
+                  "type": "simplicityhl",
+                  "simplicity_type": "Either<Either<(), ()>, Either<(), ()>>",
+                  "value": "Right(Right(()))",
+                  "description": "The sibling path."
+                },
+                "REQUEST_PRICE": "unused",
+                "REQUEST_TIMESTAMP": "unused",
+                "REQUEST_LBTC_AMOUNT": "unused",
+                "REQUEST_RECIPIENT": "unused",
+                "STATEMENT_PRICE_INT": "unused",
+                "STATEMENT_PRICE_FRAC": "unused",
+                "STATEMENT_SOURCES": "unused",
+                "STATEMENT_METHOD": "unused",
+                "STATEMENT_TIMESTAMP": "unused",
+                "STATEMENT_NONCE": "unused",
+                "STATEMENT_SIG": "unused",
+                "BUDGET_PAD": "unused"
+              },
+              "ui": {
+                "label": "the request's reserved tUSDT",
+                "role": "covenant"
+              }
+            },
+            {
+              "id": "fee_input",
+              "description": "Wallet L-BTC UTXO covering the network fee.",
+              "utxo_source": "wallet",
+              "asset": "lbtc",
+              "ui": {
+                "label": "input used for paying fees",
+                "role": "fee"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "lbtc_refund",
+              "description": "Output 0: the L-BTC, refunded to the recipient. Explicit, because the covenant reads its amount.",
+              "destination": "params.REQUEST_RECIPIENT",
+              "asset": "lbtc",
+              "amount_sat": "params.REQUEST_LBTC_AMOUNT",
+              "confidential": false,
+              "ui": {
+                "label": "L-BTC refunded to the requester",
+                "role": "refund"
+              }
+            },
+            {
+              "id": "usd_to_treasury",
+              "description": "Output 1: the reserved tUSDT, back to the treasury.",
+              "destination": {
+                "utxo_type": "treasury"
+              },
+              "asset": "instance.USD_ASSET",
+              "amount_sat": "params.USD_AMOUNT",
+              "ui": {
+                "label": "tUSDT returned to the treasury",
+                "role": "covenant"
+              }
+            },
+            {
+              "id": "fee_change",
+              "description": "L-BTC change from the fee input.",
+              "destination": "change",
+              "asset": "lbtc",
+              "optional": true,
+              "ui": {
+                "label": "fee change returned to you",
+                "role": "change"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
