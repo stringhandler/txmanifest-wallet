@@ -815,7 +815,21 @@ pub fn finalize_covenant_input(
     let cb_bytes = control_block.serialize();
 
     // Simplicity tapscript witness: [witness_bits, program_bytes, cmr_script, control_block]
-    pset_input.final_script_witness = Some(vec![witness, prog, cmr_bytes, cb_bytes]);
+    let stack = vec![witness, prog, cmr_bytes, cb_bytes];
+
+    // The node refuses a program that may cost more than the budget its witness buys (the
+    // serialized stack plus 50 weight units). Elements can pad with an annex, but Liquid
+    // does not relay one (`bad-witness-nonstandard`), so the padding has to be a witness
+    // the program itself reads. Say so here rather than as a broadcast error.
+    let cost = satisfied.redeem().bounds().cost;
+    if let Some(short) = cost.get_padding_size(&stack) {
+        anyhow::bail!(
+            "Program's execution cost exceeds its budget: the witness is {short} bytes short. \
+             Pad it with a witness the program reads."
+        );
+    }
+
+    pset_input.final_script_witness = Some(stack);
     Ok(())
 }
 
