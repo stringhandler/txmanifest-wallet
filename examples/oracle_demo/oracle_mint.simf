@@ -1,0 +1,512 @@
+/*
+ * ORACLE MINT
+ *
+ * Burn L-BTC for tUSDT at the current BTC/USD price, where "current" is enforced by a
+ * challenge window rather than by the chain.
+ *
+ * A Simplicity program cannot tell whether an oracle statement is recent. So a mint takes
+ * two steps. A request presents a signed statement and reserves the tUSDT it is worth.
+ * Then, for WINDOW_BLOCKS, anyone holding a newer statement whose price differs by more
+ * than TOLERANCE_BPS can cancel it: the L-BTC is refunded and the tUSDT goes back to the
+ * treasury. Once the window has passed, anyone can finalize it: the tUSDT goes to the
+ * recipient and the L-BTC is burned.
+ *
+ * One program, two states, told apart by a tapdata leaf beside the program leaf:
+ *
+ *   treasury  tapdata(0x00)                                holds the tUSDT supply
+ *   pending   tapdata(0x01 || price || timestamp || lbtc_amount || recipient)
+ *             one address per request, holding two UTXOs: the L-BTC (always input 0
+ *             when spent) and the reserved tUSDT (always input 1)
+ *
+ * Oracle statements are Mycelia Signal's canonical strings, ECDSA-signed over their
+ * sha256:
+ *
+ *   v1|PRICE|BTCUSD|84231.50|USD|2|binance,bitstamp,coinbase,kraken,okx|median|1741514400|482910
+ *
+ * The witness carries the string already split into its variable fields, and the program
+ * hashes it back together. Number fields must be all digits and text fields must contain
+ * no '|', so a signed string can only be read one way.
+ *
+ * The oracle's key is not fixed here. COLD_PUBKEY, which can be a committee's aggregate
+ * key, signs certificates that let an oracle key sign statements timestamped within a
+ * range, and each statement comes with one. A new or rotated oracle needs a new
+ * certificate, not a new program.
+ *
+ * A request's statement may not be dated more than MAX_FUTURE_SECONDS past the chain's
+ * median time, enforced through the transaction's lock time, so even a leaked oracle key
+ * can't sign a request that no honest statement is newer than.
+ */
+
+// ============================================================================
+// Boolean helpers (from simplicityhl-std, lib/binary.simf)
+// ============================================================================
+
+fn not(bit: bool) -> bool {
+    <u1>::into(jet::complement_1(<bool>::into(bit)))
+}
+
+fn or(a: bool, b: bool) -> bool {
+    <u1>::into(jet::or_1(<bool>::into(a), <bool>::into(b)))
+}
+
+fn and(a: bool, b: bool) -> bool {
+    <u1>::into(jet::and_1(<bool>::into(a), <bool>::into(b)))
+}
+
+// ============================================================================
+// ECDSA (verbatim from lib/secp256k1/ecdsa.simf, a proposed addition to simplicityhl-std)
+//
+// Copied because this wallet compiles each program from a single file.
+// ============================================================================
+
+/// Check that a signature component is a canonical scalar in `[1, n - 1]`.
+///
+/// The scalar jets reduce their inputs modulo `n`, so without this check `s + n` would
+/// verify wherever `s` does.
+fn is_signature_scalar(a: Scalar) -> bool {
+    and(jet::eq_256(jet::scalar_normalize(a), a), not(jet::scalar_is_zero(a)))
+}
+
+/// Decompress a public key, rejecting an x-coordinate that is not reduced modulo `p`.
+///
+/// `jet::decompress` reduces the x-coordinate itself, so without this check `x + p` would
+/// decode to the same key as `x`.
+fn decompress_public_key(pk: Point) -> Option<Ge> {
+    let (_, x): (u1, Fe) = pk;
+
+    match jet::eq_256(jet::fe_normalize(x), x) {
+        true => jet::decompress(pk),
+        false => None,
+    }
+}
+
+/// Check an ECDSA signature `(r, s)` over the message digest `msg` against the compressed
+/// public key `pk`, as in SEC 1 v2.0, section 4.1.4.
+///
+/// Like SEC 1, and unlike Bitcoin's low-S rule, this accepts both `(r, s)` and `(r, n - s)`.
+pub fn ecdsa_is_valid(pk: Point, msg: Message, sig: (Scalar, Scalar)) -> bool {
+    let (r, s): (Scalar, Scalar) = sig;
+
+    match decompress_public_key(pk) {
+        Some(q: Ge) => {
+            // The scalar jets reduce `msg` modulo `n`. If `s = 0` then `w = 0`, and the range
+            // check below rejects the signature.
+            let w: Scalar = jet::scalar_invert(s);
+            let u1: Scalar = jet::scalar_multiply(msg, w);
+            let u2: Scalar = jet::scalar_multiply(r, w);
+
+            // R = u1 * G + u2 * Q
+            let q: Gej = (q, 1);
+            let big_r: Gej = jet::linear_combination_1((u2, q), u1);
+
+            let r_matches: bool = match jet::gej_normalize(big_r) {
+                Some(big_r: Ge) => {
+                    let (x, _): (Fe, Fe) = big_r;
+                    // x < p < 2n, so reducing once gives x mod n.
+                    jet::eq_256(jet::scalar_normalize(x), r)
+                },
+                None => false,
+            };
+
+            and(and(is_signature_scalar(r), is_signature_scalar(s)), r_matches)
+        },
+        None => false,
+    }
+}
+
+/// Assert that `(r, s)` is a valid ECDSA signature over the message digest `msg` for the
+/// compressed public key `pk`.
+pub fn ecdsa_verify(pk: Point, msg: Message, sig: (Scalar, Scalar)) {
+    assert!(ecdsa_is_valid(pk, msg, sig));
+}
+
+// ============================================================================
+// Arithmetic helpers
+// ============================================================================
+
+fn safe_multiply(a: u64, b: u64) -> u64 {
+    let (high, low): (u64, u64) = <u128>::into(jet::multiply_64(a, b));
+    assert!(jet::is_zero_64(high));
+    low
+}
+
+fn safe_add(a: u64, b: u64) -> u64 {
+    let (carry, sum): (bool, u64) = jet::add_64(a, b);
+    assert!(not(carry));
+    sum
+}
+
+fn safe_subtract(a: u64, b: u64) -> u64 {
+    let (borrow, diff): (bool, u64) = jet::subtract_64(a, b);
+    assert!(not(borrow));
+    diff
+}
+
+/// tUSDT base units for `lbtc_amount` satoshis at `price_cents` US cents per BTC.
+///
+/// Both assets have 8 decimal places, so this is `lbtc_amount * price_cents / 100`,
+/// rounded down.
+fn usd_for(lbtc_amount: u64, price_cents: u64) -> u64 {
+    let (usd, _): (u64, u64) = jet::div_mod_64(safe_multiply(lbtc_amount, price_cents), 100);
+    usd
+}
+
+/// Whether `other` differs from `price` by more than TOLERANCE_BPS basis points of `price`.
+fn differs_beyond_tolerance(price: u64, other: u64) -> bool {
+    let diff: u64 = match jet::lt_64(other, price) {
+        true => safe_subtract(price, other),
+        false => safe_subtract(other, price),
+    };
+    jet::lt_64(safe_multiply(price, param::TOLERANCE_BPS), safe_multiply(diff, 10000))
+}
+
+// ============================================================================
+// Transaction helpers
+// ============================================================================
+
+fn get_input_script_hash(index: u32) -> u256 {
+    unwrap(jet::input_script_hash(index))
+}
+
+fn get_input_explicit_asset_amount(index: u32) -> (u256, u64) {
+    let (asset, amount): (Asset1, Amount1) = unwrap(jet::input_amount(index));
+    let asset_val: u256 = unwrap_right::<(u1, u256)>(asset);
+    let amount_val: u64 = unwrap_right::<(u1, u256)>(amount);
+    (asset_val, amount_val)
+}
+
+fn get_output_explicit_asset_amount(index: u32) -> (u256, u64) {
+    let (asset, amount): (Asset1, Amount1) = unwrap(jet::output_amount(index));
+    let asset_val: u256 = unwrap_right::<(u1, u256)>(asset);
+    let amount_val: u64 = unwrap_right::<(u1, u256)>(amount);
+    (asset_val, amount_val)
+}
+
+fn ensure_input_asset_with_amount_eq(index: u32, expected_asset: u256, expected_amount: u64) {
+    let (asset, amount): (u256, u64) = get_input_explicit_asset_amount(index);
+    assert!(jet::eq_256(asset, expected_asset));
+    assert!(jet::eq_64(amount, expected_amount));
+}
+
+fn ensure_output_script_hash_eq(index: u32, expected: u256) {
+    let actual: u256 = unwrap(jet::output_script_hash(index));
+    assert!(jet::eq_256(actual, expected));
+}
+
+fn ensure_output_asset_with_amount_eq(index: u32, expected_asset: u256, expected_amount: u64) {
+    let (asset, amount): (u256, u64) = get_output_explicit_asset_amount(index);
+    assert!(jet::eq_256(asset, expected_asset));
+    assert!(jet::eq_64(amount, expected_amount));
+}
+
+/// sha256 of a bare `OP_RETURN` script, the burn output this wallet builds.
+fn burn_script_hash() -> u256 {
+    0x189f40034be7a199f1fa9891668ee3ab6049f82d38c68be70f596eab2e1857b7
+}
+
+/// Assert that `timestamp` is less than MAX_FUTURE_SECONDS past the chain's median time.
+///
+/// A program can't read the time, but a transaction whose lock time is a time can only be
+/// mined once the chain's median time past is beyond it. Demanding a lock time of at least
+/// `timestamp - MAX_FUTURE_SECONDS` therefore bounds how far ahead of the chain a request's
+/// statement can be dated. Without it, a leaked oracle key could date a request past every
+/// honest statement, and nobody could challenge it until real time caught up.
+fn ensure_not_from_the_future(timestamp: u64) {
+    let (high, timestamp): (u32, u32) = <u64>::into(timestamp);
+    assert!(jet::is_zero_32(high));
+    let (borrow, earliest): (bool, u32) = jet::subtract_32(timestamp, param::MAX_FUTURE_SECONDS);
+    assert!(not(borrow));
+    jet::check_lock_time(earliest);
+}
+
+/// Assert that WINDOW_BLOCKS have passed since this input was confirmed.
+///
+/// This reads the input's own nSequence, which BIP68 enforces input by input. It avoids
+/// `check_lock_distance`, which reads the largest lock across all inputs, so another
+/// input's lock would satisfy it.
+fn ensure_window_elapsed() {
+    assert!(jet::le_32(2, jet::version()));
+    let (flags, blocks): (u16, u16) = <u32>::into(jet::current_sequence());
+    // Bit 31 disables the lock; bit 22 would count it in 512-second units, not blocks.
+    assert!(jet::is_zero_16(jet::and_16(flags, 0x8040)));
+    assert!(jet::le_16(param::WINDOW_BLOCKS, blocks));
+}
+
+// ============================================================================
+// Addresses
+// ============================================================================
+
+fn covenant_nums_key() -> u256 {
+    0x50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0
+}
+
+fn p2tr_script_hash(output_key: u256) -> u256 {
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_2(ctx, 0x5120);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, output_key);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+/// The script hash of this program's address with `state_leaf` as its tapdata leaf.
+fn script_hash_for_state(state_leaf: u256) -> u256 {
+    let tap_node: u256 = jet::build_tapbranch(jet::tapleaf_hash(), state_leaf);
+    p2tr_script_hash(jet::build_taptweak(covenant_nums_key(), tap_node))
+}
+
+fn treasury_script_hash() -> u256 {
+    let ctx: Ctx8 = jet::tapdata_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, 0);
+    script_hash_for_state(jet::sha_256_ctx_8_finalize(ctx))
+}
+
+/// A mint request: price in US cents, oracle timestamp, L-BTC satoshis, and the sha256 of
+/// the scriptPubKey that receives the tUSDT, or the refund.
+type Request = (u64, u64, u64, u256);
+
+fn pending_script_hash(request: Request) -> u256 {
+    let (price, timestamp, lbtc_amount, recipient): Request = request;
+    let ctx: Ctx8 = jet::tapdata_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, 1);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, price);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, timestamp);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, lbtc_amount);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, recipient);
+    script_hash_for_state(jet::sha_256_ctx_8_finalize(ctx))
+}
+
+// ============================================================================
+// Oracle statements
+// ============================================================================
+
+/// COLD_PUBKEY's word that an oracle key may sign statements timestamped from
+/// `valid_from` to `valid_until`, inclusive: the key as its compressed prefix byte and
+/// x-coordinate, the range, and the BIP340 signature.
+type Certificate = ((u8, u256), u64, u64, Signature);
+
+/// A canonical string's variable fields: the price's integer digits, its two fraction
+/// digits, sources, method, timestamp digits and nonce. Then the oracle's signature
+/// `(r, s)`, and the certificate for its key.
+type Statement = (
+    List<u8, 16>,
+    (u8, u8),
+    List<u8, 128>,
+    List<u8, 16>,
+    List<u8, 16>,
+    List<u8, 32>,
+    (Scalar, Scalar),
+    Certificate
+);
+
+/// Check COLD_PUBKEY signed `cert`, and return the oracle key and the range it covers.
+///
+/// The signed message is `tagged_hash("oracle-demo/oracle-cert/v1", key || from || until)`
+/// with the key in its 33-byte compressed form, so no other signature by the cold key can
+/// pass for a certificate.
+fn verify_certificate(cert: Certificate) -> (Point, u64, u64) {
+    let (key, valid_from, valid_until, sig): Certificate = cert;
+    let (prefix, x): (u8, u256) = key;
+    assert!(or(jet::eq_8(prefix, 2), jet::eq_8(prefix, 3)));
+
+    // sha256("oracle-demo/oracle-cert/v1")
+    let tag: u256 = 0x026a11d3eb897194ef8efa87e6d28690e25bee5a89ee37142b5ba3816dcc4b89;
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, tag);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, tag);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, prefix);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, x);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, valid_from);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, valid_until);
+    jet::bip_0340_verify((param::COLD_PUBKEY, jet::sha_256_ctx_8_finalize(ctx)), sig);
+
+    ((<bool>::into(jet::eq_8(prefix, 3)), x), valid_from, valid_until)
+}
+
+/// Hash one decimal digit and fold it into the number read so far.
+fn digit_step(byte: u8, acc: (Ctx8, u64)) -> (Ctx8, u64) {
+    let (ctx, value): (Ctx8, u64) = acc;
+    assert!(jet::le_8(48, byte));
+    assert!(jet::le_8(byte, 57));
+    let (_, digit): (bool, u8) = jet::subtract_8(byte, 48);
+    let value: u64 = safe_add(safe_multiply(value, 10), jet::left_pad_low_8_64(digit));
+    (jet::sha_256_ctx_8_add_1(ctx, byte), value)
+}
+
+/// Hash one byte of a text field, which may be anything but the '|' separator.
+fn text_step(byte: u8, ctx: Ctx8) -> Ctx8 {
+    assert!(not(jet::eq_8(byte, 124)));
+    jet::sha_256_ctx_8_add_1(ctx, byte)
+}
+
+fn add_separator(ctx: Ctx8) -> Ctx8 {
+    jet::sha_256_ctx_8_add_1(ctx, 124)
+}
+
+/// Rebuild a statement's canonical string, check a certified oracle signed it within its
+/// certificate's range, and return its price in US cents and its timestamp.
+fn verify_statement(statement: Statement) -> (u64, u64) {
+    let (price_int, price_frac, sources, method, timestamp, nonce, sig, cert): Statement =
+        statement;
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    // "v1|PRICE|BTCUSD|"
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_16(ctx, 0x76317c50524943457c4254435553447c);
+    let (ctx, price): (Ctx8, u64) = fold::<digit_step, 16>(price_int, (ctx, 0));
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, 46); // "."
+    let (frac_tens, frac_units): (u8, u8) = price_frac;
+    let (ctx, price): (Ctx8, u64) = digit_step(frac_units, digit_step(frac_tens, (ctx, price)));
+    // "|USD|2|"
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, 0x7c555344);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_2(ctx, 0x7c32);
+    let ctx: Ctx8 = add_separator(ctx);
+    let ctx: Ctx8 = fold::<text_step, 128>(sources, ctx);
+    let ctx: Ctx8 = add_separator(ctx);
+    let ctx: Ctx8 = fold::<text_step, 16>(method, ctx);
+    let ctx: Ctx8 = add_separator(ctx);
+    let (ctx, timestamp): (Ctx8, u64) = fold::<digit_step, 16>(timestamp, (ctx, 0));
+    let ctx: Ctx8 = add_separator(ctx);
+    let ctx: Ctx8 = fold::<text_step, 32>(nonce, ctx);
+
+    let (oracle_key, valid_from, valid_until): (Point, u64, u64) = verify_certificate(cert);
+    assert!(jet::le_64(valid_from, timestamp));
+    assert!(jet::le_64(timestamp, valid_until));
+    ecdsa_verify(oracle_key, jet::sha_256_ctx_8_finalize(ctx), sig);
+    (price, timestamp)
+}
+
+// ============================================================================
+// Spending paths
+// ============================================================================
+
+/// Request: spend the treasury (input 0) to open a pending request.
+///
+/// Outputs: 0 the L-BTC to burn and 1 the tUSDT it buys, both at the request's pending
+/// address; 2 the rest of the treasury, back at the treasury address.
+fn request_path(statement: Statement, recipient: u256) {
+    assert!(jet::eq_32(jet::current_index(), 0));
+    let treasury: u256 = treasury_script_hash();
+    assert!(jet::eq_256(get_input_script_hash(0), treasury));
+
+    let (price, timestamp): (u64, u64) = verify_statement(statement);
+    ensure_not_from_the_future(timestamp);
+    let (lbtc, lbtc_amount): (u256, u64) = get_output_explicit_asset_amount(0);
+    assert!(jet::eq_256(lbtc, param::LBTC_ASSET));
+    let pending: u256 = pending_script_hash((price, timestamp, lbtc_amount, recipient));
+    let usd_amount: u64 = usd_for(lbtc_amount, price);
+
+    ensure_output_script_hash_eq(0, pending);
+    ensure_output_script_hash_eq(1, pending);
+    ensure_output_asset_with_amount_eq(1, param::USD_ASSET, usd_amount);
+
+    let (usd, held): (u256, u64) = get_input_explicit_asset_amount(0);
+    assert!(jet::eq_256(usd, param::USD_ASSET));
+    ensure_output_script_hash_eq(2, treasury);
+    ensure_output_asset_with_amount_eq(2, param::USD_ASSET, safe_subtract(held, usd_amount));
+}
+
+/// Check that inputs 0 and 1 are `request`'s L-BTC and tUSDT, run from input 0, and return
+/// the tUSDT amount.
+fn ensure_pending_inputs(request: Request) -> u64 {
+    assert!(jet::eq_32(jet::current_index(), 0));
+    let (price, _, lbtc_amount, _): Request = request;
+    let pending: u256 = pending_script_hash(request);
+    assert!(jet::eq_256(get_input_script_hash(0), pending));
+    assert!(jet::eq_256(get_input_script_hash(1), pending));
+
+    let usd_amount: u64 = usd_for(lbtc_amount, price);
+    ensure_input_asset_with_amount_eq(0, param::LBTC_ASSET, lbtc_amount);
+    ensure_input_asset_with_amount_eq(1, param::USD_ASSET, usd_amount);
+    usd_amount
+}
+
+/// Finalize: after the window, pay the tUSDT to the recipient (output 0) and burn the
+/// L-BTC (output 1).
+fn finalize_path(request: Request) {
+    let usd_amount: u64 = ensure_pending_inputs(request);
+    ensure_window_elapsed();
+    let (_, _, lbtc_amount, recipient): Request = request;
+
+    ensure_output_script_hash_eq(0, recipient);
+    ensure_output_asset_with_amount_eq(0, param::USD_ASSET, usd_amount);
+    ensure_output_script_hash_eq(1, burn_script_hash());
+    ensure_output_asset_with_amount_eq(1, param::LBTC_ASSET, lbtc_amount);
+}
+
+/// Challenge: with a newer statement whose price differs by more than the tolerance,
+/// refund the L-BTC to the recipient (output 0) and return the tUSDT to the treasury
+/// (output 1).
+///
+/// Nothing stops a challenge after the window: a program can't require that a block
+/// height has *not* been reached. A request stays open to challenge until it is finalized.
+fn challenge_path(request: Request, statement: Statement) {
+    let usd_amount: u64 = ensure_pending_inputs(request);
+    let (price, timestamp, lbtc_amount, recipient): Request = request;
+    let (new_price, new_timestamp): (u64, u64) = verify_statement(statement);
+    assert!(jet::lt_64(timestamp, new_timestamp));
+    assert!(differs_beyond_tolerance(price, new_price));
+
+    ensure_output_script_hash_eq(0, recipient);
+    ensure_output_asset_with_amount_eq(0, param::LBTC_ASSET, lbtc_amount);
+    ensure_output_script_hash_eq(1, treasury_script_hash());
+    ensure_output_asset_with_amount_eq(1, param::USD_ASSET, usd_amount);
+}
+
+/// Sibling: the pending tUSDT, spent at input 1 beside its L-BTC at input 0, whose finalize
+/// or challenge path checks the whole transaction.
+///
+/// Refused at the treasury address. Otherwise a second treasury UTXO could ride along with
+/// a request as input 1, with nothing checking where its tUSDT goes.
+fn sibling_path() {
+    assert!(jet::eq_32(jet::current_index(), 1));
+    let mine: u256 = get_input_script_hash(1);
+    assert!(jet::eq_256(mine, get_input_script_hash(0)));
+    assert!(not(jet::eq_256(mine, treasury_script_hash())));
+}
+
+/// One word of budget padding, which must be zero.
+fn padding_word(word: u256, acc: ()) -> () {
+    assert!(jet::eq_256(word, 0));
+    acc
+}
+
+fn main() {
+    // A program may not cost more than its witness's size buys, and checking a statement
+    // costs more than the statement's own bytes. Liquid does not relay the annex that
+    // would otherwise pad it, so the request and challenge paths are padded here with
+    // zero words. Other paths leave the list empty.
+    fold::<padding_word, 16>(witness::BUDGET_PAD, ());
+
+    let request: Request = (
+        witness::REQUEST_PRICE,
+        witness::REQUEST_TIMESTAMP,
+        witness::REQUEST_LBTC_AMOUNT,
+        witness::REQUEST_RECIPIENT
+    );
+    let statement: Statement = (
+        witness::STATEMENT_PRICE_INT,
+        witness::STATEMENT_PRICE_FRAC,
+        witness::STATEMENT_SOURCES,
+        witness::STATEMENT_METHOD,
+        witness::STATEMENT_TIMESTAMP,
+        witness::STATEMENT_NONCE,
+        witness::STATEMENT_SIG,
+        (
+            witness::CERT_ORACLE_KEY,
+            witness::CERT_VALID_FROM,
+            witness::CERT_VALID_UNTIL,
+            witness::CERT_SIG
+        )
+    );
+
+    match witness::PATH {
+        Left(open_or_close: Either<(), ()>) => match open_or_close {
+            Left(u: ()) => {
+                let (_, _, _, recipient): Request = request;
+                request_path(statement, recipient)
+            },
+            Right(u: ()) => finalize_path(request),
+        },
+        Right(cancel_or_sibling: Either<(), ()>) => match cancel_or_sibling {
+            Left(u: ()) => challenge_path(request, statement),
+            Right(u: ()) => sibling_path(),
+        },
+    }
+}

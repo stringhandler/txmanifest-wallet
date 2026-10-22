@@ -22,17 +22,31 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
-/// Every `examples/*/txmanifest.json`, sorted for stable failure output.
+/// Every `txmanifest.json` in an example's directory or one level below it, sorted for
+/// stable failure output.
 fn example_manifests() -> Vec<PathBuf> {
-    let mut found: Vec<PathBuf> = std::fs::read_dir(workspace_root().join("examples"))
-        .expect("examples/ should exist")
-        .filter_map(|entry| {
-            let path = entry.ok()?.path().join("txmanifest.json");
-            path.is_file().then_some(path)
+    let mut found: Vec<PathBuf> = subdirs(&workspace_root().join("examples"))
+        .into_iter()
+        .flat_map(|dir| {
+            let mut dirs = subdirs(&dir);
+            dirs.push(dir);
+            dirs
         })
+        .map(|dir| dir.join("txmanifest.json"))
+        .filter(|path| path.is_file())
         .collect();
     found.sort();
     found
+}
+
+fn subdirs(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .expect("examples/ should be readable")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            path.is_dir().then_some(path)
+        })
+        .collect()
 }
 
 fn run_cli(args: &[&str]) -> Output {
