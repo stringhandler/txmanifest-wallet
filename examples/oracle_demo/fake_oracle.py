@@ -380,6 +380,15 @@ def cmd_challenge_params(args):
     write_json(params, args.out)
 
 
+def cmd_statement_params(args):
+    fields, params = statement_params(load_json(args.statement), load_json(args.cert))
+    if args.claim:
+        params.update({"CLAIM_PRICE": str(fields["price_cents"]), "CLAIM_TIMESTAMP": str(fields["timestamp"])})
+    for path in args.merge or []:
+        params.update({k: v for k, v in load_json(path).items() if not k.startswith(("STATEMENT_", "CERT_"))})
+    write_json(params, args.out)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -436,6 +445,14 @@ def main():
     p.add_argument("--cert", required=True, help="the certificate for the key that signed it")
     p.add_argument("--out")
     p.set_defaults(func=cmd_challenge_params)
+
+    p = sub.add_parser("statement-params", help="params for a lending_v4 liquidation action")
+    p.add_argument("statement")
+    p.add_argument("--cert", required=True, help="the certificate for the key that signed the statement")
+    p.add_argument("--claim", action="store_true", help="set CLAIM_PRICE and CLAIM_TIMESTAMP from it (StartLiquidation)")
+    p.add_argument("--merge", action="append", help="copy the other params from this file, e.g. the claim (CancelLiquidation)")
+    p.add_argument("--out")
+    p.set_defaults(func=cmd_statement_params)
 
     args = parser.parse_args()
     args.func(args)

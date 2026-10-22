@@ -205,11 +205,11 @@ fn get_borrower_debt_slot_leaf(borrower_debt: u64) -> u256 {
     jet::sha_256_ctx_8_finalize(state_ctx2)
 }
 
-fn get_script_hash_for_storage(is_active: bool, borrower_debt: u64) -> u256 {
-    let is_active_slot_leaf: u256 = get_is_active_slot_leaf(is_active);
+/// The script hash of this program's address with `state_slot_leaf` as storage slot 0.
+fn get_script_hash_for_state_slot(state_slot_leaf: u256, borrower_debt: u64) -> u256 {
     let borrower_debt_slot_leaf: u256 = get_borrower_debt_slot_leaf(borrower_debt);
 
-    let first_tap_node: u256 = jet::build_tapbranch(jet::tapleaf_hash(), is_active_slot_leaf);
+    let first_tap_node: u256 = jet::build_tapbranch(jet::tapleaf_hash(), state_slot_leaf);
     let tap_node: u256 = jet::build_tapbranch(first_tap_node, borrower_debt_slot_leaf);
 
     // Compute a TapTweak
@@ -222,6 +222,10 @@ fn get_script_hash_for_storage(is_active: bool, borrower_debt: u64) -> u256 {
     let hash_ctx3: Ctx8 = jet::sha_256_ctx_8_add_32(hash_ctx2, tweaked_key);
 
     jet::sha_256_ctx_8_finalize(hash_ctx3)
+}
+
+fn get_script_hash_for_storage(is_active: bool, borrower_debt: u64) -> u256 {
+    get_script_hash_for_state_slot(get_is_active_slot_leaf(is_active), borrower_debt)
 }
 
 // Main paths helpers
@@ -406,13 +410,13 @@ fn get_full_repayment_protocol_fee_vault_indexes(start_input_index: u32, start_o
     (safe_add_32(start_input_index, 3), safe_add_32(start_output_index, 2))
 }
 
-fn full_repay_offer(current_debt: u64) {
+/// Full repayment of the loan at `current_script_hash`: active, or pending liquidation.
+fn full_repay_from(current_script_hash: u256, current_debt: u64) {
     let (borrower_nft_input_index, borrower_nft_output_index): (u32, u32) = (0, 0);
     let offer_input_index: u32 = get_full_repayment_offer_input_index(borrower_nft_input_index);
 
     assert!(jet::eq_32(jet::current_index(), offer_input_index));
 
-    let current_script_hash: u256 = get_script_hash_for_storage(true, current_debt);
     ensure_input_script_hash(offer_input_index, current_script_hash);
 
     ensure_input_asset_and_amount(offer_input_index, param::COLLATERAL_ASSET_ID, param::COLLATERAL_AMOUNT);
@@ -429,6 +433,10 @@ fn full_repay_offer(current_debt: u64) {
         current_debt,
         current_debt
     );
+}
+
+fn full_repay_offer(current_debt: u64) {
+    full_repay_from(get_script_hash_for_storage(true, current_debt), current_debt);
 }
 
 // Liquidation flow
@@ -541,8 +549,353 @@ fn cancel_offer() {
     );
 }
 
-fn main() {
-    match witness::PATH {
+// ============================================================================
+// Oracle liquidation
+//
+// Before the loan expires, the lender can liquidate at the current price, through a
+// challenge window:
+//
+//   start   the lender presents a certified oracle statement at which the collateral is
+//           worth less than the debt allows (LIQUIDATION_LTV_BPS), and the loan moves to
+//           the pending state, recording the statement's timestamp and price
+//   cancel  anyone presents a newer certified statement at which it isn't, and the loan
+//           goes back to active
+//   finish  after WINDOW_BLOCKS, the lender burns the lender NFT and takes the
+//           collateral, as on expiry
+//   repay   the borrower can still repay in full while it is pending
+//
+// The statement, certificate and lock-time checks are oracle_demo's (oracle_mint.simf),
+// copied because this wallet compiles each program from a single file.
+// ============================================================================
+
+// Boolean helpers (from simplicityhl-std, lib/binary.simf)
+
+fn not(bit: bool) -> bool {
+    <u1>::into(jet::complement_1(<bool>::into(bit)))
+}
+
+fn or(a: bool, b: bool) -> bool {
+    <u1>::into(jet::or_1(<bool>::into(a), <bool>::into(b)))
+}
+
+fn and(a: bool, b: bool) -> bool {
+    <u1>::into(jet::and_1(<bool>::into(a), <bool>::into(b)))
+}
+
+// ECDSA (verbatim from lib/secp256k1/ecdsa.simf, a proposed addition to simplicityhl-std)
+
+/// Check that a signature component is a canonical scalar in `[1, n - 1]`.
+///
+/// The scalar jets reduce their inputs modulo `n`, so without this check `s + n` would
+/// verify wherever `s` does.
+fn is_signature_scalar(a: Scalar) -> bool {
+    and(jet::eq_256(jet::scalar_normalize(a), a), not(jet::scalar_is_zero(a)))
+}
+
+/// Decompress a public key, rejecting an x-coordinate that is not reduced modulo `p`.
+///
+/// `jet::decompress` reduces the x-coordinate itself, so without this check `x + p` would
+/// decode to the same key as `x`.
+fn decompress_public_key(pk: Point) -> Option<Ge> {
+    let (_, x): (u1, Fe) = pk;
+
+    match jet::eq_256(jet::fe_normalize(x), x) {
+        true => jet::decompress(pk),
+        false => None,
+    }
+}
+
+/// Check an ECDSA signature `(r, s)` over the message digest `msg` against the compressed
+/// public key `pk`, as in SEC 1 v2.0, section 4.1.4.
+///
+/// Like SEC 1, and unlike Bitcoin's low-S rule, this accepts both `(r, s)` and `(r, n - s)`.
+pub fn ecdsa_is_valid(pk: Point, msg: Message, sig: (Scalar, Scalar)) -> bool {
+    let (r, s): (Scalar, Scalar) = sig;
+
+    match decompress_public_key(pk) {
+        Some(q: Ge) => {
+            // The scalar jets reduce `msg` modulo `n`. If `s = 0` then `w = 0`, and the range
+            // check below rejects the signature.
+            let w: Scalar = jet::scalar_invert(s);
+            let u1: Scalar = jet::scalar_multiply(msg, w);
+            let u2: Scalar = jet::scalar_multiply(r, w);
+
+            // R = u1 * G + u2 * Q
+            let q: Gej = (q, 1);
+            let big_r: Gej = jet::linear_combination_1((u2, q), u1);
+
+            let r_matches: bool = match jet::gej_normalize(big_r) {
+                Some(big_r: Ge) => {
+                    let (x, _): (Fe, Fe) = big_r;
+                    // x < p < 2n, so reducing once gives x mod n.
+                    jet::eq_256(jet::scalar_normalize(x), r)
+                },
+                None => false,
+            };
+
+            and(and(is_signature_scalar(r), is_signature_scalar(s)), r_matches)
+        },
+        None => false,
+    }
+}
+
+/// Assert that `(r, s)` is a valid ECDSA signature over the message digest `msg` for the
+/// compressed public key `pk`.
+pub fn ecdsa_verify(pk: Point, msg: Message, sig: (Scalar, Scalar)) {
+    assert!(ecdsa_is_valid(pk, msg, sig));
+}
+
+fn safe_multiply_64(first: u64, second: u64) -> u64 {
+    let (hi, lo): (u64, u64) = <u128>::into(jet::multiply_64(first, second));
+    check_asset_amounts_eq(hi, 0);
+    lo
+}
+
+// Oracle statements
+
+/// COLD_PUBKEY's word that an oracle key may sign statements timestamped from
+/// `valid_from` to `valid_until`, inclusive: the key as its compressed prefix byte and
+/// x-coordinate, the range, and the BIP340 signature.
+type Certificate = ((u8, u256), u64, u64, Signature);
+
+/// A canonical string's variable fields: the price's integer digits, its two fraction
+/// digits, sources, method, timestamp digits and nonce. Then the oracle's signature
+/// `(r, s)`, and the certificate for its key.
+type Statement = (
+    List<u8, 16>,
+    (u8, u8),
+    List<u8, 128>,
+    List<u8, 16>,
+    List<u8, 16>,
+    List<u8, 32>,
+    (Scalar, Scalar),
+    Certificate
+);
+
+/// Check COLD_PUBKEY signed `cert`, and return the oracle key and the range it covers.
+///
+/// The signed message is `tagged_hash("oracle-demo/oracle-cert/v1", key || from || until)`
+/// with the key in its 33-byte compressed form, so no other signature by the cold key can
+/// pass for a certificate.
+fn verify_certificate(cert: Certificate) -> (Point, u64, u64) {
+    let (key, valid_from, valid_until, sig): Certificate = cert;
+    let (prefix, x): (u8, u256) = key;
+    assert!(or(jet::eq_8(prefix, 2), jet::eq_8(prefix, 3)));
+
+    // sha256("oracle-demo/oracle-cert/v1")
+    let tag: u256 = 0x026a11d3eb897194ef8efa87e6d28690e25bee5a89ee37142b5ba3816dcc4b89;
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, tag);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, tag);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, prefix);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, x);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, valid_from);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, valid_until);
+    jet::bip_0340_verify((param::COLD_PUBKEY, jet::sha_256_ctx_8_finalize(ctx)), sig);
+
+    ((<bool>::into(jet::eq_8(prefix, 3)), x), valid_from, valid_until)
+}
+
+/// Hash one decimal digit and fold it into the number read so far.
+fn digit_step(byte: u8, acc: (Ctx8, u64)) -> (Ctx8, u64) {
+    let (ctx, value): (Ctx8, u64) = acc;
+    assert!(jet::le_8(48, byte));
+    assert!(jet::le_8(byte, 57));
+    let (_, digit): (bool, u8) = jet::subtract_8(byte, 48);
+    let value: u64 = safe_add_64(safe_multiply_64(value, 10), jet::left_pad_low_8_64(digit));
+    (jet::sha_256_ctx_8_add_1(ctx, byte), value)
+}
+
+/// Hash one byte of a text field, which may be anything but the '|' separator.
+fn text_step(byte: u8, ctx: Ctx8) -> Ctx8 {
+    assert!(not(jet::eq_8(byte, 124)));
+    jet::sha_256_ctx_8_add_1(ctx, byte)
+}
+
+fn add_separator(ctx: Ctx8) -> Ctx8 {
+    jet::sha_256_ctx_8_add_1(ctx, 124)
+}
+
+/// Rebuild a statement's canonical string, check a certified oracle signed it within its
+/// certificate's range, and return its price in US cents and its timestamp.
+fn verify_statement(statement: Statement) -> (u64, u64) {
+    let (price_int, price_frac, sources, method, timestamp, nonce, sig, cert): Statement =
+        statement;
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    // "v1|PRICE|BTCUSD|"
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_16(ctx, 0x76317c50524943457c4254435553447c);
+    let (ctx, price): (Ctx8, u64) = fold::<digit_step, 16>(price_int, (ctx, 0));
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, 46); // "."
+    let (frac_tens, frac_units): (u8, u8) = price_frac;
+    let (ctx, price): (Ctx8, u64) = digit_step(frac_units, digit_step(frac_tens, (ctx, price)));
+    // "|USD|2|"
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, 0x7c555344);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_2(ctx, 0x7c32);
+    let ctx: Ctx8 = add_separator(ctx);
+    let ctx: Ctx8 = fold::<text_step, 128>(sources, ctx);
+    let ctx: Ctx8 = add_separator(ctx);
+    let ctx: Ctx8 = fold::<text_step, 16>(method, ctx);
+    let ctx: Ctx8 = add_separator(ctx);
+    let (ctx, timestamp): (Ctx8, u64) = fold::<digit_step, 16>(timestamp, (ctx, 0));
+    let ctx: Ctx8 = add_separator(ctx);
+    let ctx: Ctx8 = fold::<text_step, 32>(nonce, ctx);
+
+    let (oracle_key, valid_from, valid_until): (Point, u64, u64) = verify_certificate(cert);
+    assert!(jet::le_64(valid_from, timestamp));
+    assert!(jet::le_64(timestamp, valid_until));
+    ecdsa_verify(oracle_key, jet::sha_256_ctx_8_finalize(ctx), sig);
+    (price, timestamp)
+}
+
+/// Assert that `timestamp` is less than MAX_FUTURE_SECONDS past the chain's median time.
+///
+/// A program can't read the time, but a transaction whose lock time is a time can only be
+/// mined once the chain's median time past is beyond it. Demanding a lock time of at least
+/// `timestamp - MAX_FUTURE_SECONDS` therefore bounds how far ahead of the chain a request's
+/// statement can be dated. Without it, a leaked oracle key could date a request past every
+/// honest statement, and nobody could challenge it until real time caught up.
+fn ensure_not_from_the_future(timestamp: u64) {
+    let (high, timestamp): (u32, u32) = <u64>::into(timestamp);
+    assert!(jet::is_zero_32(high));
+    let (borrow, earliest): (bool, u32) = jet::subtract_32(timestamp, param::MAX_FUTURE_SECONDS);
+    assert!(not(borrow));
+    jet::check_lock_time(earliest);
+}
+
+/// Assert that WINDOW_BLOCKS have passed since this input, the pending liquidation, was
+/// confirmed.
+///
+/// This reads the input's own nSequence, which BIP68 enforces input by input. It avoids
+/// `check_lock_distance`, which reads the largest lock across all inputs, so another
+/// input's lock would satisfy it.
+fn ensure_window_elapsed() {
+    assert!(jet::le_32(2, jet::version()));
+    let (flags, blocks): (u16, u16) = <u32>::into(jet::current_sequence());
+    // Bit 31 disables the lock; bit 22 would count it in 512-second units, not blocks.
+    assert!(jet::is_zero_16(jet::and_16(flags, 0x8040)));
+    assert!(jet::le_16(param::WINDOW_BLOCKS, blocks));
+}
+
+// Liquidation state
+
+/// A pending liquidation's claim: the statement's timestamp and its price in US cents.
+type Claim = (u64, u64);
+
+/// Storage slot 0 for a pending liquidation: `claim_timestamp || claim_price || 0 || 2`.
+/// The offer and active states are 0 and 1 in the low 8 bytes, as in lending_v3.
+fn get_liquidation_slot_leaf(claim: Claim) -> u256 {
+    let (claim_timestamp, claim_price): Claim = claim;
+    let state: u256 = <(u128, u128)>::into((
+        <(u64, u64)>::into((claim_timestamp, claim_price)),
+        <(u64, u64)>::into((0, 2))
+    ));
+
+    let state_ctx1: Ctx8 = jet::tapdata_init();
+    let state_ctx2: Ctx8 = jet::sha_256_ctx_8_add_32(state_ctx1, state);
+
+    jet::sha_256_ctx_8_finalize(state_ctx2)
+}
+
+fn get_script_hash_for_liquidation(claim: Claim, borrower_debt: u64) -> u256 {
+    get_script_hash_for_state_slot(get_liquidation_slot_leaf(claim), borrower_debt)
+}
+
+/// Whether the loan may be liquidated at `price_cents`: whether the debt is more than
+/// LIQUIDATION_LTV_BPS of the collateral's value.
+///
+/// The collateral is valued in principal base units as `COLLATERAL_AMOUNT * price / 100`,
+/// which assumes satoshis of collateral against a dollar asset with 8 decimal places, as
+/// L-BTC against tUSDT.
+fn is_liquidatable(borrower_debt: u64, price_cents: u64) -> bool {
+    let collateral_value: u64 = jet::divide_64(safe_multiply_64(param::COLLATERAL_AMOUNT, price_cents), 100);
+    jet::lt_64(
+        safe_multiply_64(collateral_value, param::LIQUIDATION_LTV_BPS),
+        safe_multiply_64(borrower_debt, get_max_basis_points())
+    )
+}
+
+// Liquidation paths
+
+/// Start: spend the active loan (input 0) with the lender NFT (input 1, kept at output 1),
+/// and move it to the pending state (output 0).
+fn start_liquidation(current_debt: u64, statement: Statement) {
+    assert!(jet::eq_32(jet::current_index(), 0));
+    ensure_input_script_hash(0, get_script_hash_for_storage(true, current_debt));
+    ensure_input_asset_and_amount(0, param::COLLATERAL_ASSET_ID, param::COLLATERAL_AMOUNT);
+    ensure_io_asset_and_amount_eq(1, 1, param::LENDER_NFT_ASSET_ID, 1);
+
+    let (price, timestamp): (u64, u64) = verify_statement(statement);
+    ensure_not_from_the_future(timestamp);
+    assert!(is_liquidatable(current_debt, price));
+
+    ensure_output_script_hash(0, get_script_hash_for_liquidation((timestamp, price), current_debt));
+    ensure_output_asset_and_amount(0, param::COLLATERAL_ASSET_ID, param::COLLATERAL_AMOUNT);
+}
+
+/// Cancel: with a statement newer than the claim at which the loan isn't liquidatable,
+/// move the pending loan (input 0) back to active (output 0). Anyone may.
+fn cancel_liquidation(current_debt: u64, claim: Claim, statement: Statement) {
+    assert!(jet::eq_32(jet::current_index(), 0));
+    ensure_input_script_hash(0, get_script_hash_for_liquidation(claim, current_debt));
+    ensure_input_asset_and_amount(0, param::COLLATERAL_ASSET_ID, param::COLLATERAL_AMOUNT);
+
+    let (claim_timestamp, _): Claim = claim;
+    let (price, timestamp): (u64, u64) = verify_statement(statement);
+    assert!(jet::lt_64(claim_timestamp, timestamp));
+    assert!(not(is_liquidatable(current_debt, price)));
+
+    ensure_output_script_hash(0, get_script_hash_for_storage(true, current_debt));
+    ensure_output_asset_and_amount(0, param::COLLATERAL_ASSET_ID, param::COLLATERAL_AMOUNT);
+}
+
+/// Finish: after the window, burn the lender NFT (input 1, to output 0) and release the
+/// collateral of the pending loan (input 0), as on expiry.
+///
+/// Nothing stops a cancel after the window: a program can't require that a height has
+/// *not* been reached. A pending liquidation stays open to cancel until it is finished.
+fn finish_liquidation(current_debt: u64, claim: Claim) {
+    assert!(jet::eq_32(jet::current_index(), 0));
+    ensure_input_script_hash(0, get_script_hash_for_liquidation(claim, current_debt));
+    ensure_window_elapsed();
+    ensure_input_asset_and_amount(0, param::COLLATERAL_ASSET_ID, param::COLLATERAL_AMOUNT);
+    ensure_input_asset_and_amount_burn(1, 0, param::LENDER_NFT_ASSET_ID, 1);
+}
+
+/// One step of an oracle liquidation: start with the debt; cancel, finish or repay with
+/// the debt and the pending claim.
+type LiquidationStep = Either<Either<u64, (u64, Claim)>, Either<(u64, Claim), (u64, Claim)>>;
+
+fn liquidation_path(step: LiquidationStep, statement: Statement) {
+    match step {
+        Left(open_or_cancel: Either<u64, (u64, Claim)>) => match open_or_cancel {
+            Left(current_debt: u64) => start_liquidation(current_debt, statement),
+            Right(pending: (u64, Claim)) => {
+                let (current_debt, claim): (u64, Claim) = pending;
+                cancel_liquidation(current_debt, claim, statement)
+            },
+        },
+        Right(finish_or_repay: Either<(u64, Claim), (u64, Claim)>) => match finish_or_repay {
+            Left(pending: (u64, Claim)) => {
+                let (current_debt, claim): (u64, Claim) = pending;
+                finish_liquidation(current_debt, claim)
+            },
+            Right(pending: (u64, Claim)) => {
+                let (current_debt, claim): (u64, Claim) = pending;
+                full_repay_from(get_script_hash_for_liquidation(claim, current_debt), current_debt)
+            },
+        },
+    }
+}
+
+/// One word of budget padding, which must be zero.
+fn padding_word(word: u256, acc: ()) -> () {
+    assert!(jet::eq_256(word, 0));
+    acc
+}
+
+/// The paths lending_v3 had.
+fn lending_path(path: Either<Either<(), ()>, Either<Either<(u64, u64), u64>, u64>>) {
+    match path {
         Left(pending_offer_params: Either<(), ()>) => {
             match pending_offer_params {
                 Left(params: ()) => {
@@ -572,5 +925,34 @@ fn main() {
                 }
             }
         },
+    }
+}
+
+fn main() {
+    // A program may not cost more than its witness's size buys, and checking a statement
+    // costs more than the statement's own bytes. Liquid does not relay the annex that
+    // would otherwise pad it, so the paths that check one are padded here with zero
+    // words. Other paths leave the list empty.
+    fold::<padding_word, 16>(witness::BUDGET_PAD, ());
+
+    let statement: Statement = (
+        witness::STATEMENT_PRICE_INT,
+        witness::STATEMENT_PRICE_FRAC,
+        witness::STATEMENT_SOURCES,
+        witness::STATEMENT_METHOD,
+        witness::STATEMENT_TIMESTAMP,
+        witness::STATEMENT_NONCE,
+        witness::STATEMENT_SIG,
+        (
+            witness::CERT_ORACLE_KEY,
+            witness::CERT_VALID_FROM,
+            witness::CERT_VALID_UNTIL,
+            witness::CERT_SIG
+        )
+    );
+
+    match witness::LIQUIDATION {
+        Some(step: LiquidationStep) => liquidation_path(step, statement),
+        None => lending_path(witness::PATH),
     }
 }
