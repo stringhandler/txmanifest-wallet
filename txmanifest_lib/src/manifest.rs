@@ -610,6 +610,24 @@ impl AllowChange {
     }
 }
 
+/// An action's absolute timelock, `{"height": <expr>}` or `{"time": <expr>}`.
+///
+/// Both set the same `nLockTime` field, which consensus reads as a height below
+/// 500,000,000 and as unix seconds from there up, so the two are separate keys rather than
+/// one number whose meaning depends on its size. A lock time is ignored when every input
+/// is final, so the engine gives each input that sets no `sequence` of its own
+/// `0xfffffffe`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LockTime {
+    /// The transaction can be mined in a block at least this high. Below 500,000,000.
+    Height(serde_json::Value),
+    /// The transaction can be mined once the chain's median time past is beyond this
+    /// unix time, in seconds. At least 500,000,000. On a chain with one-minute blocks,
+    /// median time past runs about six minutes behind the clock.
+    Time(serde_json::Value),
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Action {
@@ -639,6 +657,12 @@ pub struct Action {
     pub allow_change: AllowChange,
     /// Runtime action parameters (Spec §5). Prompted, or set by hooks.
     pub params: Option<BTreeMap<String, ParamDef>>,
+    /// The transaction's `nLockTime`: the earliest block height, or time, at which it can
+    /// be mined. This is what the `check_lock_height` / `check_lock_time` Simplicity jets
+    /// read. See [`LockTime`].
+    ///
+    /// Omitted → zero, no absolute timelock.
+    pub lock_time: Option<LockTime>,
     pub inputs: Option<Vec<Input>>,
     pub outputs: Option<Vec<Output>>,
     /// Method-level hook: runs after inputs are resolved, before PSET is built.

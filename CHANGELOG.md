@@ -14,7 +14,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 ### Added
 
 - Release binaries for macOS (Apple Silicon).
-- Supports manifest format [`0.3.1`](docs/format-changelog.md), which adds program pinning. `0.3.0` manifests still load.
+- Supports manifest format [`0.3.1`](docs/format-changelog.md), which adds program pinning and an action-level `lock_time`. `0.3.0` manifests still load.
 - `pin` command: writes every program's current hash into a manifest without reformatting it; `pin --check` fails if any is missing or stale.
 - `validate --strict`: unpinned programs are errors rather than warnings.
 - `run --debug`: development mode. For now the same as `--allow-unpinned`; it may enable more development-only behaviour later.
