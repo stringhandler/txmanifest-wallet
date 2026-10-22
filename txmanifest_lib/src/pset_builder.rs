@@ -537,8 +537,10 @@ fn build_inner(
     let mut inp_txout_sec: HashMap<usize, TxOutSecrets> = HashMap::new();
     let mut issuances: Vec<IssuanceResult> = Vec::new();
     let mut total_lbtc_in: u64 = 0;
-    // Track non-LBTC wallet input amounts for automatic change output generation.
-    let mut wallet_asset_in: HashMap<AssetId, u64> = HashMap::new();
+    // Non-LBTC amounts in, from every input, for change and for the balance check. Covenant
+    // inputs count too: an explicit wallet UTXO arrives as one, and leaving it out once
+    // dropped a tUSDT change output, so the node refused the transaction.
+    let mut asset_in: HashMap<AssetId, u64> = HashMap::new();
 
     // Add inputs
     for pset_input in &req.inputs {
@@ -575,8 +577,7 @@ fn build_inner(
                 if utxo.unblinded.asset == req.policy_asset {
                     total_lbtc_in += utxo.unblinded.value;
                 } else {
-                    *wallet_asset_in.entry(utxo.unblinded.asset).or_default() +=
-                        utxo.unblinded.value;
+                    *asset_in.entry(utxo.unblinded.asset).or_default() += utxo.unblinded.value;
                 }
             }
             PsetInput::Covenant {
@@ -627,6 +628,8 @@ fn build_inner(
                 }
                 if *asset == req.policy_asset {
                     total_lbtc_in += amount;
+                } else {
+                    *asset_in.entry(*asset).or_default() += amount;
                 }
             }
         }
@@ -685,7 +688,7 @@ fn build_inner(
         ));
     }
 
-    // Non-LBTC change outputs: for any wallet-input asset where the input exceeds the outputs.
+    // Non-LBTC change outputs: for any asset where the inputs exceed the outputs.
     let total_non_lbtc_out: HashMap<AssetId, u64> = req
         .outputs
         .iter()
@@ -694,7 +697,7 @@ fn build_inner(
             *m.entry(o.asset).or_default() += o.amount;
             m
         });
-    for (asset, in_amt) in &wallet_asset_in {
+    for (asset, in_amt) in &asset_in {
         let out_amt = total_non_lbtc_out.get(asset).copied().unwrap_or(0);
         if *in_amt > out_amt && !req.change_assets.contains(asset) {
             // Only the fee may be an output the manifest did not declare. Inventing a
@@ -1693,6 +1696,91 @@ mod abf_reuse_tests {
         let tx = pset.extract_tx().unwrap();
         tx.verify_tx_amt_proofs(&secp, &[prev])
             .expect("proofs and balance must check against the rebuilt prevout");
+    }
+}
+
+#[cfg(test)]
+mod change_tests {
+    use super::*;
+
+    const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
+                            abandon abandon abandon about";
+
+    fn wollet() -> Wollet {
+        let w = crate::wallet::WalletFile {
+            network: "testnet".to_string(),
+            mnemonic: MNEMONIC.to_string(),
+        };
+        Wollet::new(
+            ElementsNetwork::LiquidTestnet,
+            lwk_wollet::NoPersist::new(),
+            crate::wallet::descriptor(&w).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Spend 100,000 L-BTC and 1,000 of another asset, all explicit, the way an explicit
+    /// wallet UTXO reaches the builder, and pay 400 of the other asset out.
+    fn request(change_assets: &[AssetId]) -> BuildPsetRequest {
+        let policy = ElementsNetwork::LiquidTestnet.policy_asset();
+        let other = AssetId::from_slice(&[0xaa; 32]).unwrap();
+        let p2tr = Script::from([&[0x51, 0x20][..], &[7; 32]].concat());
+        let input = |n: u8, asset, amount| PsetInput::Covenant {
+            input_id: format!("in{n}"),
+            outpoint: OutPoint::new(Txid::from_byte_array([n; 32]), 0),
+            script_pubkey: p2tr.clone(),
+            asset,
+            amount,
+            issuance: None,
+            sequence: None,
+            blinding: None,
+        };
+        BuildPsetRequest {
+            inputs: vec![input(1, policy, 100_000), input(2, other, 1_000)],
+            outputs: vec![PsetOutputSpec {
+                script_pubkey: p2tr.clone(),
+                amount: 400,
+                asset: other,
+                blinding_key: None,
+                blinding: None,
+            }],
+            fee_rate: 0.1,
+            policy_asset: policy,
+            change_assets: change_assets.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    fn an_explicit_input_in_another_asset_gets_its_change() {
+        let policy = ElementsNetwork::LiquidTestnet.policy_asset();
+        let other = AssetId::from_slice(&[0xaa; 32]).unwrap();
+        let built = build_pset(
+            &wollet(),
+            ElementsNetwork::LiquidTestnet,
+            &request(&[policy, other]),
+        )
+        .expect("builds");
+        let change: u64 = built
+            .pset
+            .outputs()
+            .iter()
+            .filter(|o| o.asset == Some(other))
+            .map(|o| o.amount.unwrap())
+            .sum();
+        assert_eq!(change, 1_000, "400 paid out and 600 back as change");
+    }
+
+    #[test]
+    fn an_explicit_input_with_nowhere_for_its_surplus_is_an_error() {
+        let policy = ElementsNetwork::LiquidTestnet.policy_asset();
+        let err = build_pset(
+            &wollet(),
+            ElementsNetwork::LiquidTestnet,
+            &request(&[policy]),
+        )
+        .err()
+        .expect("600 of the other asset has nowhere to go");
+        assert!(err.to_string().contains("does not balance"), "{err}");
     }
 }
 
