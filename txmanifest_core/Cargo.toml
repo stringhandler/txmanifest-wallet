@@ -1,0 +1,39 @@
+[package]
+name = "txmanifest-core"
+version = "0.3.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Transaction manifests without a wallet: the model, validation, program pins, SimplicityHL compilation and covenant addresses."
+repository = "https://github.com/stringhandler/txmanifest-wallet"
+keywords = ["liquid", "elements", "simplicity", "covenant", "bitcoin"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+# Only for its `elements` re-export and the `ElementsNetwork` enum. No wallet, signer or
+# client code is used here, and none of LWK's network features beyond the one it cannot
+# build without.
+lwk_wollet = { version = "0.9", default-features = false, features = ["esplora"] }
+evalexpr = "11"
+# delta1's Bitcoin-enabled fork: a superset of upstream that adds `BitcoinJetHinter`
+# and a real `BitcoinEnv`, without which a Bitcoin covenant cannot be compiled at all.
+# The Elements jet set, and therefore every Elements CMR and covenant address, must be
+# byte-identical to upstream's — `covenant::tests` and `tests/interop` pin live
+# addresses precisely so that a pin change cannot move them unnoticed.
+simplicityhl = { git = "https://github.com/delta1/SimplicityHL", branch = "bitcoin", features = [
+    "serde",
+] }
+schemars = "0.8"
+# Program version requirements; already in the tree via simplicityhl.
+semver = "1"
+
+[dev-dependencies]
+jsonschema = { version = "0.17", default-features = false }
+
+[features]
+default = []
+# Enables code paths that rely on the custom SimplicityHL additions NOT in master:
+# `TemplateProgram::compile_function` / `CompiledFunction` and `eval_expression`.
+# With this off, the crate builds against simplicityhl master.
+simplicity_eval = []

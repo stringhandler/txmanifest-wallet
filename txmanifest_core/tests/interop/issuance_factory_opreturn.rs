@@ -7,7 +7,7 @@
 // plain `bytes` constant (the manifest's FACTORY_PROGRAM_ID param default).
 use lwk_wollet::elements::hashes::{sha256, Hash};
 use std::collections::HashMap;
-use tx_manifest_lib::{context::ExecutionContext, eval};
+use txmanifest_core::{context::ExecutionContext, eval};
 
 fn program_id(simf_path: &std::path::Path) -> String {
     let src = std::fs::read_to_string(simf_path)

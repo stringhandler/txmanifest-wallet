@@ -3354,17 +3354,13 @@ dependencies = [
  "dialoguer",
  "dirs-next",
  "elements-miniscript",
- "evalexpr",
- "jsonschema",
  "lwk_common",
  "lwk_signer",
  "lwk_wollet",
  "rand 0.8.7",
- "schemars",
- "semver",
  "serde",
  "serde_json",
- "simplicityhl",
+ "txmanifest-core",
  "ureq",
  "url",
 ]
@@ -3381,6 +3377,21 @@ dependencies = [
  "lwk_wollet",
  "serde_json",
  "tx-manifest-lib",
+]
+
+[[package]]
+name = "txmanifest-core"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "evalexpr",
+ "jsonschema",
+ "lwk_wollet",
+ "schemars",
+ "semver",
+ "serde",
+ "serde_json",
+ "simplicityhl",
 ]
 
 [[package]]

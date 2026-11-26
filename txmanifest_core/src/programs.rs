@@ -108,6 +108,12 @@ impl ProgramSource {
         })
     }
 
+    /// [`ProgramSource::read_unpinned`] for text already in hand, where there is no file
+    /// to read: `path` only names the program in messages. As unchecked as its namesake.
+    pub fn from_text_unpinned(path: impl Into<PathBuf>, text: impl Into<String>) -> Self {
+        Self::new(path.into(), text.into())
+    }
+
     pub(crate) fn new(path: PathBuf, text: String) -> Self {
         ProgramSource {
             path,
@@ -315,7 +321,7 @@ impl Refs<'_> {
 
 /// `./a/../b.simf` and `b.simf` name one file; references are grouped by this key.
 /// Lexical only — nothing here touches the filesystem.
-fn normalise(source: &str) -> String {
+pub(crate) fn normalise(source: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for c in Path::new(source).components() {
         match c {
@@ -530,6 +536,40 @@ impl Programs {
     /// Resolve, read and check every program `manifest` references, relative to
     /// `base_dir` (the manifest's directory).
     pub fn load(manifest: &Manifest, base_dir: &Path, policy: Unpinned) -> Result<Self> {
+        Self::load_with(manifest, policy, |pin| {
+            let path = base_dir.join(&pin.source);
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("Cannot read simf file: {}", path.display()))?;
+            Ok((path, bytes))
+        })
+    }
+
+    /// [`Programs::load`] for a caller with no filesystem, such as a web page: `files`
+    /// holds each program's bytes under the path the manifest gives it (`./a.simf` and
+    /// `a.simf` are the same file). Every check `load` makes is made here too; a program
+    /// the manifest references and `files` lacks is an error naming it.
+    pub fn from_memory(
+        manifest: &Manifest,
+        files: &BTreeMap<String, Vec<u8>>,
+        policy: Unpinned,
+    ) -> Result<Self> {
+        let files: BTreeMap<String, &Vec<u8>> =
+            files.iter().map(|(k, v)| (normalise(k), v)).collect();
+        Self::load_with(manifest, policy, |pin| {
+            let bytes = files
+                .get(&normalise(&pin.source))
+                .ok_or_else(|| anyhow!("{} was not supplied with the manifest", pin.source))?;
+            Ok((PathBuf::from(&pin.source), bytes.to_vec()))
+        })
+    }
+
+    /// The loader behind [`Programs::load`] and [`Programs::from_memory`]: `read` fetches
+    /// one program's bytes, and the path to report it by.
+    fn load_with(
+        manifest: &Manifest,
+        policy: Unpinned,
+        mut read: impl FnMut(&Pin) -> Result<(PathBuf, Vec<u8>)>,
+    ) -> Result<Self> {
         let (pins, issues) = resolve(manifest);
         if !issues.is_empty() {
             let lines: Vec<String> = issues
@@ -542,9 +582,7 @@ impl Programs {
         let mut by_path = BTreeMap::new();
         let mut unpinned = Vec::new();
         for (key, pin) in &pins {
-            let path = base_dir.join(&pin.source);
-            let bytes = std::fs::read(&path)
-                .with_context(|| format!("Cannot read simf file: {}", path.display()))?;
+            let (path, bytes) = read(pin)?;
             let checked = check(pin, &bytes)?;
             match (&checked.mismatch, policy) {
                 (Some(mismatch), Unpinned::Refuse) => bail!("{mismatch}"),
@@ -932,6 +970,36 @@ mod tests {
             programs.for_script(script).unwrap().text(),
             "fn main() { }\n"
         );
+    }
+
+    #[test]
+    fn programs_load_from_memory_under_the_same_checks() {
+        let m = with_script(
+            &format!(
+                r#"{{ "type": "simplicity", "source": "./a.simf", "source_hash": "{}",
+                      "simplicity_hl_version": ">= 0.0.0" }}"#,
+                src_hash()
+            ),
+            "",
+        );
+        let script = m.utxo_type("c").unwrap().script.as_ref();
+
+        // The key need not be spelled as the manifest spells the path.
+        let files = BTreeMap::from([("a.simf".to_string(), SRC.as_bytes().to_vec())]);
+        let programs = Programs::from_memory(&m, &files, Unpinned::Refuse).expect("pinned loads");
+        assert!(programs.unpinned().is_empty());
+        assert_eq!(programs.for_script(script).unwrap().text(), SRC);
+
+        let tampered = BTreeMap::from([("./a.simf".to_string(), b"fn main() { }\n".to_vec())]);
+        let err = Programs::from_memory(&m, &tampered, Unpinned::Refuse)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not match its pinned hash"), "{err}");
+
+        let err = Programs::from_memory(&m, &BTreeMap::new(), Unpinned::Allow)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("./a.simf was not supplied"), "{err}");
     }
 
     #[test]

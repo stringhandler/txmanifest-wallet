@@ -240,6 +240,63 @@ pub fn program_witness_types(
         .collect())
 }
 
+/// What [`compile_with_placeholders`] learned about a program that compiles.
+#[derive(Debug, Clone)]
+pub struct CompiledShape {
+    /// The program's `param::` values, as `name -> rendered type`.
+    pub parameters: std::collections::BTreeMap<String, String>,
+    /// The program's `witness::` values, as `name -> rendered type`.
+    pub witnesses: std::collections::BTreeMap<String, String>,
+}
+
+/// Compile a `.simf` program all the way to Simplicity, with every `param::` set to the
+/// all-zero value of its type, against the jet set of `opts.family`.
+///
+/// This answers "does this program compile for this chain?" for a caller that has the
+/// program but not a contract's values: a viewer, or a check run before anything is
+/// instantiated. It goes further than [`program_witness_types`], which stops after the
+/// front end: here the program is also instantiated and translated, so a failure in either
+/// is found.
+///
+/// The compiled program is thrown away, deliberately. Its CMR is that of the placeholder
+/// values, not of any real contract, and must never be used to derive an address.
+pub fn compile_with_placeholders(
+    program: &ProgramSource,
+    opts: impl Into<CompileOpts>,
+) -> Result<CompiledShape> {
+    use simplicityhl::types::StructuralType;
+    use simplicityhl::value::{StructuralValue, Value};
+
+    let opts = opts.into();
+    let template = simplicityhl::TemplateProgram::new_with_unstable(
+        program.text().to_owned(),
+        &opts.unstable_features,
+        jet_hinter(opts.family)?,
+    )
+    .map_err(|e| anyhow::anyhow!("SimplicityHL parse/analyse failed: {e}"))?;
+
+    let mut arguments = HashMap::new();
+    for (name, ty) in template.parameters().iter() {
+        let structural = StructuralType::from(ty);
+        let zero =
+            StructuralValue::from(simplicityhl::simplicity::Value::zero(structural.as_ref()));
+        let value = Value::reconstruct(&zero, ty)
+            .ok_or_else(|| anyhow::anyhow!("no placeholder value for param {name} of type {ty}"))?;
+        arguments.insert(name.clone(), value);
+    }
+    template
+        .instantiate(Arguments::from(arguments), opts.debug_symbols)
+        .map_err(|e| anyhow::anyhow!("SimplicityHL compilation failed: {e}"))?;
+
+    let render = |(name, ty): (&simplicityhl::str::WitnessName, &simplicityhl::ResolvedType)| {
+        (name.to_string(), ty.to_string())
+    };
+    Ok(CompiledShape {
+        parameters: template.parameters().iter().map(render).collect(),
+        witnesses: template.witness_types().iter().map(render).collect(),
+    })
+}
+
 /// Compile a named function from a `.simf` file and return the [`CompiledFunction`].
 ///
 /// Used by the `simf_fn` compute hook to validate compilation before execution.
@@ -1673,6 +1730,37 @@ fn inject_bitcoin_signatures<T: std::borrow::Borrow<lwk_wollet::elements::bitcoi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every example program compiles with placeholder params, for its manifest's chain,
+    /// and reports the params and witnesses it declares.
+    #[test]
+    fn examples_compile_with_placeholder_params() {
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../examples"));
+        let p2pk = ProgramSource::read_unpinned(root.join("p2pk/p2pk.simf")).expect("read");
+        for family in [ChainFamily::Elements, ChainFamily::Bitcoin] {
+            let opts = CompileOpts {
+                family,
+                ..CompileOpts::default()
+            };
+            let shape = compile_with_placeholders(&p2pk, &opts).expect("p2pk compiles");
+            assert!(
+                !shape.witnesses.is_empty(),
+                "p2pk takes a signature witness"
+            );
+        }
+
+        // A program that parses but names a jet of the other chain is refused.
+        let bitcoin_only = ProgramSource::new(
+            "bitcoin_only.simf".into(),
+            "fn main() { let v: Option<u64> = jet::output_value(0); assert!(is_none::<u64>(v)); }\n".into(),
+        );
+        assert!(compile_with_placeholders(&bitcoin_only, CompileOpts::default()).is_err());
+        let bitcoin = CompileOpts {
+            family: ChainFamily::Bitcoin,
+            ..CompileOpts::default()
+        };
+        compile_with_placeholders(&bitcoin_only, &bitcoin).expect("compiles for Bitcoin");
+    }
 
     /// The same source compiles on both chains and commits to a different CMR on each.
     ///

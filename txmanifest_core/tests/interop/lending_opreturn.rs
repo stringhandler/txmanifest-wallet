@@ -4,7 +4,7 @@
 // time), not by the tx-encoder, which now sees only a plain `bytes` constant.
 use lwk_wollet::elements::hashes::{sha256, Hash};
 use std::collections::HashMap;
-use tx_manifest_lib::{context::ExecutionContext, eval};
+use txmanifest_core::{context::ExecutionContext, eval};
 
 /// Protocol message-type tag = first 4 bytes of SHA-256 of the LF-normalized source text.
 fn program_id(simf_path: &std::path::Path) -> String {

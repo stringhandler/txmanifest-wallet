@@ -9,7 +9,7 @@
 //! Regenerate with:
 //!
 //! ```sh
-//! cargo run -p tx-manifest-lib --example gen_schema
+//! cargo run -p txmanifest-core --example gen_schema
 //! ```
 //!
 //! Consumers in other languages point at [`SCHEMA_ID`] for editor completion and CI

@@ -1,7 +1,7 @@
 // Reproduce the issuance_factory covenant (out[1]) and compare to on-chain.
 use lwk_wollet::ElementsNetwork;
 use std::collections::HashMap;
-use tx_manifest_lib::covenant;
+use txmanifest_core::covenant;
 
 #[test]
 fn reproduces_onchain_issuance_factory_covenant() {
@@ -16,7 +16,7 @@ fn reproduces_onchain_issuance_factory_covenant() {
     p.insert("REISSUANCE_FLAGS".to_string(), "0".to_string());
     h.insert("REISSUANCE_FLAGS".to_string(), "u64".to_string());
     let addr = covenant::compute_covenant_address(
-        &tx_manifest_lib::programs::ProgramSource::read_unpinned(d.join("issuance_factory.simf"))
+        &txmanifest_core::programs::ProgramSource::read_unpinned(d.join("issuance_factory.simf"))
             .unwrap(),
         &p,
         &h,

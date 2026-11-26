@@ -72,3 +72,29 @@ jobs:
         # `--all-targets` so tests and examples are linted too — that is where the
         # shadowed-binding and unused-variable classes of bug actually show up.
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # `txmanifest-core` is what a web page builds: manifest parsing, validation, program
+  # pins and SimplicityHL compilation, with no wallet or network code. The `test` job
+  # already runs its tests. This checks the one thing only this crate promises: that it
+  # builds for wasm32, so a dependency that can't would be caught here, not in a web build.
+  core:
+    name: core (wasm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # secp256k1's C code needs a compiler with a wasm32 backend; clang has one.
+      - name: Check for wasm32
+        run: cargo check -p txmanifest-core --locked --target wasm32-unknown-unknown
+        env:
+          CC_wasm32_unknown_unknown: clang

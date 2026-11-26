@@ -1,7 +1,7 @@
 //! Regenerate the checked-in JSON Schema for `txmanifest.json`.
 //!
 //! ```sh
-//! cargo run -p tx-manifest-lib --example gen_schema
+//! cargo run -p txmanifest-core --example gen_schema
 //! ```
 //!
 //! `tests/schema.rs` fails when the checked-in file differs from what this produces,
@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use tx_manifest_lib::schema::{json_schema_string, SCHEMA_PATH};
+use txmanifest_core::schema::{json_schema_string, SCHEMA_PATH};
 
 fn main() -> anyhow::Result<()> {
     // Examples run with the crate root as CWD; the schema lives at the workspace root.

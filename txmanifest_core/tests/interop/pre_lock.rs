@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use lwk_wollet::ElementsNetwork;
-use tx_manifest_lib::covenant;
+use txmanifest_core::covenant;
 
 fn add(
     p: &mut HashMap<String, String>,
@@ -46,7 +46,7 @@ fn reproduces_indexer_pre_lock_covenant() {
     add(&mut p, &mut h, "WITH_ASSET_BURN", "true", "bool");
     let lender_principal_cov = hexs(
         &covenant::compute_covenant_script_hash(
-            &tx_manifest_lib::programs::ProgramSource::read_unpinned(dir.join("asset_auth.simf"))
+            &txmanifest_core::programs::ProgramSource::read_unpinned(dir.join("asset_auth.simf"))
                 .unwrap(),
             &p,
             &h,
@@ -113,7 +113,7 @@ fn reproduces_indexer_pre_lock_covenant() {
     );
     let lending_cov = hexs(
         &covenant::compute_covenant_script_hash(
-            &tx_manifest_lib::programs::ProgramSource::read_unpinned(dir.join("lending.simf"))
+            &txmanifest_core::programs::ProgramSource::read_unpinned(dir.join("lending.simf"))
                 .unwrap(),
             &p,
             &h,
@@ -128,7 +128,7 @@ fn reproduces_indexer_pre_lock_covenant() {
     add(&mut p, &mut h, "SCRIPT_HASH", &lending_cov, "bytes32");
     let params_nft_out = hexs(
         &covenant::compute_covenant_script_hash(
-            &tx_manifest_lib::programs::ProgramSource::read_unpinned(dir.join("script_auth.simf"))
+            &txmanifest_core::programs::ProgramSource::read_unpinned(dir.join("script_auth.simf"))
                 .unwrap(),
             &p,
             &h,
@@ -216,7 +216,7 @@ fn reproduces_indexer_pre_lock_covenant() {
         "pubkey",
     );
     let addr = covenant::compute_covenant_address(
-        &tx_manifest_lib::programs::ProgramSource::read_unpinned(dir.join("pre_lock.simf"))
+        &txmanifest_core::programs::ProgramSource::read_unpinned(dir.join("pre_lock.simf"))
             .unwrap(),
         &p,
         &h,
