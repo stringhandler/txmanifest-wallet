@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use tx_manifest_lib::manifest::{Action, Manifest};
+use txmanifest_core::manifest::{Action, Manifest};
 
 /// Examples not yet migrated to explicit UI text, with the reason.
 ///

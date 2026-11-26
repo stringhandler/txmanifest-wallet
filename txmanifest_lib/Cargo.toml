@@ -8,6 +8,9 @@ repository = "https://github.com/stringhandler/txmanifest-wallet"
 keywords = ["liquid", "elements", "simplicity", "covenant", "bitcoin"]
 
 [dependencies]
+# The manifest model, validation, programs and covenants. Re-exported from this crate's
+# root, so `tx_manifest_lib::manifest` and the rest read as they always have.
+txmanifest-core = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -19,29 +22,13 @@ bip39 = "2"
 elements-miniscript = "0.4"
 lwk_common = "0.9"
 dirs-next = "2.0.0"
-evalexpr = "11"
 rand = "0.8"
 ureq = "2"
 url = "2"
 base64 = "0.22"
-# delta1's Bitcoin-enabled fork: a superset of upstream that adds `BitcoinJetHinter`
-# and a real `BitcoinEnv`, without which a Bitcoin covenant cannot be compiled at all.
-# The Elements jet set, and therefore every Elements CMR and covenant address, must be
-# byte-identical to upstream's — `covenant::tests` and `tests/interop` pin live
-# addresses precisely so that a pin change cannot move them unnoticed.
-simplicityhl = { git = "https://github.com/delta1/SimplicityHL", branch = "bitcoin", features = [
-    "serde",
-] }
-schemars = "0.8"
-# Program version requirements; already in the tree via simplicityhl.
-semver = "1"
-
-[dev-dependencies]
-jsonschema = { version = "0.17", default-features = false }
 
 [features]
 default = []
-# Enables code paths that rely on the custom SimplicityHL additions NOT in master:
-# `TemplateProgram::compile_function` / `CompiledFunction` and `eval_expression`.
-# With this off, the crate builds against simplicityhl master.
-simplicity_eval = []
+# Forwards to txmanifest-core/simplicity_eval: the code paths that rely on SimplicityHL
+# additions not in upstream master.
+simplicity_eval = ["txmanifest-core/simplicity_eval"]

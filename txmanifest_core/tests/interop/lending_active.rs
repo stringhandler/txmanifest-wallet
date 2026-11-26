@@ -1,10 +1,10 @@
-// Reproduce the redesigned lending collateral covenant (out[5]) for a live offer,
-// including the 5 nested AssetAuth/AssetAuthVault hashes and the 2 storage leaves.
-// Compares to the on-chain scriptPubKey. Confirms the TapData tag + arg chain.
-use std::collections::HashMap;
-
+// De-risk the settlement storage transition (task 08): the lending (collateral) covenant
+// address changes between the pending and active states because slot0 (is_active) flips.
+// Pending (is_active=0) is anchored on-chain (out[5] of live offer 43ab4efe); the active
+// address is the same params with slot0 byte[31]=1 — computed by the same verified machinery.
 use lwk_wollet::ElementsNetwork;
-use tx_manifest_lib::covenant;
+use std::collections::HashMap;
+use txmanifest_core::covenant;
 
 fn add(
     p: &mut HashMap<String, String>,
@@ -21,7 +21,7 @@ fn hx(b: &[u8]) -> String {
 }
 
 #[test]
-fn reproduces_onchain_lending_collateral_covenant() {
+fn activation_flips_the_lending_covenant_address() {
     let net = ElementsNetwork::LiquidTestnet;
     let d = std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -29,7 +29,7 @@ fn reproduces_onchain_lending_collateral_covenant() {
     ));
     let sh = |simf: &str, p: &HashMap<String, String>, h: &HashMap<String, String>| -> String {
         hx(&covenant::compute_covenant_script_hash(
-            &tx_manifest_lib::programs::ProgramSource::read_unpinned(d.join(simf)).unwrap(),
+            &txmanifest_core::programs::ProgramSource::read_unpinned(d.join(simf)).unwrap(),
             p,
             h,
             net,
@@ -38,15 +38,14 @@ fn reproduces_onchain_lending_collateral_covenant() {
         .unwrap())
     };
 
-    // Live offer 43ab4efe… params.
-    let collateral_asset = "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49";
-    let principal_asset = "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5";
+    // Live offer 43ab4efe params (same as lending_collateral.rs).
+    let collateral = "144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49";
+    let principal = "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5";
     let borrower_nft = "78d61185c79f855fac51a87c191b00266f02d28752f50b3d9092ccf6b978181e";
     let lender_nft = "213462821a5cdb96f435f5ea6597e8937359d6fd5a64b6ac8ef4262bc279fcfb";
     let protocol_fee = "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5";
-    let out5 = "51201ae9d30d7a31f1393a289196a4dacc01fac95459540895db448aeca47fbd84e1";
+    let z32 = "00".repeat(32);
 
-    // helper to build an asset_auth_vault arg set
     let vault = |is_active: &str,
                  finalized_hash: &str,
                  keeper: &str,
@@ -58,7 +57,7 @@ fn reproduces_onchain_lending_collateral_covenant() {
             &mut p,
             &mut h,
             "VAULT_ASSET_ID",
-            principal_asset,
+            principal,
             "liquid.asset_id",
         );
         add(
@@ -100,21 +99,14 @@ fn reproduces_onchain_lending_collateral_covenant() {
         );
         (p, h)
     };
-    let z32 = "00".repeat(32);
-
-    // lender vault: keeper=lender_nft, keeper_burn=true, supplier_burn=true
     let (fp, fh) = vault("false", &z32, lender_nft, "true", "true");
     let f_lender = sh("asset_auth_vault.simf", &fp, &fh);
     let (ap, ah) = vault("true", &f_lender, lender_nft, "true", "true");
     let a_lender = sh("asset_auth_vault.simf", &ap, &ah);
-
-    // protocol-fee vault: keeper=protocol_fee, keeper_burn=false, supplier_burn=true
     let (fp2, fh2) = vault("false", &z32, protocol_fee, "false", "true");
     let f_proto = sh("asset_auth_vault.simf", &fp2, &fh2);
     let (ap2, ah2) = vault("true", &f_proto, protocol_fee, "false", "true");
     let a_proto = sh("asset_auth_vault.simf", &ap2, &ah2);
-
-    // principal output = AssetAuth(borrower_nft, 1, false)
     let (mut pp, mut ph) = (HashMap::new(), HashMap::new());
     add(
         &mut pp,
@@ -127,20 +119,19 @@ fn reproduces_onchain_lending_collateral_covenant() {
     add(&mut pp, &mut ph, "WITH_ASSET_BURN", "false", "bool");
     let principal_out = sh("asset_auth.simf", &pp, &ph);
 
-    // lending covenant args
     let (mut p, mut h) = (HashMap::new(), HashMap::new());
     add(
         &mut p,
         &mut h,
         "COLLATERAL_ASSET_ID",
-        collateral_asset,
+        collateral,
         "liquid.asset_id",
     );
     add(
         &mut p,
         &mut h,
         "PRINCIPAL_ASSET_ID",
-        principal_asset,
+        principal,
         "liquid.asset_id",
     );
     add(
@@ -197,33 +188,44 @@ fn reproduces_onchain_lending_collateral_covenant() {
         "bytes32",
     );
 
-    // storage leaves: slot0 = is_active (0), slot1 = current_debt (2000) in last 8 bytes BE
-    let slot0 = vec![0u8; 32];
-    let mut slot1 = vec![0u8; 32];
-    slot1[24..32].copy_from_slice(&2000u64.to_be_bytes());
-    let extra = [slot0, slot1];
+    // current_debt = principal + principal*rate/10000 = 2000 (unchanged across accept).
+    let mut debt = vec![0u8; 32];
+    debt[24..32].copy_from_slice(&2000u64.to_be_bytes());
 
-    let addr = covenant::compute_covenant_address(
-        &tx_manifest_lib::programs::ProgramSource::read_unpinned(d.join("lending.simf")).unwrap(),
+    // Pending: slot0 = is_active(false) = all zeros; slot1 = current_debt.
+    let pending = [vec![0u8; 32], debt.clone()];
+    let addr_p = covenant::compute_covenant_address(
+        &txmanifest_core::programs::ProgramSource::read_unpinned(d.join("lending.simf")).unwrap(),
         &p,
         &h,
-        &extra,
+        &pending,
+        net,
+        true,
+    )
+    .unwrap();
+
+    // Active: slot0 = is_active(true) = value 1 (byte[31]=0x01); slot1 = current_debt.
+    let mut slot0_active = vec![0u8; 32];
+    slot0_active[31] = 1;
+    let active = [slot0_active, debt.clone()];
+    let addr_a = covenant::compute_covenant_address(
+        &txmanifest_core::programs::ProgramSource::read_unpinned(d.join("lending.simf")).unwrap(),
+        &p,
+        &h,
+        &active,
         net,
         true,
     )
     .unwrap();
 
     eprintln!("---- result ----");
-    println!("F_lender  = {f_lender}");
-    println!("A_lender  = {a_lender}");
-    println!("F_proto   = {f_proto}");
-    println!("A_proto   = {a_proto}");
-    println!("principal_out = {principal_out}");
-    println!("lending out[5] spk (repro) = {:x}", addr.script_pubkey());
-    println!("lending out[5] spk (chain) = {out5}");
-    assert_eq!(
-        format!("{:x}", addr.script_pubkey()),
-        out5,
-        "lending out[5] spk must match the on-chain one"
+    println!("pending out[5] spk (repro) = {:x}", addr_p.script_pubkey());
+    println!("pending out[5] spk (chain) = 51201ae9d30d7a31f1393a289196a4dacc01fac95459540895db448aeca47fbd84e1");
+    println!("active  lending spk (repro) = {:x}", addr_a.script_pubkey());
+    assert_ne!(
+        addr_p.script_pubkey(),
+        addr_a.script_pubkey(),
+        "active address must differ from pending"
     );
+    println!("OK: storage transition flips the covenant address (accept: is_active 0 -> 1)");
 }

@@ -12,9 +12,9 @@ use std::collections::HashMap;
 use lwk_wollet::elements::hashes::{sha256, Hash, HashEngine};
 use lwk_wollet::elements::secp256k1_zkp::{Scalar, Secp256k1, XOnlyPublicKey};
 use lwk_wollet::ElementsNetwork;
-use tx_manifest_lib::context::ExecutionContext;
-use tx_manifest_lib::covenant;
-use tx_manifest_lib::manifest::Manifest;
+use txmanifest_core::context::ExecutionContext;
+use txmanifest_core::covenant;
+use txmanifest_core::manifest::Manifest;
 
 /// The engine's covenant internal key (BIP-341 NUMS point).
 const NUMS_KEY_BYTES: [u8; 32] = [
@@ -80,7 +80,7 @@ fn manifest(states: &[u64]) -> Manifest {
         })
         .collect();
     let raw = serde_json::json!({
-        "manifest_version": tx_manifest_lib::manifest::FORMAT_VERSION,
+        "manifest_version": txmanifest_core::manifest::FORMAT_VERSION,
         "protocol": "tapdata-test",
         "description": "One utxo_type per tapdata state.",
         "chain": "liquid",
@@ -101,7 +101,7 @@ fn tapdata_state_leaf_matches_a_longhand_derivation() {
 
     let simf = std::path::Path::new(SIMF);
     let tapleaf = covenant::compute_tapleaf_hash(
-        &tx_manifest_lib::programs::ProgramSource::read_unpinned(simf).unwrap(),
+        &txmanifest_core::programs::ProgramSource::read_unpinned(simf).unwrap(),
         &params,
         &hints,
         false,
@@ -123,7 +123,7 @@ fn tapdata_state_leaf_matches_a_longhand_derivation() {
         );
 
         let addr = covenant::compute_covenant_address(
-            &tx_manifest_lib::programs::ProgramSource::read_unpinned(simf).unwrap(),
+            &txmanifest_core::programs::ProgramSource::read_unpinned(simf).unwrap(),
             &params,
             &hints,
             &leaves,

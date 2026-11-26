@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["txmanifest_lib", "txmanifest_wallet"]
+members = ["txmanifest_core", "txmanifest_lib", "txmanifest_wallet"]
 
 [workspace.dependencies]
+txmanifest-core = { path = "txmanifest_core" }
 tx-manifest-lib = { path = "txmanifest_lib" }

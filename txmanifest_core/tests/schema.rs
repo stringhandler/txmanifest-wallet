@@ -8,8 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
-use tx_manifest_lib::schema::{json_schema, json_schema_string, SCHEMA_ID, SCHEMA_PATH};
-use tx_manifest_lib::validate::MAX_UI_LABEL;
+use txmanifest_core::schema::{json_schema, json_schema_string, SCHEMA_ID, SCHEMA_PATH};
+use txmanifest_core::validate::MAX_UI_LABEL;
 
 /// Workspace root — one level up from this crate.
 fn workspace_root() -> PathBuf {
@@ -38,7 +38,7 @@ fn checked_in_schema_matches_the_model() {
     let path = checked_in_schema_path();
     let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|err| {
         panic!(
-            "{} is missing ({err}).\n\nRegenerate it:\n  cargo run -p tx-manifest-lib --example gen_schema",
+            "{} is missing ({err}).\n\nRegenerate it:\n  cargo run -p txmanifest-core --example gen_schema",
             path.display()
         )
     });
@@ -51,7 +51,7 @@ fn checked_in_schema_matches_the_model() {
         on_disk,
         json_schema_string(),
         "\n{} is out of date with the Rust model in manifest.rs.\n\n\
-         Regenerate it:\n  cargo run -p tx-manifest-lib --example gen_schema\n",
+         Regenerate it:\n  cargo run -p txmanifest-core --example gen_schema\n",
         path.display()
     );
 }
@@ -87,7 +87,7 @@ fn schema_accepts_the_authoring_keys() {
     // `$schema` at the root, `$comment` at depth — both stripped by the parser, so
     // both must validate or the schema and the engine disagree.
     let ok = serde_json::json!({
-        "$schema": tx_manifest_lib::schema::SCHEMA_ID,
+        "$schema": txmanifest_core::schema::SCHEMA_ID,
         "$comment": "file-level note",
         "manifest_version": "0.3.0",
         "protocol": "test",

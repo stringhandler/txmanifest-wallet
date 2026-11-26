@@ -312,22 +312,54 @@ fn check_program_refs(report: &mut Report, manifest: &Manifest) {
 /// `base_dir` is the directory holding the manifest file; `script.source` paths are relative
 /// to it.
 pub fn validate_programs(manifest: &Manifest, base_dir: &std::path::Path) -> Report {
+    validate_programs_with(manifest, |source| {
+        let path = base_dir.join(source);
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok((path, bytes)),
+            Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+        }
+    })
+}
+
+/// [`validate_programs`] for a caller with no filesystem, such as a web page: `files` holds
+/// each program's bytes under the path the manifest gives it (`./a.simf` and `a.simf` are
+/// the same file). A program `files` lacks is reported as an error, as an unreadable file is.
+pub fn validate_programs_in_memory(
+    manifest: &Manifest,
+    files: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> Report {
+    let files: std::collections::BTreeMap<String, &Vec<u8>> = files
+        .iter()
+        .map(|(k, v)| (crate::programs::normalise(k), v))
+        .collect();
+    validate_programs_with(manifest, |source| {
+        match files.get(&crate::programs::normalise(source)) {
+            Some(bytes) => Ok((std::path::PathBuf::from(source), bytes.to_vec())),
+            None => Err(format!("{source} was not supplied with the manifest")),
+        }
+    })
+}
+
+/// The checks behind [`validate_programs`] and [`validate_programs_in_memory`]. `read`
+/// fetches one program by the path the manifest gives it, returning its bytes and the path
+/// to report it by, or why it could not be read.
+fn validate_programs_with(
+    manifest: &Manifest,
+    read: impl Fn(&str) -> Result<(std::path::PathBuf, Vec<u8>), String>,
+) -> Report {
     let mut report = Report::default();
 
     // Each program file against its pin. A file that is missing or fails its pin is not
     // used for the witness checks below, so it is reported once, here.
     let (pins, _) = crate::programs::resolve(manifest);
-    let mut sources: std::collections::BTreeMap<
-        std::path::PathBuf,
-        crate::programs::ProgramSource,
-    > = std::collections::BTreeMap::new();
-    for pin in pins.values() {
+    let mut sources: std::collections::BTreeMap<String, crate::programs::ProgramSource> =
+        std::collections::BTreeMap::new();
+    for (key, pin) in &pins {
         let location = pin.locations.first().cloned().unwrap_or_default();
-        let path = base_dir.join(&pin.source);
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
+        let (path, bytes) = match read(&pin.source) {
+            Ok(read) => read,
             Err(e) => {
-                report.error(location, format!("cannot read {}: {e}", path.display()));
+                report.error(location, e);
                 continue;
             }
         };
@@ -354,10 +386,7 @@ pub fn validate_programs(manifest: &Manifest, base_dir: &std::path::Path) -> Rep
                         ),
                     );
                 }
-                sources.insert(
-                    path.clone(),
-                    crate::programs::ProgramSource::new(path, text),
-                );
+                sources.insert(key.clone(), crate::programs::ProgramSource::new(path, text));
             }
             Err(e) => report.error(location, format!("{e:#}")),
         }
@@ -401,7 +430,8 @@ pub fn validate_programs(manifest: &Manifest, base_dir: &std::path::Path) -> Rep
         };
         // An unknown program name is reported by `validate`; an unreadable or mismatched
         // file, above.
-        let Some(program) = source.and_then(|src| sources.get(&base_dir.join(src))) else {
+        let Some(program) = source.and_then(|src| sources.get(&crate::programs::normalise(src)))
+        else {
             continue;
         };
         by_source
@@ -697,7 +727,7 @@ fn lbtc_surplus_has_a_home(action: &Action) -> bool {
             || output
                 .amount_sat
                 .as_ref()
-                .is_some_and(crate::lifecycle::amount_uses_fee_keyword)
+                .is_some_and(amount_uses_fee_keyword)
     })
 }
 
@@ -1179,6 +1209,22 @@ fn check_capabilities(report: &mut Report, manifest: &Manifest) {
             format!("uses {} but chain '{family}' has no {}", m.uses, m.missing),
         );
     }
+}
+
+/// Whether an output `amount_sat` formula references the reserved `fee` keyword
+/// (as a whole token, so `fee_rate` or `coffee` don't match).
+///
+/// Shared by this module's surplus check, which reads it as one of the three ways an action can
+/// give an L-BTC surplus a home. One definition, so the check and the transaction builder in `lifecycle` cannot
+/// disagree about what counts as sizing an output by the fee.
+pub fn amount_uses_fee_keyword(v: &serde_json::Value) -> bool {
+    let s = match v {
+        serde_json::Value::String(s) => s.as_str(),
+        serde_json::Value::Object(m) => m.get("value").and_then(|x| x.as_str()).unwrap_or(""),
+        _ => "",
+    };
+    s.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|tok| tok == "fee")
 }
 
 #[cfg(test)]

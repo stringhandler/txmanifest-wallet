@@ -6,7 +6,7 @@
 //! These pin the engine against outside ground truth, so a SimplicityHL bump or an
 //! encoding change that moves a live address fails here rather than on chain.
 //!
-//!   cargo test -p tx-manifest-lib --test interop
+//!   cargo test -p txmanifest-core --test interop
 
 mod issuance_factory;
 mod issuance_factory_opreturn;

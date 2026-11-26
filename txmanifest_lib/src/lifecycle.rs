@@ -14,6 +14,7 @@ use crate::params::ParamOverrides;
 use crate::preview;
 use crate::prompt;
 use crate::state::{history_path, ContractState, HistoryEntry, StateHistory, StateUtxo};
+use crate::validate::amount_uses_fee_keyword;
 use crate::wallet::{self, WalletFile};
 use crate::{covenant, eval, pset_builder};
 
@@ -3727,22 +3728,6 @@ fn apply_utxo_compile_params(
     (params, hints)
 }
 
-/// Whether an output `amount_sat` formula references the reserved `fee` keyword
-/// (as a whole token, so `fee_rate` or `coffee` don't match).
-///
-/// Shared with [`crate::validate`], which reads it as one of the three ways an action can
-/// give an L-BTC surplus a home. One definition, so the check and the builder cannot
-/// disagree about what counts as sizing an output by the fee.
-pub(crate) fn amount_uses_fee_keyword(v: &serde_json::Value) -> bool {
-    let s = match v {
-        serde_json::Value::String(s) => s.as_str(),
-        serde_json::Value::Object(m) => m.get("value").and_then(|x| x.as_str()).unwrap_or(""),
-        _ => "",
-    };
-    s.split(|c: char| !c.is_alphanumeric() && c != '_')
-        .any(|tok| tok == "fee")
-}
-
 /// Resolve a witness `source.key` reference to a concrete pubkey hex for signing.
 ///
 /// Supports `params.NAME` (an action param — used when a covenant is keyed by a
@@ -5906,7 +5891,7 @@ mod tests {
 
         // Locate the lending_v3 fixture relative to the crate (CARGO_MANIFEST_DIR = txmanifest_lib).
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/lending_v3/txmanifest.json");
+            .join("../txmanifest_core/tests/fixtures/lending_v3/txmanifest.json");
         let raw = std::fs::read_to_string(&manifest_path).expect("read lending_v3 manifest");
         let manifest: Manifest = Manifest::from_json_str(&raw).expect("parse lending_v3 manifest");
         let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
@@ -6247,7 +6232,7 @@ mod tests {
         use lwk_wollet::elements::hashes::{sha256, Hash};
 
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/lending_v3/txmanifest.json");
+            .join("../txmanifest_core/tests/fixtures/lending_v3/txmanifest.json");
         let raw = std::fs::read_to_string(&manifest_path).expect("read lending_v3 manifest");
         let manifest: Manifest = Manifest::from_json_str(&raw).expect("parse lending_v3 manifest");
         let net = lwk_wollet::ElementsNetwork::LiquidTestnet;

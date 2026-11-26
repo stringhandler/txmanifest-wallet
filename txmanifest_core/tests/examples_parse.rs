@@ -7,8 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
-use tx_manifest_lib::manifest::Manifest;
-use tx_manifest_lib::validate;
+use txmanifest_core::manifest::Manifest;
+use txmanifest_core::validate;
 
 /// Absolute path to the workspace-level `examples/` directory.
 fn examples_dir() -> PathBuf {
@@ -87,4 +87,46 @@ fn every_example_manifest_validates() {
         "example manifests have validation issues:\n{}",
         failures.join("\n")
     );
+}
+
+/// A caller with no filesystem (a web page) hands the programs over in memory. It must get
+/// the findings the file-reading check gives: none for an example with its programs, and
+/// an error naming each program when they are left out.
+#[test]
+fn examples_validate_the_same_from_memory() {
+    let mut with_programs = 0;
+    for path in &example_manifests() {
+        let dir = path.parent().expect("manifest has a directory");
+        let name = dir.file_name().unwrap_or_default().to_string_lossy();
+        let raw = std::fs::read_to_string(path).expect("read example manifest");
+        let manifest = Manifest::from_json_str(&raw).expect("parsed by the test above");
+
+        let (pins, _) = txmanifest_core::programs::resolve(&manifest);
+        let files: std::collections::BTreeMap<String, Vec<u8>> = pins
+            .values()
+            .map(|pin| {
+                let bytes = std::fs::read(dir.join(&pin.source)).expect("read example program");
+                (pin.source.clone(), bytes)
+            })
+            .collect();
+
+        let report = validate::validate_programs_in_memory(&manifest, &files).strict();
+        let found: Vec<_> = report.issues.iter().map(|i| &i.message).collect();
+        assert!(found.is_empty(), "{name}: {found:?}");
+
+        if files.is_empty() {
+            continue;
+        }
+        with_programs += 1;
+        let none = std::collections::BTreeMap::new();
+        let report = validate::validate_programs_in_memory(&manifest, &none);
+        for pin in pins.values() {
+            let wanted = format!("{} was not supplied", pin.source);
+            assert!(
+                report.issues.iter().any(|i| i.message.contains(&wanted)),
+                "{name}: no finding says {wanted}"
+            );
+        }
+    }
+    assert!(with_programs > 0, "no example has a program");
 }
