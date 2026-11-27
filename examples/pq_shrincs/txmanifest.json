@@ -1,0 +1,134 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stringhandler/txmanifest-wallet/main/schema/txmanifest.schema.json",
+  "manifest_version": "0.3.1",
+  "protocol": "pq-shrincs",
+  "description": "Coins locked to a SHRINCS post-quantum public key (a hash-based signature scheme), spendable only with a SHRINCS signature by that key over the spending transaction. The signature is made outside the wallet, by contrib/shrincs-signer, so a spend takes two runs: one prints the sighash, the other carries the signature.",
+  "chain": "bitcoin",
+  "requires": [
+    "simplicity"
+  ],
+  "simplicity_hl": {
+    "version": "0.7.1",
+    "debug_symbols": false
+  },
+  "utxo_types": {
+    "shrincs_key": {
+      "description": "Coins spendable only with a SHRINCS signature by PK over the spending transaction's sig_all_hash.",
+      "params": {
+        "PK": {
+          "type": "bytes32",
+          "description": "SHRINCS public key, PK.seed || PK.root, as `shrincs-signer pubkey` prints it."
+        }
+      },
+      "script": {
+        "type": "simplicity",
+        "source": "./shrincs_spend.simf",
+        "source_hash": "sha256:77247a9a93b6d0172fa608596ae82a8af0a0ce9e2d81737a4fa7e5e1b795ff6f"
+      }
+    }
+  },
+  "actions": {
+    "Lock": {
+      "description": "Send coins to a SHRINCS public key.",
+      "intent": "Lock {params.amount_sat} sat to a SHRINCS post-quantum key",
+      "allow_change": "lbtc_only",
+      "params": {
+        "PK": {
+          "type": "bytes32",
+          "description": "SHRINCS public key to lock to, from `shrincs-signer pubkey`."
+        },
+        "amount_sat": {
+          "type": "u64",
+          "description": "Amount to lock.",
+          "default": "20000"
+        }
+      },
+      "inputs": [
+        {
+          "id": "funding",
+          "utxo_source": "wallet",
+          "asset": "lbtc",
+          "amount_sat": {
+            "min_amount": "params.amount_sat"
+          },
+          "ui": {
+            "label": "coin being locked",
+            "role": "funding"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "id": "vault",
+          "amount_sat": "params.amount_sat",
+          "asset": "lbtc",
+          "destination": {
+            "utxo_type": "shrincs_key",
+            "args": {
+              "PK": "params.PK"
+            }
+          },
+          "ui": {
+            "label": "coins locked to the SHRINCS key",
+            "role": "covenant"
+          }
+        }
+      ]
+    },
+    "Spend": {
+      "description": "Spend a SHRINCS-locked coin with a signature made outside the wallet.",
+      "intent": "Spend a SHRINCS-locked coin to {params.dest}",
+      "$comment": "Run twice with the same state file and params. First with --print-sighash and placeholder SIG / OTHER_ROOT: it prints the sighash and stops. Then with the values `shrincs-signer sign` prints for that sighash. The destination is a fixed address and the fee comes from a fixed fee_rate, so the second run builds the same transaction and the signature verifies.",
+      "params": {
+        "PK": {
+          "type": "bytes32",
+          "description": "The SHRINCS public key the coin is locked to."
+        },
+        "SIG": {
+          "type": "string",
+          "description": "The SHRINCS signature, as `shrincs-signer sign` prints it. Any placeholder for the --print-sighash run."
+        },
+        "OTHER_ROOT": {
+          "type": "string",
+          "description": "The stateless half's root, as `shrincs-signer sign` prints it. Any placeholder for the --print-sighash run."
+        }
+      },
+      "inputs": [
+        {
+          "id": "vault_in",
+          "utxo_source": {
+            "utxo_type": "shrincs_key",
+            "args": {
+              "PK": "params.PK"
+            }
+          },
+          "witnesses": {
+            "SIG": {
+              "type": "simplicityhl",
+              "value": "params.SIG"
+            },
+            "OTHER_ROOT": {
+              "type": "simplicityhl",
+              "value": "params.OTHER_ROOT"
+            }
+          },
+          "ui": {
+            "label": "SHRINCS-locked coin",
+            "role": "covenant"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "id": "paid",
+          "amount_sat": "vault_in.amount_sat - fee",
+          "destination": "wallet",
+          "ui": {
+            "label": "payment, less the network fee",
+            "role": "payment"
+          }
+        }
+      ]
+    }
+  }
+}

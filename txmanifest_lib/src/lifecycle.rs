@@ -294,6 +294,9 @@ pub fn run(
     manual_inputs: bool,
     // If set, write signed PSET + finalized tx to this path as JSON instead of broadcasting.
     export_pset_path: Option<&Path>,
+    // Bitcoin only: build the transaction, print each covenant input's `sig_all_hash`, and
+    // stop before satisfying or broadcasting anything. See `run_bitcoin_build`.
+    print_sighash: bool,
     // If true, run the jet debugger on every covenant dry-run and print each jet's I/O.
     debug_jets: bool,
     // Whether a manifest whose programs are not all pinned may run. Only the CLI's
@@ -308,6 +311,13 @@ pub fn run(
 
     let manifest: Manifest = Manifest::from_json_str(&raw)
         .with_context(|| format!("Failed to parse manifest file: {}", manifest_file.display()))?;
+
+    if print_sighash && target.network.family() != crate::chain::ChainFamily::Bitcoin {
+        anyhow::bail!(
+            "--print-sighash is only supported on Bitcoin; this run targets {}",
+            target.network
+        );
+    }
     // Refuse before anything is derived, signed or broadcast if the target cannot run
     // this manifest. `validate` cannot do this: it is offline and has no idea which node
     // the wallet points at, and Simplicity on Bitcoin is a property of the node.
@@ -1368,6 +1378,7 @@ pub fn run(
                                 issuance: iso_spec,
                                 sequence: input_sequence,
                                 blinding: None,
+                                witness_wu: None,
                             });
                         } else {
                             println!(
@@ -1511,6 +1522,7 @@ pub fn run(
                     issuance: iso_spec,
                     sequence: input_sequence,
                     blinding: input_blinding,
+                    witness_wu: None,
                 });
             } else {
                 // Neither `"wallet"` nor `{"utxo_type": "..."}`. This arm used to be
@@ -2122,6 +2134,96 @@ pub fn run(
                 change_assets: change_assets.clone(),
             };
 
+            // Bitcoin: resolve each covenant input's program and parameters now, where the
+            // manifest and the execution context are in scope, and before the fee is
+            // estimated. The estimate needs each program's witness weight, and the build
+            // below needs the specs. The Elements path does the same resolution in its own
+            // finalize step.
+            let mut covenant_specs: std::collections::HashMap<String, CovenantSpendSpec> =
+                std::collections::HashMap::new();
+            if actx.family() == crate::chain::ChainFamily::Bitcoin {
+                let mut specs_ok = true;
+                for action_inp in action.inputs.as_deref().unwrap_or_default() {
+                    let Some(type_name) = action_inp.utxo_type_name() else {
+                        continue;
+                    };
+                    let spec = (|| -> Result<CovenantSpendSpec> {
+                        let ut = manifest.utxo_type(&type_name)?;
+                        let site = resolve_utxo_site(
+                            ut,
+                            Some(&action_inp.utxo_source),
+                            &compile_params_map,
+                            &compile_param_type_hints,
+                            action,
+                            &ctx,
+                        )?;
+                        let program = programs
+                            .for_script(ut.script.as_ref())
+                            .with_context(|| format!("utxo_type '{type_name}'"))?
+                            .clone();
+                        Ok(CovenantSpendSpec {
+                            program,
+                            params: site.compile_params,
+                            hints: site.type_hints,
+                            leaf_payloads: site.leaf_payloads,
+                            witnesses: action_inp
+                                .witnesses
+                                .as_ref()
+                                .map(|w| eval::resolve_witness_refs(w, &ctx)),
+                            witness_spec: action_inp.witnesses.clone(),
+                        })
+                    })();
+                    match spec {
+                        Ok(spec) => {
+                            covenant_specs.insert(action_inp.id.clone(), spec);
+                        }
+                        Err(e) => {
+                            println!(
+                                "  {} Covenant input '{}': {e}",
+                                style("[error]").red(),
+                                action_inp.id
+                            );
+                            specs_ok = false;
+                        }
+                    }
+                }
+                if !specs_ok {
+                    anyhow::bail!("a covenant input could not be resolved; nothing was built");
+                }
+
+                // A covenant witness can be far larger than the fixed allowance the fee
+                // estimate falls back to: a SHRINCS spend is about 19 k WU. The estimate is
+                // an upper bound from the program alone, never from witness values, so
+                // both runs of a two-run spend (`--print-sighash`) arrive at the same fee.
+                for input in req.inputs.iter_mut() {
+                    if let pset_builder::PsetInput::Covenant {
+                        input_id,
+                        witness_wu,
+                        ..
+                    } = input
+                    {
+                        let Some(spec) = covenant_specs.get(input_id.as_str()) else {
+                            continue;
+                        };
+                        let wu = covenant::estimate_bitcoin_covenant_witness_wu(
+                            &spec.program,
+                            &spec.params,
+                            &spec.hints,
+                            &spec.leaf_payloads,
+                            &compile_opts,
+                        )
+                        .with_context(|| {
+                            format!("cannot estimate the witness size of '{input_id}'")
+                        })?;
+                        println!(
+                            "  {} Covenant input '{input_id}': witness up to {wu} WU (fee estimate)",
+                            style("·").dim()
+                        );
+                        *witness_wu = Some(wu);
+                    }
+                }
+            }
+
             // Resolve the `fee` keyword: estimate the fee from the current (fee=0)
             // draft, then re-evaluate any output amount that referenced `fee`. The
             // amounts don't affect the tx vsize, so the draft gives the right size.
@@ -2196,61 +2298,6 @@ pub fn run(
             // path to run through yet, and nothing downstream would know what to do with a
             // PSBT.
             if actx.family() == crate::chain::ChainFamily::Bitcoin {
-                // Resolve each covenant input's program and parameters here, where the
-                // manifest and the execution context are in scope. The Elements path does
-                // the same work in its own finalize step; this is the same resolution,
-                // moved to where the Bitcoin build can reach it.
-                let mut covenant_specs: std::collections::HashMap<String, CovenantSpendSpec> =
-                    std::collections::HashMap::new();
-                let mut specs_ok = true;
-                for action_inp in action.inputs.as_deref().unwrap_or_default() {
-                    let Some(type_name) = action_inp.utxo_type_name() else {
-                        continue;
-                    };
-                    let spec = (|| -> Result<CovenantSpendSpec> {
-                        let ut = manifest.utxo_type(&type_name)?;
-                        let site = resolve_utxo_site(
-                            ut,
-                            Some(&action_inp.utxo_source),
-                            &compile_params_map,
-                            &compile_param_type_hints,
-                            action,
-                            &ctx,
-                        )?;
-                        let program = programs
-                            .for_script(ut.script.as_ref())
-                            .with_context(|| format!("utxo_type '{type_name}'"))?
-                            .clone();
-                        Ok(CovenantSpendSpec {
-                            program,
-                            params: site.compile_params,
-                            hints: site.type_hints,
-                            leaf_payloads: site.leaf_payloads,
-                            witnesses: action_inp
-                                .witnesses
-                                .as_ref()
-                                .map(|w| eval::resolve_witness_refs(w, &ctx)),
-                            witness_spec: action_inp.witnesses.clone(),
-                        })
-                    })();
-                    match spec {
-                        Ok(spec) => {
-                            covenant_specs.insert(action_inp.id.clone(), spec);
-                        }
-                        Err(e) => {
-                            println!(
-                                "  {} Covenant input '{}': {e}",
-                                style("[error]").red(),
-                                action_inp.id
-                            );
-                            specs_ok = false;
-                        }
-                    }
-                }
-                if !specs_ok {
-                    anyhow::bail!("a covenant input could not be resolved; nothing was built");
-                }
-
                 let params_snap = compile_params_map.clone();
                 let action_params_snap = action_params_map.clone();
                 let wallet_snap = loaded_wallet.clone();
@@ -2261,6 +2308,7 @@ pub fn run(
                     &req,
                     bitcoin_run,
                     export_pset_path,
+                    print_sighash,
                     &covenant_specs,
                     &params_snap,
                     &action_params_snap,
@@ -4506,6 +4554,7 @@ pub fn run_headless(
         data_dir,
         false, // manual_inputs
         Some(&export_path),
+        false, // print_sighash
         false, // debug_jets
         crate::programs::Unpinned::Refuse,
     );
@@ -4607,6 +4656,7 @@ fn run_bitcoin_build(
     req: &pset_builder::BuildPsetRequest,
     run: &crate::session::BitcoinRun,
     export_path: Option<&Path>,
+    print_sighash: bool,
     covenant_specs: &std::collections::HashMap<String, CovenantSpendSpec>,
     compile_params: &std::collections::HashMap<String, String>,
     action_params: &std::collections::HashMap<String, String>,
@@ -4624,12 +4674,15 @@ fn run_bitcoin_build(
     let psbt_req = psbt_builder::from_pset_request(req, Some(change_script))?;
 
     let mut built = psbt_builder::build_psbt(&psbt_req)?;
+    // The txid excludes witnesses, so it is fixed from here on. Printing it lets a two-run
+    // spend (`--print-sighash`, then the signed run) show that both built one transaction.
     println!(
-        "  {} PSBT constructed ({} inputs, {} outputs, fee {} sat).",
+        "  {} PSBT constructed ({} inputs, {} outputs, fee {} sat, txid {}).",
         style("✓").green(),
         built.psbt.unsigned_tx.input.len(),
         built.psbt.unsigned_tx.output.len(),
         style(built.fee).yellow(),
+        built.psbt.unsigned_tx.compute_txid(),
     );
     if let Some(idx) = built.change_index {
         println!("    Change at output #{idx}");
@@ -4674,13 +4727,47 @@ fn run_bitcoin_build(
         );
     }
 
+    let prevouts: Vec<lwk_wollet::elements::bitcoin::TxOut> =
+        psbt_req.inputs.iter().map(|i| i.witness_utxo()).collect();
+    let unsigned = built.psbt.unsigned_tx.clone();
+
+    // `--print-sighash`: the first of two runs, for a covenant witness signed outside the
+    // wallet. There is no witness yet, so stop before satisfying anything, and print what
+    // each program will read from `jet::sig_all_hash`. A second run that rebuilds this
+    // exact transaction (same inputs, outputs and fee) can then carry the signature.
+    if print_sighash {
+        if covenant_inputs.is_empty() {
+            anyhow::bail!("--print-sighash: this transaction spends no covenant input");
+        }
+        println!();
+        println!(
+            "  sig_all_hash of each covenant input of {} (nothing was broadcast).",
+            unsigned.compute_txid()
+        );
+        println!("  The signed run must build this same txid, or the signature will not verify:");
+        for (index, input_id) in &covenant_inputs {
+            let spec = covenant_specs.get(input_id).ok_or_else(|| {
+                anyhow::anyhow!("covenant input '{input_id}' has no resolved program")
+            })?;
+            let hash = covenant::bitcoin_covenant_sighash(
+                &spec.program,
+                &spec.params,
+                &spec.hints,
+                &spec.leaf_payloads,
+                &unsigned,
+                &prevouts,
+                *index as u32,
+                compile_opts,
+            )
+            .with_context(|| format!("cannot compute the sighash of '{input_id}'"))?;
+            println!("    {input_id}  {}", hex_bytes(&hash));
+        }
+        return Ok(None);
+    }
+
     // Covenant inputs, once every other input's witness is settled: the Simplicity program
     // reads the whole transaction, and `sig_all_hash` commits to it.
     if !covenant_inputs.is_empty() {
-        let prevouts: Vec<lwk_wollet::elements::bitcoin::TxOut> =
-            psbt_req.inputs.iter().map(|i| i.witness_utxo()).collect();
-        let unsigned = built.psbt.unsigned_tx.clone();
-
         for (index, input_id) in &covenant_inputs {
             let spec = covenant_specs.get(input_id).ok_or_else(|| {
                 anyhow::anyhow!("covenant input '{input_id}' has no resolved program")
@@ -5308,6 +5395,7 @@ mod tests {
                     issuance: None,
                     sequence: None,
                     blinding: None,
+                    witness_wu: None,
                 })
                 .collect()
         };

@@ -122,6 +122,13 @@ enum Commands {
         /// Useful for offline inspection with e.g. elements-cli or a PSET decoder.
         #[arg(long)]
         export_pset: Option<PathBuf>,
+        /// Bitcoin only. Build the transaction, print the `sig_all_hash` each covenant
+        /// input's program will check, and stop: no witness is needed and nothing is
+        /// broadcast. For a witness signed outside the wallet: sign the hash, then run
+        /// again with the same inputs (`--input`), params and fee rate, so the second run
+        /// builds the same transaction and the signature verifies.
+        #[arg(long, conflicts_with = "export_pset")]
+        print_sighash: bool,
         /// Print every Simplicity jet call (name, inputs, outputs) during covenant dry-runs.
         /// Equality jets show lhs vs rhs so mismatches are immediately visible.
         #[arg(long)]
@@ -1053,6 +1060,7 @@ fn main() -> Result<()> {
             inputs_file,
             manual_inputs,
             export_pset,
+            print_sighash,
             debug_jets,
             allow_unpinned,
             debug,
@@ -1089,6 +1097,7 @@ fn main() -> Result<()> {
                 &data_dir,
                 manual_inputs,
                 export_pset.as_deref(),
+                print_sighash,
                 debug_jets,
                 if allow_unpinned {
                     tx_manifest_lib::programs::Unpinned::Allow

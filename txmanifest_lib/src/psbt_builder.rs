@@ -83,6 +83,9 @@ pub enum PsbtInput {
         script_pubkey: ScriptBuf,
         amount: u64,
         sequence: Option<u32>,
+        /// An upper bound on the witness weight, from the program. `None` falls back to
+        /// [`COVENANT_WITNESS_WU`].
+        witness_wu: Option<usize>,
     },
 }
 
@@ -135,7 +138,7 @@ impl PsbtInput {
     fn estimated_witness_wu(&self) -> usize {
         match self {
             PsbtInput::Wallet { .. } => KEYSPEND_WITNESS_WU,
-            PsbtInput::Covenant { .. } => COVENANT_WITNESS_WU,
+            PsbtInput::Covenant { witness_wu, .. } => witness_wu.unwrap_or(COVENANT_WITNESS_WU),
         }
     }
 }
@@ -602,6 +605,7 @@ mod tests {
                 script_pubkey: p2tr(4),
                 amount: 50_000,
                 sequence: None,
+                witness_wu: None,
             }],
             vec![PsbtOutputSpec {
                 script_pubkey: p2tr(1),
@@ -672,6 +676,7 @@ mod tests {
                 script_pubkey: p2tr(4),
                 amount: 100_000,
                 sequence: None,
+                witness_wu: None,
             }],
             outputs(),
         ))
@@ -718,6 +723,7 @@ mod tests {
                 issuance: None,
                 sequence: Some(144),
                 blinding: None,
+                witness_wu: None,
             }],
             outputs: vec![crate::pset_builder::PsetOutputSpec {
                 script_pubkey: el_script(),
@@ -933,6 +939,7 @@ mod tests {
             script_pubkey: p2tr(4),
             amount: 50_000,
             sequence: None,
+            witness_wu: None,
         });
         r.outputs[0].amount = 140_000;
 
@@ -1170,6 +1177,7 @@ pub fn from_pset_request(
                 issuance,
                 sequence,
                 blinding,
+                witness_wu,
                 ..
             } => {
                 if issuance.is_some() {
@@ -1187,6 +1195,7 @@ pub fn from_pset_request(
                     script_pubkey: convert_script(script_pubkey),
                     amount: *amount,
                     sequence: *sequence,
+                    witness_wu: *witness_wu,
                 });
             }
         }

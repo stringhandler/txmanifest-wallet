@@ -233,6 +233,7 @@ fn a_covenant_input_is_refused_rather_than_left_unsigned() {
             issuance: None,
             sequence: None,
             blinding: None,
+            witness_wu: None,
         }],
         outputs: vec![PsetOutputSpec {
             script_pubkey: lwk_wollet::elements::Script::from(recipient().to_bytes()),

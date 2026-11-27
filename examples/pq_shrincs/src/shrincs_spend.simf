@@ -1,0 +1,19 @@
+// A SHRINCS-locked coin: spendable only with a SHRINCS signature, by the key pinned in
+// `param::PK`, over this transaction's `sig_all_hash`. `PK` is the 32-byte SHRINCS public
+// key, `PK.seed || PK.root`.
+//
+// Upstream's `shrincs_verify` takes the message and the public key as part of its proof,
+// which is what makes its own example anyone-can-spend. This wrapper supplies both itself,
+// so the spender provides only the signature.
+//
+// Not compiled directly: `build.sh` flattens it with the vendored verifier into
+// `../shrincs_spend.simf`, the file the manifest pins.
+
+#include "shrincs/shrincs.simf"
+
+fn main() {
+    let pk: SPHINCSPK = <u256>::into(param::PK);
+    let sig: Either<UXMSSSignature, SPHINCSSignature> = witness::SIG;
+    let other_root: u128 = witness::OTHER_ROOT;
+    shrincs_verify((jet::sig_all_hash(), pk, sig, other_root));
+}

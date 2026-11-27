@@ -1,0 +1,9 @@
+#define TESTING
+#include "lamport.simf"
+#include "wots.simf"
+#include "sphincs/sphincs.simf"
+
+fn main() {
+    test_lamport_sign_verify();
+    test_wots_sign_verify();
+}
