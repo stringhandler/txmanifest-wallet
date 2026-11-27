@@ -26,7 +26,7 @@ fn reproduces_indexer_pre_lock_covenant() {
     let net = ElementsNetwork::LiquidTestnet;
     let dir = std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../examples/lending_v2"
+        "/tests/fixtures/lending_v2"
     ));
 
     // Offer params decoded from the on-chain tx (adf5353d...).

@@ -5904,9 +5904,9 @@ mod tests {
     fn lending_v3_create_offer_reproduces_live_offer_out5() {
         use crate::manifest::Manifest;
 
-        // Locate examples/lending_v3 relative to the crate (CARGO_MANIFEST_DIR = txmanifest_lib).
+        // Locate the lending_v3 fixture relative to the crate (CARGO_MANIFEST_DIR = txmanifest_lib).
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../examples/lending_v3/txmanifest.json");
+            .join("tests/fixtures/lending_v3/txmanifest.json");
         let raw = std::fs::read_to_string(&manifest_path).expect("read lending_v3 manifest");
         let manifest: Manifest = Manifest::from_json_str(&raw).expect("parse lending_v3 manifest");
         let net = lwk_wollet::ElementsNetwork::LiquidTestnet;
@@ -6247,7 +6247,7 @@ mod tests {
         use lwk_wollet::elements::hashes::{sha256, Hash};
 
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../examples/lending_v3/txmanifest.json");
+            .join("tests/fixtures/lending_v3/txmanifest.json");
         let raw = std::fs::read_to_string(&manifest_path).expect("read lending_v3 manifest");
         let manifest: Manifest = Manifest::from_json_str(&raw).expect("parse lending_v3 manifest");
         let net = lwk_wollet::ElementsNetwork::LiquidTestnet;

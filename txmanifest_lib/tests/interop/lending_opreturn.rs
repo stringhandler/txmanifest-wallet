@@ -19,7 +19,7 @@ fn program_id(simf_path: &std::path::Path) -> String {
 fn reproduces_offer_creation_opreturn() {
     let d = std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../examples/lending_v3"
+        "/tests/fixtures/lending_v3"
     ));
     let lending_program_id = program_id(&d.join("lending.simf"));
     assert_eq!(

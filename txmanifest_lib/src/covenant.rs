@@ -2290,7 +2290,7 @@ mod tests {
     fn tapleaf_matches_compiled_cmr() {
         // Use script_auth.simf — single SCRIPT_HASH (u256) param, no witnesses needed.
         let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let simf_path = crate_dir.join("../examples/lending_v2/script_auth.simf");
+        let simf_path = crate_dir.join("tests/fixtures/lending_v2/script_auth.simf");
 
         let mut params = HashMap::new();
         params.insert(
@@ -2363,7 +2363,7 @@ mod tests {
     #[test]
     fn pre_lock_script_hash_invariant_to_extra_params() {
         let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let simf_path = crate_dir.join("../examples/lending_v2/pre_lock.simf");
+        let simf_path = crate_dir.join("tests/fixtures/lending_v2/pre_lock.simf");
         let network = lwk_wollet::ElementsNetwork::LiquidTestnet;
 
         // Helper to build the 15 explicit params + hints (matching the manifest.json
@@ -2595,7 +2595,7 @@ mod tests {
     #[test]
     fn pre_lock_script_hash_matches_instance() {
         let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let simf_path = crate_dir.join("../examples/lending_v2/pre_lock.simf");
+        let simf_path = crate_dir.join("tests/fixtures/lending_v2/pre_lock.simf");
         let network = lwk_wollet::ElementsNetwork::LiquidTestnet;
 
         let mut params: HashMap<String, String> = HashMap::new();
