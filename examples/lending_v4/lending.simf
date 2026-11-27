@@ -1,0 +1,958 @@
+// Helper getters
+
+fn get_script_hash(index: u32, is_input_index: bool) -> u256 {
+    let script_hash: u256 = match is_input_index {
+        true => unwrap(jet::input_script_hash(index)),
+        false => unwrap(jet::output_script_hash(index)),
+    };
+
+    script_hash
+}
+
+fn get_explicit_asset_and_amount(index: u32, is_input_index: bool) -> (u256, u64) {
+    let pair: (Asset1, Amount1) = match is_input_index {
+        true => unwrap(jet::input_amount(index)),
+        false => unwrap(jet::output_amount(index)),
+    };
+    let (asset, amount): (Asset1, Amount1) = pair;
+    let asset_bits: u256 = unwrap_right::<(u1, u256)>(asset);
+    let amount: u64 = unwrap_right::<(u1, u256)>(amount);
+    (asset_bits, amount)
+}
+
+fn is_op_return(output_index: u32) -> bool {
+    match jet::output_null_datum(output_index, 0) {
+        Some(entry: Option<Either<(u2, u256), Either<u1, u4>>>) => true,
+        None => false,
+    }
+}
+
+// Check helpers
+
+fn check_asset_amounts_eq(asset_amount_1: u64, asset_amount_2: u64) {
+    assert!(jet::eq_64(asset_amount_1, asset_amount_2));
+}
+
+fn check_assets_eq(asset_bits_1: u256, asset_bits_2: u256) {
+    assert!(jet::eq_256(asset_bits_1, asset_bits_2));
+}
+
+fn check_script_hashes_eq(script_1: u256, script_2: u256) {
+    assert!(jet::eq_256(script_1, script_2));
+}
+
+fn check_flags_eq(flag_1: bool, flag_2: bool) {
+    assert!(jet::eq_1(<bool>::into(flag_1), <bool>::into(flag_2)));
+}
+
+// Math helpers
+
+fn safe_add_64(first: u64, second: u64) -> u64 {
+    let (carry, result): (bool, u64) = jet::add_64(first, second);
+
+    check_flags_eq(carry, false);
+
+    result
+}
+
+fn safe_add_32(first: u32, second: u32) -> u32 {
+    let (carry, result): (bool, u32) = jet::add_32(first, second);
+
+    check_flags_eq(carry, false);
+
+    result
+}
+
+fn safe_sub_64(first: u64, second: u64) -> u64 {
+    let (carry, result): (bool, u64) = jet::subtract_64(first, second);
+
+    check_flags_eq(carry, false);
+
+    result
+}
+
+fn min_64(first: u64, second: u64) -> u64 {
+    match jet::lt_64(first, second) {
+        true => first,
+        false => second,
+    }
+}
+
+// Ensure functions
+
+fn ensure_output_is_op_return(index: u32) {
+    check_flags_eq(is_op_return(index), true);
+}
+
+fn ensure_input_script_hash(input_index: u32, expected_script_hash: u256) {
+    let script_hash: u256 = get_script_hash(input_index, true);
+
+    check_script_hashes_eq(script_hash, expected_script_hash);
+}
+
+fn ensure_output_script_hash(output_index: u32, expected_script_hash: u256) {
+    let script_hash: u256 = get_script_hash(output_index, false);
+
+    check_script_hashes_eq(script_hash, expected_script_hash);
+}
+
+fn ensure_script_hash_transition(
+    input_index: u32,
+    output_index: u32,
+    expected_input_script_hash: u256,
+    expected_output_script_hash: u256
+) {
+    ensure_input_script_hash(input_index, expected_input_script_hash);
+    ensure_output_script_hash(output_index, expected_output_script_hash);
+}
+
+fn ensure_input_asset_and_amount(input_index: u32, expected_asset_bits: u256, expected_amount: u64) {
+    let (asset_bits, amount): (u256, u64) = get_explicit_asset_and_amount(input_index, true);
+
+    check_assets_eq(asset_bits, expected_asset_bits);
+    check_asset_amounts_eq(amount, expected_amount);
+}
+
+fn ensure_output_asset_and_amount(output_index: u32, expected_asset_bits: u256, expected_amount: u64) {
+    let (asset_bits, amount): (u256, u64) = get_explicit_asset_and_amount(output_index, false);
+
+    check_assets_eq(asset_bits, expected_asset_bits);
+    check_asset_amounts_eq(amount, expected_amount);
+}
+
+fn ensure_io_asset_eq(input_index: u32, output_index: u32, expected_asset_bits: u256) -> (u64, u64) {
+    let (input_asset_bits, input_amount): (u256, u64) = get_explicit_asset_and_amount(input_index, true);
+    let (output_asset_bits, output_amount): (u256, u64) = get_explicit_asset_and_amount(output_index, false);
+
+    check_assets_eq(input_asset_bits, expected_asset_bits);
+    check_assets_eq(input_asset_bits, output_asset_bits);
+
+    (input_amount, output_amount)
+}
+
+fn ensure_io_asset_and_amount_eq(
+    input_index: u32,
+    output_index: u32,
+    expected_asset_bits: u256,
+    expected_amount: u64
+) {
+    let (input_amount, output_amount): (u64, u64) = ensure_io_asset_eq(input_index, output_index, expected_asset_bits);
+
+    check_asset_amounts_eq(input_amount, expected_amount);
+    check_asset_amounts_eq(input_amount, output_amount);
+}
+
+fn ensure_input_asset_and_amount_burn(
+    input_index: u32,
+    output_index: u32,
+    expected_asset_bits: u256,
+    expected_asset_amount: u64
+) {
+    ensure_io_asset_and_amount_eq(input_index, output_index, expected_asset_bits, expected_asset_amount);
+
+    ensure_output_is_op_return(output_index);
+}
+
+fn ensure_asset_transition_with_additional_amount(
+    input_index: u32,
+    output_index: u32,
+    expected_asset_bits: u256,
+    additional_amount: u64
+) {
+    let (input_amount, output_amount): (u64, u64) = ensure_io_asset_eq(input_index, output_index, expected_asset_bits);
+
+    let new_asset_amount: u64 = safe_add_64(input_amount, additional_amount);
+
+    check_asset_amounts_eq(output_amount, new_asset_amount);
+}
+
+// Basis points math
+
+fn get_max_basis_points() -> u64 {
+    10_000
+}
+
+fn apply_basis_points(amount: u64, bps: u64) -> u64 {
+    let amount_with_bps: u128 = jet::multiply_64(amount, bps);
+
+    // TODO: Handle case when hi > 0
+    let (hi, lo): (u64, u64) = <u128>::into(amount_with_bps);
+    check_asset_amounts_eq(hi, 0);
+
+    let result: u64 = jet::divide_64(lo, get_max_basis_points());
+
+    result
+}
+
+// Storage helpers
+
+fn get_is_active_slot_leaf(is_active: bool) -> u256 {
+    let is_active_num: u64 = jet::left_pad_low_1_64(<bool>::into(is_active));
+    let is_active_num: u256 = <(u128, u128)>::into((0, <(u64, u64)>::into((0, is_active_num))));
+
+    let state_ctx1: Ctx8 = jet::tapdata_init();
+    let state_ctx2: Ctx8 = jet::sha_256_ctx_8_add_32(state_ctx1, is_active_num);
+
+    jet::sha_256_ctx_8_finalize(state_ctx2)
+}
+
+fn get_borrower_debt_slot_leaf(borrower_debt: u64) -> u256 {
+    let borrower_debt: u256 = <(u128, u128)>::into((0, <(u64, u64)>::into((0, borrower_debt))));
+
+    let state_ctx1: Ctx8 = jet::tapdata_init();
+    let state_ctx2: Ctx8 = jet::sha_256_ctx_8_add_32(state_ctx1, borrower_debt);
+
+    jet::sha_256_ctx_8_finalize(state_ctx2)
+}
+
+/// The script hash of this program's address with `state_slot_leaf` as storage slot 0.
+fn get_script_hash_for_state_slot(state_slot_leaf: u256, borrower_debt: u64) -> u256 {
+    let borrower_debt_slot_leaf: u256 = get_borrower_debt_slot_leaf(borrower_debt);
+
+    let first_tap_node: u256 = jet::build_tapbranch(jet::tapleaf_hash(), state_slot_leaf);
+    let tap_node: u256 = jet::build_tapbranch(first_tap_node, borrower_debt_slot_leaf);
+
+    // Compute a TapTweak
+    let bip0341_key: u256 = 0x50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0;
+    let tweaked_key: u256 = jet::build_taptweak(bip0341_key, tap_node);
+
+    // Turn the TapTweak into a script hash
+    let hash_ctx1: Ctx8 = jet::sha_256_ctx_8_init();
+    let hash_ctx2: Ctx8 = jet::sha_256_ctx_8_add_2(hash_ctx1, 0x5120); // Segwit v1, length 32
+    let hash_ctx3: Ctx8 = jet::sha_256_ctx_8_add_32(hash_ctx2, tweaked_key);
+
+    jet::sha_256_ctx_8_finalize(hash_ctx3)
+}
+
+fn get_script_hash_for_storage(is_active: bool, borrower_debt: u64) -> u256 {
+    get_script_hash_for_state_slot(get_is_active_slot_leaf(is_active), borrower_debt)
+}
+
+// Main paths helpers
+
+fn get_protocol_fee_bps() -> u64 {
+    1_000 // 10%
+}
+
+fn get_protocol_fee_amount(fee_amount: u64) -> u64 {
+    apply_basis_points(fee_amount, get_protocol_fee_bps())
+}
+
+fn get_total_fee_amount() -> u64 {
+    apply_basis_points(param::PRINCIPAL_AMOUNT, param::PRINCIPAL_INTEREST_RATE)
+}
+
+fn get_total_amount_to_repay() -> u64 {
+    safe_add_64(param::PRINCIPAL_AMOUNT, get_total_fee_amount())
+}
+
+fn split_repayment_by_fees(fee_left: u64, amount_to_repay: u64) -> (u64, u64) {
+    let fee_repaid: u64 = min_64(fee_left, amount_to_repay);
+    let protocol_fee_repaid: u64 = get_protocol_fee_amount(fee_repaid);
+
+    (fee_repaid, protocol_fee_repaid)
+}
+
+fn validate_vaults(
+    lender_vault_indexes: (u32, u32),
+    protocol_fee_vault_indexes: (u32, u32),
+    current_borrower_debt: u64,
+    amount_to_repay: u64
+) {
+    let total_fee_amount: u64 = get_total_fee_amount();
+
+    let already_repaid_amount: u64 = safe_sub_64(get_total_amount_to_repay(), current_borrower_debt);
+
+    let (
+        already_repaid_fee,
+        already_repaid_protocol_fee
+    ): (u64, u64) = split_repayment_by_fees(total_fee_amount, already_repaid_amount);
+
+    let fee_left: u64 = safe_sub_64(total_fee_amount, already_repaid_fee);
+
+    let (fee_repaid, protocol_fee_repaid): (u64, u64) = split_repayment_by_fees(fee_left, amount_to_repay);
+
+    let total_repaid_protocol_fee: u64 = safe_add_64(already_repaid_protocol_fee, protocol_fee_repaid);
+    let additional_lender_vault_amount: u64 = safe_sub_64(amount_to_repay, protocol_fee_repaid);
+
+    let total_protocol_fee: u64 = get_protocol_fee_amount(total_fee_amount);
+
+    let lender_vault_output_hash: u256 = match jet::eq_64(current_borrower_debt, amount_to_repay) {
+        true => param::FINALIZED_LENDER_VAULT_COV_HASH,
+        false => param::LENDER_VAULT_COV_HASH,
+    };
+    let protocol_fee_vault_output_hash: u256 = match jet::eq_64(total_repaid_protocol_fee, total_protocol_fee) {
+        true => param::FINALIZED_PROTOCOL_FEE_VAULT_COV_HASH,
+        false => param::PROTOCOL_FEE_VAULT_COV_HASH,
+    };
+
+    let (lender_vault_input_index, lender_vault_output_index): (u32, u32) = lender_vault_indexes;
+    let (protocol_fee_vault_input_index, protocol_fee_vault_output_index): (u32, u32) = protocol_fee_vault_indexes;
+
+    match jet::some_64(already_repaid_amount) {
+        true => {
+            ensure_asset_transition_with_additional_amount(
+                lender_vault_input_index,
+                lender_vault_output_index,
+                param::PRINCIPAL_ASSET_ID,
+                additional_lender_vault_amount
+            );
+            ensure_script_hash_transition(
+                lender_vault_input_index,
+                lender_vault_output_index,
+                param::LENDER_VAULT_COV_HASH,
+                lender_vault_output_hash
+            );
+
+            match jet::lt_64(already_repaid_protocol_fee, total_protocol_fee) {
+                true => {
+                    ensure_asset_transition_with_additional_amount(
+                        protocol_fee_vault_input_index,
+                        protocol_fee_vault_output_index,
+                        param::PRINCIPAL_ASSET_ID,
+                        protocol_fee_repaid
+                    );
+                    ensure_script_hash_transition(
+                        protocol_fee_vault_input_index,
+                        protocol_fee_vault_output_index,
+                        param::PROTOCOL_FEE_VAULT_COV_HASH,
+                        protocol_fee_vault_output_hash
+                    );
+                },
+                false => {},
+            };
+        },
+        false => {
+            ensure_output_asset_and_amount(
+                lender_vault_output_index,
+                param::PRINCIPAL_ASSET_ID,
+                additional_lender_vault_amount
+            );
+            ensure_output_script_hash(lender_vault_output_index, lender_vault_output_hash);
+
+            ensure_output_asset_and_amount(
+                protocol_fee_vault_output_index,
+                param::PRINCIPAL_ASSET_ID,
+                protocol_fee_repaid
+            );
+            ensure_output_script_hash(protocol_fee_vault_output_index, protocol_fee_vault_output_hash);
+        },
+    };
+}
+
+// Partial repayment flow
+
+fn get_partial_repayment_offer_indexes(start_input_index: u32, start_output_index: u32) -> (u32, u32) {
+    (safe_add_32(start_input_index, 1), safe_add_32(start_output_index, 1))
+}
+
+fn get_partial_repayment_lender_vault_indexes(start_input_index: u32, start_output_index: u32) -> (u32, u32) {
+    (safe_add_32(start_input_index, 2), safe_add_32(start_output_index, 2))
+}
+
+fn get_partial_repayment_protocol_fee_vault_indexes(start_input_index: u32, start_output_index: u32) -> (u32, u32) {
+    (safe_add_32(start_input_index, 3), safe_add_32(start_output_index, 3))
+}
+
+fn partial_repay_offer(current_debt: u64, amount_to_repay: u64) {
+    let (borrower_nft_input_index, borrower_nft_output_index): (u32, u32) = (0, 0);
+    let (
+        offer_input_index,
+        offer_output_index
+    ): (u32, u32) = get_partial_repayment_offer_indexes(borrower_nft_input_index, borrower_nft_output_index);
+
+    assert!(jet::eq_32(jet::current_index(), offer_input_index));
+
+    let current_script_hash: u256 = get_script_hash_for_storage(true, current_debt);
+    ensure_input_script_hash(offer_input_index, current_script_hash);
+
+    assert!(jet::some_64(amount_to_repay));
+    assert!(jet::lt_64(amount_to_repay, current_debt));
+
+    ensure_io_asset_and_amount_eq(
+        offer_input_index,
+        offer_output_index,
+        param::COLLATERAL_ASSET_ID,
+        param::COLLATERAL_AMOUNT
+    );
+
+    let new_debt: u64 = safe_sub_64(current_debt, amount_to_repay);
+    let new_offer_script_hash: u256 = get_script_hash_for_storage(true, new_debt);
+
+    ensure_output_script_hash(offer_output_index, new_offer_script_hash);
+
+    ensure_io_asset_and_amount_eq(
+        borrower_nft_input_index,
+        borrower_nft_output_index,
+        param::BORROWER_NFT_ASSET_ID,
+        1
+    );
+
+    validate_vaults(
+        get_partial_repayment_lender_vault_indexes(borrower_nft_input_index, borrower_nft_output_index),
+        get_partial_repayment_protocol_fee_vault_indexes(borrower_nft_input_index, borrower_nft_output_index),
+        current_debt,
+        amount_to_repay
+    );
+}
+
+// Full repayment flow
+
+fn get_full_repayment_offer_input_index(start_input_index: u32) -> u32 {
+    safe_add_32(start_input_index, 1)
+}
+
+fn get_full_repayment_lender_vault_indexes(start_input_index: u32, start_output_index: u32) -> (u32, u32) {
+    (safe_add_32(start_input_index, 2), safe_add_32(start_output_index, 1))
+}
+
+fn get_full_repayment_protocol_fee_vault_indexes(start_input_index: u32, start_output_index: u32) -> (u32, u32) {
+    (safe_add_32(start_input_index, 3), safe_add_32(start_output_index, 2))
+}
+
+/// Full repayment of the loan at `current_script_hash`: active, or pending liquidation.
+fn full_repay_from(current_script_hash: u256, current_debt: u64) {
+    let (borrower_nft_input_index, borrower_nft_output_index): (u32, u32) = (0, 0);
+    let offer_input_index: u32 = get_full_repayment_offer_input_index(borrower_nft_input_index);
+
+    assert!(jet::eq_32(jet::current_index(), offer_input_index));
+
+    ensure_input_script_hash(offer_input_index, current_script_hash);
+
+    ensure_input_asset_and_amount(offer_input_index, param::COLLATERAL_ASSET_ID, param::COLLATERAL_AMOUNT);
+    ensure_input_asset_and_amount_burn(
+        borrower_nft_input_index,
+        borrower_nft_output_index,
+        param::BORROWER_NFT_ASSET_ID,
+        1
+    );
+
+    validate_vaults(
+        get_full_repayment_lender_vault_indexes(borrower_nft_input_index, borrower_nft_output_index),
+        get_full_repayment_protocol_fee_vault_indexes(borrower_nft_input_index, borrower_nft_output_index),
+        current_debt,
+        current_debt
+    );
+}
+
+fn full_repay_offer(current_debt: u64) {
+    full_repay_from(get_script_hash_for_storage(true, current_debt), current_debt);
+}
+
+// Liquidation flow
+
+fn get_liquidation_lender_nft_indexes(start_input_index: u32, start_output_index: u32) -> (u32, u32) {
+    (safe_add_32(start_input_index, 1), start_output_index)
+}
+
+fn liquidate_offer(current_debt: u64) {
+    let (lending_input_index, lending_output_index): (u32, u32) = (jet::current_index(), 0);
+    let (
+        lender_nft_input_index,
+        lender_nft_output_index
+    ): (u32, u32) = get_liquidation_lender_nft_indexes(lending_input_index, lending_output_index);
+
+    assert!(jet::eq_32(lending_input_index, 0));
+
+    let current_script_hash: u256 = get_script_hash_for_storage(true, current_debt);
+    ensure_input_script_hash(lending_input_index, current_script_hash);
+
+    jet::check_lock_height(param::LOAN_EXPIRATION_TIME);
+
+    ensure_input_asset_and_amount(lending_input_index, param::COLLATERAL_ASSET_ID, param::COLLATERAL_AMOUNT);
+
+    ensure_input_asset_and_amount_burn(lender_nft_input_index, lender_nft_output_index, param::LENDER_NFT_ASSET_ID, 1);
+}
+
+// Offer acceptance flow
+
+fn get_acceptance_principal_output_index(start_output_index: u32) -> u32 {
+    safe_add_32(start_output_index, 1)
+}
+
+fn get_acceptance_lender_nft_indexes(start_input_index: u32, start_output_index: u32) -> (u32, u32) {
+    (safe_add_32(start_input_index, 1), safe_add_32(start_output_index, 2))
+}
+
+fn accept_offer() {
+    let (lending_input_index, lending_output_index): (u32, u32) = (jet::current_index(), 0);
+    let (
+        lender_nft_input_index,
+        lender_nft_output_index
+    ): (u32, u32) = get_acceptance_lender_nft_indexes(lending_input_index, lending_output_index);
+    let principal_output_index: u32 = get_acceptance_principal_output_index(lending_output_index);
+
+    assert!(jet::eq_32(lending_input_index, 0));
+
+    let total_amount_to_repay: u64 = get_total_amount_to_repay();
+    let current_script_hash: u256 = get_script_hash_for_storage(false, total_amount_to_repay);
+    let active_offer_script_hash: u256 = get_script_hash_for_storage(true, total_amount_to_repay);
+
+    ensure_io_asset_and_amount_eq(
+        lending_input_index,
+        lending_output_index,
+        param::COLLATERAL_ASSET_ID,
+        param::COLLATERAL_AMOUNT
+    );
+    ensure_script_hash_transition(
+        lending_input_index,
+        lending_output_index,
+        current_script_hash,
+        active_offer_script_hash
+    );
+
+    ensure_io_asset_and_amount_eq(lender_nft_input_index, lender_nft_output_index, param::LENDER_NFT_ASSET_ID, 1);
+
+    ensure_output_asset_and_amount(principal_output_index, param::PRINCIPAL_ASSET_ID, param::PRINCIPAL_AMOUNT);
+    ensure_output_script_hash(principal_output_index, param::PRINCIPAL_OUTPUT_SCRIPT_HASH);
+}
+
+// Offer cancellation flow
+
+fn get_cancellation_lender_nft_indexes(start_input_index: u32, start_output_index: u32) -> (u32, u32) {
+    (safe_add_32(start_input_index, 1), start_output_index)
+}
+
+fn get_cancellation_borrower_nft_indexes(start_input_index: u32, start_output_index: u32) -> (u32, u32) {
+    (safe_add_32(start_input_index, 2), safe_add_32(start_output_index, 1))
+}
+
+fn cancel_offer() {
+    let lending_input_index: u32 = jet::current_index();
+    let (
+        lender_nft_input_index,
+        lender_nft_output_index
+    ): (u32, u32) = get_cancellation_lender_nft_indexes(lending_input_index, 0);
+    let (
+        borrower_nft_input_index,
+        borrower_nft_output_index
+    ): (u32, u32) = get_cancellation_borrower_nft_indexes(lending_input_index, 0);
+
+    assert!(jet::eq_32(lending_input_index, 0));
+
+    let current_script_hash: u256 = get_script_hash_for_storage(false, get_total_amount_to_repay());
+    ensure_input_script_hash(lending_input_index, current_script_hash);
+
+    ensure_input_asset_and_amount(lending_input_index, param::COLLATERAL_ASSET_ID, param::COLLATERAL_AMOUNT);
+
+    ensure_input_asset_and_amount_burn(
+        borrower_nft_input_index,
+        borrower_nft_output_index,
+        param::BORROWER_NFT_ASSET_ID,
+        1
+    );
+    ensure_input_asset_and_amount_burn(
+        lender_nft_input_index,
+        lender_nft_output_index,
+        param::LENDER_NFT_ASSET_ID,
+        1
+    );
+}
+
+// ============================================================================
+// Oracle liquidation
+//
+// Before the loan expires, the lender can liquidate at the current price, through a
+// challenge window:
+//
+//   start   the lender presents a certified oracle statement at which the collateral is
+//           worth less than the debt allows (LIQUIDATION_LTV_BPS), and the loan moves to
+//           the pending state, recording the statement's timestamp and price
+//   cancel  anyone presents a newer certified statement at which it isn't, and the loan
+//           goes back to active
+//   finish  after WINDOW_BLOCKS, the lender burns the lender NFT and takes the
+//           collateral, as on expiry
+//   repay   the borrower can still repay in full while it is pending
+//
+// The statement, certificate and lock-time checks are oracle_demo's (oracle_mint.simf),
+// copied because this wallet compiles each program from a single file.
+// ============================================================================
+
+// Boolean helpers (from simplicityhl-std, lib/binary.simf)
+
+fn not(bit: bool) -> bool {
+    <u1>::into(jet::complement_1(<bool>::into(bit)))
+}
+
+fn or(a: bool, b: bool) -> bool {
+    <u1>::into(jet::or_1(<bool>::into(a), <bool>::into(b)))
+}
+
+fn and(a: bool, b: bool) -> bool {
+    <u1>::into(jet::and_1(<bool>::into(a), <bool>::into(b)))
+}
+
+// ECDSA (verbatim from lib/secp256k1/ecdsa.simf, a proposed addition to simplicityhl-std)
+
+/// Check that a signature component is a canonical scalar in `[1, n - 1]`.
+///
+/// The scalar jets reduce their inputs modulo `n`, so without this check `s + n` would
+/// verify wherever `s` does.
+fn is_signature_scalar(a: Scalar) -> bool {
+    and(jet::eq_256(jet::scalar_normalize(a), a), not(jet::scalar_is_zero(a)))
+}
+
+/// Decompress a public key, rejecting an x-coordinate that is not reduced modulo `p`.
+///
+/// `jet::decompress` reduces the x-coordinate itself, so without this check `x + p` would
+/// decode to the same key as `x`.
+fn decompress_public_key(pk: Point) -> Option<Ge> {
+    let (_, x): (u1, Fe) = pk;
+
+    match jet::eq_256(jet::fe_normalize(x), x) {
+        true => jet::decompress(pk),
+        false => None,
+    }
+}
+
+/// Check an ECDSA signature `(r, s)` over the message digest `msg` against the compressed
+/// public key `pk`, as in SEC 1 v2.0, section 4.1.4.
+///
+/// Like SEC 1, and unlike Bitcoin's low-S rule, this accepts both `(r, s)` and `(r, n - s)`.
+pub fn ecdsa_is_valid(pk: Point, msg: Message, sig: (Scalar, Scalar)) -> bool {
+    let (r, s): (Scalar, Scalar) = sig;
+
+    match decompress_public_key(pk) {
+        Some(q: Ge) => {
+            // The scalar jets reduce `msg` modulo `n`. If `s = 0` then `w = 0`, and the range
+            // check below rejects the signature.
+            let w: Scalar = jet::scalar_invert(s);
+            let u1: Scalar = jet::scalar_multiply(msg, w);
+            let u2: Scalar = jet::scalar_multiply(r, w);
+
+            // R = u1 * G + u2 * Q
+            let q: Gej = (q, 1);
+            let big_r: Gej = jet::linear_combination_1((u2, q), u1);
+
+            let r_matches: bool = match jet::gej_normalize(big_r) {
+                Some(big_r: Ge) => {
+                    let (x, _): (Fe, Fe) = big_r;
+                    // x < p < 2n, so reducing once gives x mod n.
+                    jet::eq_256(jet::scalar_normalize(x), r)
+                },
+                None => false,
+            };
+
+            and(and(is_signature_scalar(r), is_signature_scalar(s)), r_matches)
+        },
+        None => false,
+    }
+}
+
+/// Assert that `(r, s)` is a valid ECDSA signature over the message digest `msg` for the
+/// compressed public key `pk`.
+pub fn ecdsa_verify(pk: Point, msg: Message, sig: (Scalar, Scalar)) {
+    assert!(ecdsa_is_valid(pk, msg, sig));
+}
+
+fn safe_multiply_64(first: u64, second: u64) -> u64 {
+    let (hi, lo): (u64, u64) = <u128>::into(jet::multiply_64(first, second));
+    check_asset_amounts_eq(hi, 0);
+    lo
+}
+
+// Oracle statements
+
+/// COLD_PUBKEY's word that an oracle key may sign statements timestamped from
+/// `valid_from` to `valid_until`, inclusive: the key as its compressed prefix byte and
+/// x-coordinate, the range, and the BIP340 signature.
+type Certificate = ((u8, u256), u64, u64, Signature);
+
+/// A canonical string's variable fields: the price's integer digits, its two fraction
+/// digits, sources, method, timestamp digits and nonce. Then the oracle's signature
+/// `(r, s)`, and the certificate for its key.
+type Statement = (
+    List<u8, 16>,
+    (u8, u8),
+    List<u8, 128>,
+    List<u8, 16>,
+    List<u8, 16>,
+    List<u8, 32>,
+    (Scalar, Scalar),
+    Certificate
+);
+
+/// Check COLD_PUBKEY signed `cert`, and return the oracle key and the range it covers.
+///
+/// The signed message is `tagged_hash("oracle-demo/oracle-cert/v1", key || from || until)`
+/// with the key in its 33-byte compressed form, so no other signature by the cold key can
+/// pass for a certificate.
+fn verify_certificate(cert: Certificate) -> (Point, u64, u64) {
+    let (key, valid_from, valid_until, sig): Certificate = cert;
+    let (prefix, x): (u8, u256) = key;
+    assert!(or(jet::eq_8(prefix, 2), jet::eq_8(prefix, 3)));
+
+    // sha256("oracle-demo/oracle-cert/v1")
+    let tag: u256 = 0x026a11d3eb897194ef8efa87e6d28690e25bee5a89ee37142b5ba3816dcc4b89;
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, tag);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, tag);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, prefix);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, x);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, valid_from);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_8(ctx, valid_until);
+    jet::bip_0340_verify((param::COLD_PUBKEY, jet::sha_256_ctx_8_finalize(ctx)), sig);
+
+    ((<bool>::into(jet::eq_8(prefix, 3)), x), valid_from, valid_until)
+}
+
+/// Hash one decimal digit and fold it into the number read so far.
+fn digit_step(byte: u8, acc: (Ctx8, u64)) -> (Ctx8, u64) {
+    let (ctx, value): (Ctx8, u64) = acc;
+    assert!(jet::le_8(48, byte));
+    assert!(jet::le_8(byte, 57));
+    let (_, digit): (bool, u8) = jet::subtract_8(byte, 48);
+    let value: u64 = safe_add_64(safe_multiply_64(value, 10), jet::left_pad_low_8_64(digit));
+    (jet::sha_256_ctx_8_add_1(ctx, byte), value)
+}
+
+/// Hash one byte of a text field, which may be anything but the '|' separator.
+fn text_step(byte: u8, ctx: Ctx8) -> Ctx8 {
+    assert!(not(jet::eq_8(byte, 124)));
+    jet::sha_256_ctx_8_add_1(ctx, byte)
+}
+
+fn add_separator(ctx: Ctx8) -> Ctx8 {
+    jet::sha_256_ctx_8_add_1(ctx, 124)
+}
+
+/// Rebuild a statement's canonical string, check a certified oracle signed it within its
+/// certificate's range, and return its price in US cents and its timestamp.
+fn verify_statement(statement: Statement) -> (u64, u64) {
+    let (price_int, price_frac, sources, method, timestamp, nonce, sig, cert): Statement =
+        statement;
+    let ctx: Ctx8 = jet::sha_256_ctx_8_init();
+    // "v1|PRICE|BTCUSD|"
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_16(ctx, 0x76317c50524943457c4254435553447c);
+    let (ctx, price): (Ctx8, u64) = fold::<digit_step, 16>(price_int, (ctx, 0));
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, 46); // "."
+    let (frac_tens, frac_units): (u8, u8) = price_frac;
+    let (ctx, price): (Ctx8, u64) = digit_step(frac_units, digit_step(frac_tens, (ctx, price)));
+    // "|USD|2|"
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_4(ctx, 0x7c555344);
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_2(ctx, 0x7c32);
+    let ctx: Ctx8 = add_separator(ctx);
+    let ctx: Ctx8 = fold::<text_step, 128>(sources, ctx);
+    let ctx: Ctx8 = add_separator(ctx);
+    let ctx: Ctx8 = fold::<text_step, 16>(method, ctx);
+    let ctx: Ctx8 = add_separator(ctx);
+    let (ctx, timestamp): (Ctx8, u64) = fold::<digit_step, 16>(timestamp, (ctx, 0));
+    let ctx: Ctx8 = add_separator(ctx);
+    let ctx: Ctx8 = fold::<text_step, 32>(nonce, ctx);
+
+    let (oracle_key, valid_from, valid_until): (Point, u64, u64) = verify_certificate(cert);
+    assert!(jet::le_64(valid_from, timestamp));
+    assert!(jet::le_64(timestamp, valid_until));
+    ecdsa_verify(oracle_key, jet::sha_256_ctx_8_finalize(ctx), sig);
+    (price, timestamp)
+}
+
+/// Assert that `timestamp` is less than MAX_FUTURE_SECONDS past the chain's median time.
+///
+/// A program can't read the time, but a transaction whose lock time is a time can only be
+/// mined once the chain's median time past is beyond it. Demanding a lock time of at least
+/// `timestamp - MAX_FUTURE_SECONDS` therefore bounds how far ahead of the chain a request's
+/// statement can be dated. Without it, a leaked oracle key could date a request past every
+/// honest statement, and nobody could challenge it until real time caught up.
+fn ensure_not_from_the_future(timestamp: u64) {
+    let (high, timestamp): (u32, u32) = <u64>::into(timestamp);
+    assert!(jet::is_zero_32(high));
+    let (borrow, earliest): (bool, u32) = jet::subtract_32(timestamp, param::MAX_FUTURE_SECONDS);
+    assert!(not(borrow));
+    jet::check_lock_time(earliest);
+}
+
+/// Assert that WINDOW_BLOCKS have passed since this input, the pending liquidation, was
+/// confirmed.
+///
+/// This reads the input's own nSequence, which BIP68 enforces input by input. It avoids
+/// `check_lock_distance`, which reads the largest lock across all inputs, so another
+/// input's lock would satisfy it.
+fn ensure_window_elapsed() {
+    assert!(jet::le_32(2, jet::version()));
+    let (flags, blocks): (u16, u16) = <u32>::into(jet::current_sequence());
+    // Bit 31 disables the lock; bit 22 would count it in 512-second units, not blocks.
+    assert!(jet::is_zero_16(jet::and_16(flags, 0x8040)));
+    assert!(jet::le_16(param::WINDOW_BLOCKS, blocks));
+}
+
+// Liquidation state
+
+/// A pending liquidation's claim: the statement's timestamp and its price in US cents.
+type Claim = (u64, u64);
+
+/// Storage slot 0 for a pending liquidation: `claim_timestamp || claim_price || 0 || 2`.
+/// The offer and active states are 0 and 1 in the low 8 bytes, as in lending_v3.
+fn get_liquidation_slot_leaf(claim: Claim) -> u256 {
+    let (claim_timestamp, claim_price): Claim = claim;
+    let state: u256 = <(u128, u128)>::into((
+        <(u64, u64)>::into((claim_timestamp, claim_price)),
+        <(u64, u64)>::into((0, 2))
+    ));
+
+    let state_ctx1: Ctx8 = jet::tapdata_init();
+    let state_ctx2: Ctx8 = jet::sha_256_ctx_8_add_32(state_ctx1, state);
+
+    jet::sha_256_ctx_8_finalize(state_ctx2)
+}
+
+fn get_script_hash_for_liquidation(claim: Claim, borrower_debt: u64) -> u256 {
+    get_script_hash_for_state_slot(get_liquidation_slot_leaf(claim), borrower_debt)
+}
+
+/// Whether the loan may be liquidated at `price_cents`: whether the debt is more than
+/// LIQUIDATION_LTV_BPS of the collateral's value.
+///
+/// The collateral is valued in principal base units as `COLLATERAL_AMOUNT * price / 100`,
+/// which assumes satoshis of collateral against a dollar asset with 8 decimal places, as
+/// L-BTC against tUSDT.
+fn is_liquidatable(borrower_debt: u64, price_cents: u64) -> bool {
+    let collateral_value: u64 = jet::divide_64(safe_multiply_64(param::COLLATERAL_AMOUNT, price_cents), 100);
+    jet::lt_64(
+        safe_multiply_64(collateral_value, param::LIQUIDATION_LTV_BPS),
+        safe_multiply_64(borrower_debt, get_max_basis_points())
+    )
+}
+
+// Liquidation paths
+
+/// Start: spend the active loan (input 0) with the lender NFT (input 1, kept at output 1),
+/// and move it to the pending state (output 0).
+fn start_liquidation(current_debt: u64, statement: Statement) {
+    assert!(jet::eq_32(jet::current_index(), 0));
+    ensure_input_script_hash(0, get_script_hash_for_storage(true, current_debt));
+    ensure_input_asset_and_amount(0, param::COLLATERAL_ASSET_ID, param::COLLATERAL_AMOUNT);
+    ensure_io_asset_and_amount_eq(1, 1, param::LENDER_NFT_ASSET_ID, 1);
+
+    let (price, timestamp): (u64, u64) = verify_statement(statement);
+    ensure_not_from_the_future(timestamp);
+    assert!(is_liquidatable(current_debt, price));
+
+    ensure_output_script_hash(0, get_script_hash_for_liquidation((timestamp, price), current_debt));
+    ensure_output_asset_and_amount(0, param::COLLATERAL_ASSET_ID, param::COLLATERAL_AMOUNT);
+}
+
+/// Cancel: with a statement newer than the claim at which the loan isn't liquidatable,
+/// move the pending loan (input 0) back to active (output 0). Anyone may.
+fn cancel_liquidation(current_debt: u64, claim: Claim, statement: Statement) {
+    assert!(jet::eq_32(jet::current_index(), 0));
+    ensure_input_script_hash(0, get_script_hash_for_liquidation(claim, current_debt));
+    ensure_input_asset_and_amount(0, param::COLLATERAL_ASSET_ID, param::COLLATERAL_AMOUNT);
+
+    let (claim_timestamp, _): Claim = claim;
+    let (price, timestamp): (u64, u64) = verify_statement(statement);
+    assert!(jet::lt_64(claim_timestamp, timestamp));
+    assert!(not(is_liquidatable(current_debt, price)));
+
+    ensure_output_script_hash(0, get_script_hash_for_storage(true, current_debt));
+    ensure_output_asset_and_amount(0, param::COLLATERAL_ASSET_ID, param::COLLATERAL_AMOUNT);
+}
+
+/// Finish: after the window, burn the lender NFT (input 1, to output 0) and release the
+/// collateral of the pending loan (input 0), as on expiry.
+///
+/// Nothing stops a cancel after the window: a program can't require that a height has
+/// *not* been reached. A pending liquidation stays open to cancel until it is finished.
+fn finish_liquidation(current_debt: u64, claim: Claim) {
+    assert!(jet::eq_32(jet::current_index(), 0));
+    ensure_input_script_hash(0, get_script_hash_for_liquidation(claim, current_debt));
+    ensure_window_elapsed();
+    ensure_input_asset_and_amount(0, param::COLLATERAL_ASSET_ID, param::COLLATERAL_AMOUNT);
+    ensure_input_asset_and_amount_burn(1, 0, param::LENDER_NFT_ASSET_ID, 1);
+}
+
+/// One step of an oracle liquidation: start with the debt; cancel, finish or repay with
+/// the debt and the pending claim.
+type LiquidationStep = Either<Either<u64, (u64, Claim)>, Either<(u64, Claim), (u64, Claim)>>;
+
+fn liquidation_path(step: LiquidationStep, statement: Statement) {
+    match step {
+        Left(open_or_cancel: Either<u64, (u64, Claim)>) => match open_or_cancel {
+            Left(current_debt: u64) => start_liquidation(current_debt, statement),
+            Right(pending: (u64, Claim)) => {
+                let (current_debt, claim): (u64, Claim) = pending;
+                cancel_liquidation(current_debt, claim, statement)
+            },
+        },
+        Right(finish_or_repay: Either<(u64, Claim), (u64, Claim)>) => match finish_or_repay {
+            Left(pending: (u64, Claim)) => {
+                let (current_debt, claim): (u64, Claim) = pending;
+                finish_liquidation(current_debt, claim)
+            },
+            Right(pending: (u64, Claim)) => {
+                let (current_debt, claim): (u64, Claim) = pending;
+                full_repay_from(get_script_hash_for_liquidation(claim, current_debt), current_debt)
+            },
+        },
+    }
+}
+
+/// One word of budget padding, which must be zero.
+fn padding_word(word: u256, acc: ()) -> () {
+    assert!(jet::eq_256(word, 0));
+    acc
+}
+
+/// The paths lending_v3 had.
+fn lending_path(path: Either<Either<(), ()>, Either<Either<(u64, u64), u64>, u64>>) {
+    match path {
+        Left(pending_offer_params: Either<(), ()>) => {
+            match pending_offer_params {
+                Left(params: ()) => {
+                    accept_offer();
+                },
+                Right(params: ()) => {
+                    cancel_offer();
+                },
+            }
+        },
+        Right(active_offer_params: Either<Either<(u64, u64), u64>, u64>) => {
+            match active_offer_params {
+                Left(repayment_params: Either<(u64, u64), u64>) => {
+                    match repayment_params {
+                        Left(partial_repayment_params: (u64, u64)) => {
+                            let (current_debt, amount_to_repay): (u64, u64) = partial_repayment_params;
+
+                            partial_repay_offer(current_debt, amount_to_repay);
+                        },
+                        Right(current_debt: u64) => {
+                            full_repay_offer(current_debt);
+                        },
+                    }
+                },
+                Right(current_debt: u64) => {
+                    liquidate_offer(current_debt);
+                }
+            }
+        },
+    }
+}
+
+fn main() {
+    // A program may not cost more than its witness's size buys, and checking a statement
+    // costs more than the statement's own bytes. Liquid does not relay the annex that
+    // would otherwise pad it, so the paths that check one are padded here with zero
+    // words. Other paths leave the list empty.
+    fold::<padding_word, 16>(witness::BUDGET_PAD, ());
+
+    let statement: Statement = (
+        witness::STATEMENT_PRICE_INT,
+        witness::STATEMENT_PRICE_FRAC,
+        witness::STATEMENT_SOURCES,
+        witness::STATEMENT_METHOD,
+        witness::STATEMENT_TIMESTAMP,
+        witness::STATEMENT_NONCE,
+        witness::STATEMENT_SIG,
+        (
+            witness::CERT_ORACLE_KEY,
+            witness::CERT_VALID_FROM,
+            witness::CERT_VALID_UNTIL,
+            witness::CERT_SIG
+        )
+    );
+
+    match witness::LIQUIDATION {
+        Some(step: LiquidationStep) => liquidation_path(step, statement),
+        None => lending_path(witness::PATH),
+    }
+}
