@@ -7,7 +7,7 @@ use tx_manifest_lib::covenant;
 fn reproduces_onchain_issuance_factory_covenant() {
     let d = std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../examples/lending_v3"
+        "/tests/fixtures/lending_v3"
     ));
     let mut p = HashMap::new();
     let mut h = HashMap::new();

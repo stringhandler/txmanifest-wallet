@@ -1328,13 +1328,14 @@ mod tests {
         assert!(msg.contains("has no confidential amounts"), "{msg}");
         // ...and all of it is clean on Elements, with no `requires` entries needed.
         let elements = Manifest::from_json_str(
-            &std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../examples/deadcat_v3/txmanifest.json"
-            ))
-            .expect("read deadcat_v3"),
+            r#"{ "manifest_version": "0.3.0", "protocol": "t", "chain": "liquid",
+                 "actions": { "A": { "inputs": [ { "id": "i0", "utxo_source": "wallet",
+                   "issuance": { "kind": "new", "asset_amount_sat": "1",
+                                 "inflation_amount_sat": "0" } } ],
+                   "outputs": [ { "id": "o0", "amount_sat": "1", "destination": "wallet",
+                                  "confidential": true } ] } } }"#,
         )
-        .expect("deadcat_v3 parses");
+        .expect("manifest should parse");
         assert!(
             elements.chain_mismatches().is_empty(),
             "{:?}",

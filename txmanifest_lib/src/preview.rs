@@ -726,10 +726,10 @@ mod tests {
         assert!(nft.symbol.contains('…'));
     }
 
-    /// Load CreateOffer from the real lending_v3 example and populate a context
+    /// Load CreateOffer from the lending_v3 fixture and populate a context
     /// with its instance values.
     fn create_offer_ctx() -> (Manifest, ExecutionContext) {
-        let src = include_str!("../../examples/lending_v3/txmanifest.json");
+        let src = include_str!("../tests/fixtures/lending_v3/txmanifest.json");
         let manifest: Manifest = Manifest::from_json_str(src).expect("parse example manifest");
         let mut ctx = ExecutionContext::new();
         for (k, v) in [
@@ -923,7 +923,7 @@ mod tests {
     #[test]
     fn wallet_nets_omit_round_trips_and_keep_real_movement() {
         use crate::context::ResolvedInput;
-        let src = include_str!("../../examples/lending_v3/txmanifest.json");
+        let src = include_str!("../tests/fixtures/lending_v3/txmanifest.json");
         let manifest: Manifest = Manifest::from_json_str(src).unwrap();
         let mut ctx = ExecutionContext::new();
         for (k, v) in [

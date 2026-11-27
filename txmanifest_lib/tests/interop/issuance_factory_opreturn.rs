@@ -21,7 +21,7 @@ fn program_id(simf_path: &std::path::Path) -> String {
 fn reproduces_factory_creation_opreturn() {
     let d = std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../examples/lending_v3"
+        "/tests/fixtures/lending_v3"
     ));
     let factory_program_id = program_id(&d.join("issuance_factory.simf"));
     assert_eq!(factory_program_id, "dd1e7f89",

@@ -25,7 +25,7 @@ fn reproduces_onchain_lending_collateral_covenant() {
     let net = ElementsNetwork::LiquidTestnet;
     let d = std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../examples/lending_v3"
+        "/tests/fixtures/lending_v3"
     ));
     let sh = |simf: &str, p: &HashMap<String, String>, h: &HashMap<String, String>| -> String {
         hx(&covenant::compute_covenant_script_hash(
